@@ -39,7 +39,18 @@
   // ---- 输入框（input box）边框 + 终端内状态栏（状态栏画在终端流内、紧跟输入框下方）----
   // 输入框：上下两条全宽横线（无左右竖线），追加式输入（光标自然跟随，IME 正常）
   // 状态栏：随输入框流动的一行；刷新时重绘该行并把光标送回输入框（回答输出期间不重绘）
-  function hline() { return '\x1b[90m' + '─'.repeat(term.cols) + '\x1b[0m'; }
+  // 列宽用容器实测（term.cols 是 fit 估算值，实测偏大 2 列会导致全宽横线 wrap 错位）
+  function trueCols() {
+    try {
+      const cw = term._core.dimensions.css.cell.width; // xterm 内部 cell 宽（像素）
+      if (cw && cw > 0) {
+        const w = document.querySelector('.xterm-rows').clientWidth;
+        return Math.max(20, Math.floor(w / cw));
+      }
+    } catch (e) { /* fallthrough */ }
+    return term.cols - 2; // 兜底：留 2 列余量防 wrap
+  }
+  function hline() { return '\x1b[90m' + '─'.repeat(trueCols()) + '\x1b[0m'; }
 
   // 精简 CJK 列宽（状态行截断 / 输入超长保护用）
   function dispW(s) {
@@ -65,23 +76,27 @@
   let statusLine = '';   // 状态栏最新文本（可含 ANSI）
   let atPrompt = false;  // 光标是否停在输入框（决定状态栏能否原地重绘）
 
-  // 重绘状态行（要求光标在输入框）：下移一行 → 清行重写 → 回输入框重画
+  // 重绘状态行（要求光标在输入框）：下移两行（越过下边框）到状态行，重绘后回输入框
   function drawStatusRow() {
     if (!atPrompt || !statusLine) return;
-    if (term.buffer.active.cursorY + 1 >= term.rows) return; // 状态行在可视区外，等 showPrompt 重画
-    term.write('\x1b[1B\x1b[2K\r' + statusLine + '\x1b[1A\x1b[2K\r' + PROMPT + line);
+    if (term.buffer.active.cursorY + 2 >= term.rows) return; // 状态行在可视区外，等 showPrompt 重画
+    term.write('\x1b[2B\x1b[2K\r' + statusLine + '\x1b[2A\x1b[2K\r' + PROMPT + line);
   }
+  // 输入框（输入中）：上边框 + 输入行 + 下边框 + 状态行；光标回输入行
   function showPrompt() {
-    term.write(hline() + '\r\n' + PROMPT + line);
-    if (statusLine) {
-      term.write('\r\n' + statusLine);                 // 状态行（光标到其末尾）
-      term.write('\x1b[1A\x1b[2K\r' + PROMPT + line);  // 光标回输入行（\r 回行首，列位安全）
-    }
+    term.write(hline() + '\r\n' + PROMPT + line + '\r\n' + hline() + '\r\n' + (statusLine || ''));
+    term.write('\x1b[2A\x1b[2K\r' + PROMPT + line); // 光标回输入行重画（\r 回行首，列位安全）
     atPrompt = true;
   }
-  function closeBox() {
-    term.write('\r\n' + hline() + '\r\n');
+  // 回车提交：输入框边框与状态行移除、输入行变整行背景色块（已提交消息），回答从下方开始
+  function submitMsg() {
     atPrompt = false;
+    const bg = '\x1b[48;2;49;50;68m'; // #313244 深蓝灰背景（提交消息块）
+    term.write('\x1b[1A\x1b[2K\r');                              // 清上边框
+    term.write('\x1b[1B\x1b[2K\r' + bg + ' '.repeat(trueCols()) + '\r' + PROMPT + line + '\x1b[0m'); // 整行背景块
+    term.write('\x1b[1B\x1b[2K\r');                              // 清下边框
+    term.write('\x1b[1B\x1b[2K\r');                              // 清状态行
+    term.write('\r\n');                                          // 回答从下一行开始
   }
 
   // ---- 启动欢迎 banner + 状态信息（异步汇总；bannerDone 保证状态行先于输入框打印）----
@@ -131,7 +146,7 @@
         '\x1b[' + (ok ? '32' : '31') + 'm●\x1b[0m ' + (ok ? '服务运行中' : '服务异常') +
         '\x1b[90m · 模型 ' + model + ' · KB ' + kb + ' · 待审 ' + pend +
         ' · 任务 ' + todo + ' · 图谱 ' + gs + '\x1b[0m',
-        term.cols - 1);
+        trueCols() - 1);
       drawStatusRow();
     }).catch(() => {});
   }
@@ -161,7 +176,7 @@
     const code = data.charCodeAt(0);
     if (data === '\r') {
       const cmd = line.trim();
-      closeBox(); // 输入框下边框
+      submitMsg(); // 回车提交：边框移除 + 整行背景色块
       line = '';
       if (cmd) {
         run(cmd)
@@ -181,7 +196,7 @@
       }
     } else if (code >= 32) {
       // 超长保护：输入框 wrap 会让下方状态行错位，接近行宽时静默忽略新字符
-      if (dispW(visOnly(PROMPT + line + data)) >= term.cols - 2) return;
+      if (dispW(visOnly(PROMPT + line + data)) >= trueCols() - 2) return;
       line += data;
       term.write(data); // 追加式：光标自然跟随内容
     }
