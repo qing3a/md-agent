@@ -1404,15 +1404,19 @@
   const viewPanes = document.getElementById('view-panes');
 
   // 注入视图的桥脚本：window.hostApi(path, opts) → postMessage 给宿主 → 宿主调 /api/* 后回传；
-  // 焦点在 sandbox iframe 内时 Esc 不冒泡出 frame，iframe 内监听并转发给宿主
+  // 焦点在 sandbox iframe 内时 Esc 不冒泡出 frame，iframe 内监听并转发给宿主；
+  // hostApi 带 20s 超时；视图脚本错误/未处理拒绝上报宿主（避免沙箱内静默崩溃）
   const BRIDGE = '<script>' +
     'window.hostApi=function(path,opts){return new Promise(function(res,rej){' +
     'var id=Math.random().toString(36).slice(2);' +
-    'function h(ev){if(ev.data&&ev.data.id===id){window.removeEventListener("message",h);ev.data.ok?res(ev.data.data):rej(new Error(ev.data.error||"host error"));}}' +
+    'var timer=setTimeout(function(){window.removeEventListener("message",h);rej(new Error("桥请求超时: "+path));},20000);' +
+    'function h(ev){if(ev.data&&ev.data.id===id){clearTimeout(timer);window.removeEventListener("message",h);ev.data.ok?res(ev.data.data):rej(new Error(ev.data.error||"host error"));}}' +
     'window.addEventListener("message",h);' +
     'window.parent.postMessage({type:"api",id:id,method:(opts&&opts.method)||"GET",path:path,body:opts&&opts.body},"*");' +
     '});};' +
     'window.addEventListener("keydown",function(e){if(e.key==="Escape"){window.parent.postMessage({type:"escape"},"*");}});' +
+    'window.addEventListener("error",function(e){window.parent.postMessage({type:"view-error",msg:(e&&e.message)||"视图脚本错误"},"*");});' +
+    'window.addEventListener("unhandledrejection",function(e){var r=e&&e.reason;window.parent.postMessage({type:"view-error",msg:(r&&r.message)||String(r)},"*");});' +
     '<\/script>';
 
   // 视图标签页（多开并存）：每 tab = 标题 + iframe；激活显示，可单个/全部关闭
@@ -1468,7 +1472,12 @@
     tabEl.appendChild(x);
     tabEl.addEventListener('click', () => activateView(id));
     x.addEventListener('click', (e) => { e.stopPropagation(); closeView(id); });
-    const tab = { id, title, iframe, tabEl };
+    const tab = { id, title, iframe, tabEl, loaded: false, busy: false, err: null };
+    // 加载状态跟踪：iframe load 确认加载完成；10s 未加载且无桥请求 → 标黄提示（后台节流加载慢可见）
+    iframe.addEventListener('load', () => { tab.loaded = true; tabEl.classList.remove('warn'); });
+    setTimeout(() => {
+      if (!tab.loaded && !tab.busy && tabEl.isConnected) tabEl.classList.add('warn');
+    }, 10000);
     viewTabsList.push(tab);
     viewTabs.appendChild(tabEl);
     viewPanes.appendChild(iframe);
@@ -1481,14 +1490,25 @@
     if (ev.key === 'Escape' && !viewOverlay.classList.contains('hidden')) closeView(activeViewId);
   });
 
-  // postMessage 桥：任一 tab 的 iframe 视图 → 宿主 API（只允许 /api/ 前缀）；escape 事件关闭对应视图
+  // postMessage 桥：任一 tab 的 iframe 视图 → 宿主 API（只允许 /api/ 前缀）；escape 关视图；view-error 标红
   window.addEventListener('message', async (ev) => {
     const tab = viewTabsList.find((t) => t.iframe.contentWindow === ev.source);
     if (!tab) return;
     const msg = ev.data;
     if (!msg) return;
     if (msg.type === 'escape') { closeView(tab.id); return; }
+    if (msg.type === 'view-error') {
+      // 视图脚本错误/未处理拒绝：首次写终端 + tab 标红（让沙箱内崩溃可见）
+      if (!tab.err) {
+        tab.err = msg.msg;
+        term.writeln('\x1b[31m视图 [' + tab.title + '] 脚本错误: ' + (msg.msg || '') + '\x1b[0m');
+      }
+      tab.tabEl.classList.add('err');
+      return;
+    }
     if (msg.type !== 'api') return;
+    tab.busy = true;               // 收到桥请求 → 视图活跃，清除加载慢标记
+    tab.tabEl.classList.remove('warn');
     if (!msg.path || !msg.path.startsWith('/api/')) {
       tab.iframe.contentWindow.postMessage({ id: msg.id, ok: false, error: '仅允许 /api/ 接口' }, '*');
       return;

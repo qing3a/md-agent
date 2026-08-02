@@ -60,6 +60,8 @@
     display: flex; gap: 5px; align-items: center; white-space: nowrap;
   }
   .view-tab.active { background: #45475a; color: #f5e0dc; }
+  .view-tab.warn { color: #f9e2af; }  /* 加载慢（后台节流 10s 未就绪） */
+  .view-tab.err { color: #f38ba8; }   /* 视图脚本错误（已上报宿主） */
   .view-tab-x { color: #a6adc8; font-weight: 700; padding: 0 2px; border-radius: 3px; }
   .view-tab-x:hover { color: #f38ba8; background: #181825; }
   #view-panes { flex: 1; position: relative; min-height: 0; }
