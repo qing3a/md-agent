@@ -4,7 +4,7 @@
 (function () {
   if (typeof Terminal === 'undefined') {
     document.body.innerHTML =
-      '<pre style="color:#f38ba8;padding:16px">xterm.js 未加载（需联网访问 CDN）。请检查网络后刷新。</pre>';
+      '<pre style="color:#f38ba8;padding:16px">xterm.js 未加载（vendor/xterm.min.js 缺失或损坏）。请确认 web/vendor/ 完整后刷新。</pre>';
     return;
   }
   const term = new Terminal({
