@@ -36,9 +36,9 @@
     try { localStorage.setItem('md-agent-history', JSON.stringify(history.slice(-MAX_HISTORY))); } catch (e) { /* 忽略 */ }
   }
 
-  // ---- 输入行边框 + 终端内状态栏（状态栏画在终端流内、紧跟输入行下方）----
-  // 输入行：上下两条全宽横线（无左右竖线），追加式输入（光标自然跟随，IME 正常）
-  // 状态栏：随输入行流动的一行；刷新时重绘该行并把光标送回输入行（回答输出期间不重绘）
+  // ---- 输入框（input box）边框 + 终端内状态栏（状态栏画在终端流内、紧跟输入框下方）----
+  // 输入框：上下两条全宽横线（无左右竖线），追加式输入（光标自然跟随，IME 正常）
+  // 状态栏：随输入框流动的一行；刷新时重绘该行并把光标送回输入框（回答输出期间不重绘）
   function hline() { return '\x1b[90m' + '─'.repeat(term.cols) + '\x1b[0m'; }
 
   // 精简 CJK 列宽（状态行截断 / 输入超长保护用）
@@ -63,9 +63,9 @@
   }
 
   let statusLine = '';   // 状态栏最新文本（可含 ANSI）
-  let atPrompt = false;  // 光标是否停在输入行（决定状态栏能否原地重绘）
+  let atPrompt = false;  // 光标是否停在输入框（决定状态栏能否原地重绘）
 
-  // 重绘状态行（要求光标在输入行）：下移一行 → 清行重写 → 回输入行重画
+  // 重绘状态行（要求光标在输入框）：下移一行 → 清行重写 → 回输入框重画
   function drawStatusRow() {
     if (!atPrompt || !statusLine) return;
     if (term.buffer.active.cursorY + 1 >= term.rows) return; // 状态行在可视区外，等 showPrompt 重画
@@ -112,7 +112,7 @@
   }
   printBanner();
 
-  // ---- 终端内状态栏（在输入行下方；每轮命令后刷新 + 8s 轮询）----
+  // ---- 终端内状态栏（在输入框下方；每轮命令后刷新 + 8s 轮询）----
   function refreshStatus() {
     Promise.all([
       fetch('/api/health').then((r) => r.json()).catch(() => null),
@@ -180,7 +180,7 @@
         term.write('\x1b[2K\r' + PROMPT + line);
       }
     } else if (code >= 32) {
-      // 超长保护：输入行 wrap 会让下方状态行错位，接近行宽时静默忽略新字符
+      // 超长保护：输入框 wrap 会让下方状态行错位，接近行宽时静默忽略新字符
       if (dispW(visOnly(PROMPT + line + data)) >= term.cols - 2) return;
       line += data;
       term.write(data); // 追加式：光标自然跟随内容
