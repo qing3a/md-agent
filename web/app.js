@@ -97,12 +97,31 @@
     term.write('\r\n');
   }
   // 流内重绘输入行（退格/历史/补全用）
-  function redrawInput() { term.write('\x1b[2K\r' + PROMPT + line); }
+  function redrawInput() { term.write('\x1b[2K\r' + PROMPT + line); saveDraft(); }
+  // 输入草稿：未提交输入防抖存 localStorage，刷新恢复（saveDraft 由 redrawInput/追加式输入触发）
+  let draftTimer = null;
+  function saveDraft() {
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(() => { try { localStorage.setItem('md-agent-draft', line); } catch (e) { /* 忽略 */ } }, 500);
+  }
+  function clearDraft() {
+    clearTimeout(draftTimer);
+    try { localStorage.removeItem('md-agent-draft'); } catch (e) { /* 忽略 */ }
+  }
   const quickBtns = [...document.querySelectorAll('#quick-btns button')];
 
   let busy = false;          // 命令/回答进行中（提交/按钮禁用，输入框仍可编辑）
-  let cmdHistory = [];       // 命令行历史（会话内；区别于多轮对话 history）
+  let cmdHistory = loadCmdHistory(); // 命令行历史（localStorage 持久化；区别于多轮对话 history）
   let histIdx = -1;
+  function loadCmdHistory() {
+    try {
+      const h = JSON.parse(localStorage.getItem('md-agent-cmd-history') || '[]');
+      return Array.isArray(h) ? h.slice(-100) : [];
+    } catch (e) { return []; }
+  }
+  function saveCmdHistory() {
+    try { localStorage.setItem('md-agent-cmd-history', JSON.stringify(cmdHistory.slice(-100))); } catch (e) { /* 忽略 */ }
+  }
   let currentAbort = null;   // 当前 LLM 流的 AbortController（Ctrl+C / Esc 中断回答）
 
   // 终端实测列宽（消息块铺背景用；term.cols 是 fit 估算值，实测偏大 2 列）
@@ -126,6 +145,7 @@
     line = t;
     submitMsg();      // 流内提交块（边框移除 + 背景色 + 清状态行）
     line = '';
+    clearDraft();     // 已提交，清草稿
     pushHistory(t);
     busy = true;
     setBusyUI();
@@ -155,7 +175,8 @@
     }
     if (k === 'Tab') {
       ev.preventDefault();
-      completeCmd();
+      if (/^\/[^\s]*$/.test(line)) completeCmd(); // 命令补全（/ 开头）
+      else completeAt();                          // @ 文件提及（行尾 @ 触发）
       return false;
     }
     if (k === 'c' && ev.ctrlKey && currentAbort) {
@@ -180,6 +201,7 @@
     if (cmdHistory[cmdHistory.length - 1] === t) return;
     cmdHistory.push(t);
     if (cmdHistory.length > 100) cmdHistory.shift();
+    saveCmdHistory();
     histIdx = -1;
   }
   function navHistory(dir) {
@@ -219,6 +241,29 @@
     if (!list.length) return;
     acIdx = (acIdx + 1) % list.length;
     line = list[acIdx];
+    redrawInput();
+  }
+
+  // ---------- @ 文件提及（Tab 循环；行尾 @ 触发，候选 = KB 文档路径，提交时注入检索目标） ----------
+  let atDocs = null;  // @ 补全候选（/api/graph/graph nodes 路径，惰性加载会话内缓存）
+  let atIdx = -1;
+  async function loadAtDocs() {
+    if (atDocs) return atDocs;
+    try {
+      const g = await api('/api/graph/graph');
+      atDocs = (g.nodes || []).map((n) => n.path);
+    } catch (e) { atDocs = []; }
+    return atDocs;
+  }
+  async function completeAt() {
+    const m = line.match(/@([^\s]*)$/);
+    if (!m) return;
+    const docs = await loadAtDocs();
+    const kw = m[1].toLowerCase();
+    const list = docs.filter((p) => p.toLowerCase().includes(kw));
+    if (!list.length) return;
+    atIdx = (atIdx + 1) % list.length;
+    line = line.slice(0, m.index) + '@' + list[atIdx];
     redrawInput();
   }
 
@@ -304,6 +349,11 @@
       term.writeln('\x1b[33mL1 加载失败: ' + e.message + '\x1b[0m');
     }
     await bannerDone;
+    // 恢复未提交草稿（刷新前未发送的输入）
+    try {
+      const d = localStorage.getItem('md-agent-draft');
+      if (d) line = d.slice(0, 200);
+    } catch (e) { /* 忽略 */ }
     showPrompt(); // 输入框（上边框/输入行/下边框/状态行）在内容末尾
   })();
 
@@ -348,6 +398,7 @@
       if (dispW(visOnly(PROMPT + line + data)) >= trueCols() - 2) return;
       line += data;
       term.write(data); // 追加式：光标自然跟随内容
+      saveDraft();
     }
   });
 
@@ -569,7 +620,27 @@
   async function ask(question) {
     term.writeln('\x1b[90m(Agent: 提取关键词 → 检索 L2 → 调用 LLM)\x1b[0m');
     const kws = extractKeywords(question);
-    const query = kws.length ? kws.join(' ') : question;
+
+    // 1a. @ 文件提及：@路径 直接注入检索目标（全文进上下文；失败仅提示不阻塞）
+    const atRefs = [...question.matchAll(/(?:^|\s)@([^\s]+)/g)]
+      .map((m) => m[1])
+      .filter((p) => p && !/^(\/|https?:)/.test(p));
+    const atFrag = [];
+    for (const p of atRefs) {
+      try {
+        const f = await api('/api/file?path=' + encodeURIComponent(p));
+        if (f && f.content) {
+          atFrag.push('[来源 @' + p + '（指定文档）]\n' + f.content.slice(0, 2000));
+          // 路径关键词并入检索 query（文件名去掉扩展名/目录）
+          const name = p.split('/').pop().replace(/\.md$/i, '').replace(/[-_]/g, ' ');
+          for (const w of extractKeywords(name)) kws.push(w);
+        }
+      } catch (e) {
+        term.writeln('\x1b[33m@ 文件未找到: ' + p + '\x1b[0m');
+      }
+    }
+
+    const query = kws.length ? [...new Set(kws)].join(' ') : question;
     term.writeln('\x1b[90m关键词: ' + (kws.length ? query : '(无，用原文)') + '\x1b[0m');
 
     // 1. 检索 L2（L1 已在 system 里，不重复检索）
@@ -581,18 +652,23 @@
       return;
     }
     const top = sr.hits.slice(0, 8);
-    if (!top.length) {
+    if (atFrag.length) {
+      term.writeln('\x1b[90m@ 指定文档 ' + atFrag.length + ' 篇已注入（' + atRefs.join(' ') + '）\x1b[0m');
+    }
+    if (!top.length && !atFrag.length) {
       term.writeln('\x1b[33m知识库无相关片段（仅靠 L1 规范与模型自身知识回答）\x1b[0m');
-    } else {
+    } else if (top.length) {
       term.writeln('\x1b[90m命中 ' + sr.file_count + ' 文件 / ' + sr.hit_count + ' 处，注入前 ' + top.length + ' 条\x1b[0m');
     }
 
     // 2. 组装 Prompt（system + 多轮历史 + 当前问题）
-    const frag = top
-      .map(
-        (h) =>
-          '[来源 ' + h.file + ':' + h.line + ' 小节:' + (h.section || '(frontmatter)') + ']\n' +
-          (h.context || h.text)
+    const frag = atFrag
+      .concat(
+        top.map(
+          (h) =>
+            '[来源 ' + h.file + ':' + h.line + ' 小节:' + (h.section || '(frontmatter)') + ']\n' +
+            (h.context || h.text)
+        )
       )
       .join('\n\n');
     const system = [
@@ -1324,8 +1400,8 @@
   // ---------- /view 面板渲染层（iframe 沙箱 + postMessage 桥） ----------
 
   const viewOverlay = document.getElementById('view-overlay');
-  const viewFrame = document.getElementById('view-frame');
-  const viewTitle = document.getElementById('view-title');
+  const viewTabs = document.getElementById('view-tabs');
+  const viewPanes = document.getElementById('view-panes');
 
   // 注入视图的桥脚本：window.hostApi(path, opts) → postMessage 给宿主 → 宿主调 /api/* 后回传；
   // 焦点在 sandbox iframe 内时 Esc 不冒泡出 frame，iframe 内监听并转发给宿主
@@ -1339,33 +1415,82 @@
     'window.addEventListener("keydown",function(e){if(e.key==="Escape"){window.parent.postMessage({type:"escape"},"*");}});' +
     '<\/script>';
 
-  function closeView() {
-    viewOverlay.classList.add('hidden');
-    viewFrame.srcdoc = '';
-  }
+  // 视图标签页（多开并存）：每 tab = 标题 + iframe；激活显示，可单个/全部关闭
+  let viewTabsList = []; // [{id, title, iframe, tabEl}]
+  let activeViewId = null;
 
-  function openView(title, html) {
-    viewTitle.textContent = title;
-    viewFrame.srcdoc = BRIDGE + html;
+  function activateView(id) {
+    activeViewId = id;
+    for (const t of viewTabsList) {
+      const on = t.id === id;
+      t.iframe.classList.toggle('active', on);
+      t.tabEl.classList.toggle('active', on);
+    }
     viewOverlay.classList.remove('hidden');
     // 焦点移出 xterm textarea：聚焦时 xterm 拦截 Esc（stopPropagation），父页监听收不到
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   }
 
-  document.getElementById('view-close').addEventListener('click', closeView);
+  function closeView(id) {
+    if (id) {
+      // 关闭单个 tab；激活相邻 tab（优先右侧，否则左侧），无则整体隐藏
+      const i = viewTabsList.findIndex((t) => t.id === id);
+      if (i === -1) return;
+      viewTabsList[i].iframe.remove();
+      viewTabsList[i].tabEl.remove();
+      viewTabsList.splice(i, 1);
+      if (activeViewId === id) {
+        if (viewTabsList.length) activateView(viewTabsList[Math.min(i, viewTabsList.length - 1)].id);
+        else { activeViewId = null; viewOverlay.classList.add('hidden'); }
+      }
+    } else {
+      // 关闭全部
+      for (const t of viewTabsList) { t.iframe.remove(); t.tabEl.remove(); }
+      viewTabsList = [];
+      activeViewId = null;
+      viewOverlay.classList.add('hidden');
+    }
+  }
+
+  function openView(title, html) {
+    const id = 'v' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+    const iframe = document.createElement('iframe');
+    iframe.sandbox = 'allow-scripts';
+    const tabEl = document.createElement('button');
+    tabEl.className = 'view-tab';
+    const label = document.createElement('span');
+    label.textContent = title;
+    const x = document.createElement('span');
+    x.textContent = '×';
+    x.className = 'view-tab-x';
+    x.title = '关闭';
+    tabEl.appendChild(label);
+    tabEl.appendChild(x);
+    tabEl.addEventListener('click', () => activateView(id));
+    x.addEventListener('click', (e) => { e.stopPropagation(); closeView(id); });
+    const tab = { id, title, iframe, tabEl };
+    viewTabsList.push(tab);
+    viewTabs.appendChild(tabEl);
+    viewPanes.appendChild(iframe);
+    iframe.srcdoc = BRIDGE + html;
+    activateView(id);
+  }
+
+  document.getElementById('view-close').addEventListener('click', () => closeView(activeViewId));
   window.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape' && !viewOverlay.classList.contains('hidden')) closeView();
+    if (ev.key === 'Escape' && !viewOverlay.classList.contains('hidden')) closeView(activeViewId);
   });
 
-  // postMessage 桥：iframe 视图 → 宿主 API（只允许 /api/ 前缀）；escape 事件关闭视图
+  // postMessage 桥：任一 tab 的 iframe 视图 → 宿主 API（只允许 /api/ 前缀）；escape 事件关闭对应视图
   window.addEventListener('message', async (ev) => {
-    if (ev.source !== viewFrame.contentWindow) return;
+    const tab = viewTabsList.find((t) => t.iframe.contentWindow === ev.source);
+    if (!tab) return;
     const msg = ev.data;
     if (!msg) return;
-    if (msg.type === 'escape') { closeView(); return; }
+    if (msg.type === 'escape') { closeView(tab.id); return; }
     if (msg.type !== 'api') return;
     if (!msg.path || !msg.path.startsWith('/api/')) {
-      viewFrame.contentWindow.postMessage({ id: msg.id, ok: false, error: '仅允许 /api/ 接口' }, '*');
+      tab.iframe.contentWindow.postMessage({ id: msg.id, ok: false, error: '仅允许 /api/ 接口' }, '*');
       return;
     }
     try {
@@ -1375,9 +1500,9 @@
         body: msg.body ? JSON.stringify(msg.body) : undefined,
       });
       const data = await res.json().catch(() => ({}));
-      viewFrame.contentWindow.postMessage({ id: msg.id, ok: res.ok, data }, '*');
+      tab.iframe.contentWindow.postMessage({ id: msg.id, ok: res.ok, data }, '*');
     } catch (e) {
-      viewFrame.contentWindow.postMessage({ id: msg.id, ok: false, error: String(e) }, '*');
+      tab.iframe.contentWindow.postMessage({ id: msg.id, ok: false, error: String(e) }, '*');
     }
   });
 

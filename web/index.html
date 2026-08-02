@@ -52,7 +52,19 @@
     padding: 4px 12px; font-size: 12px; cursor: pointer;
   }
   #view-overlay header button:hover { background: #45475a; }
-  #view-frame { flex: 1; border: none; width: 100%; }
+  /* /view 标签页：多视图并存（graph/board/pending/audit/html 可同时开、切换、关闭） */
+  #view-tabs { display: flex; gap: 4px; align-items: center; flex: 1; min-width: 0; overflow-x: auto; }
+  .view-tab {
+    background: #313244; color: #a6adc8; border: none; border-radius: 5px;
+    padding: 3px 8px 3px 10px; font-size: 12px; cursor: pointer;
+    display: flex; gap: 5px; align-items: center; white-space: nowrap;
+  }
+  .view-tab.active { background: #45475a; color: #f5e0dc; }
+  .view-tab-x { color: #a6adc8; font-weight: 700; padding: 0 2px; border-radius: 3px; }
+  .view-tab-x:hover { color: #f38ba8; background: #181825; }
+  #view-panes { flex: 1; position: relative; min-height: 0; }
+  #view-panes iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: none; display: none; }
+  #view-panes iframe.active { display: block; }
 </style>
 </head>
 <body>
@@ -72,13 +84,13 @@
   </div>
 </div>
 
-<!-- /view 渲染层：iframe 沙箱（sandbox=allow-scripts，跨源桥接走 postMessage） -->
+<!-- /view 渲染层：iframe 沙箱（sandbox=allow-scripts，跨源桥接走 postMessage）；多标签并存 -->
 <div id="view-overlay" class="hidden">
   <header>
-    <span id="view-title">视图</span>
-    <button id="view-close" title="关闭视图 (Esc)">× 关闭</button>
+    <div id="view-tabs"></div>
+    <button id="view-close" title="关闭当前视图 (Esc)">× 关闭</button>
   </header>
-  <iframe id="view-frame" sandbox="allow-scripts"></iframe>
+  <div id="view-panes"></div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
