@@ -12,7 +12,7 @@
 2. **不用向量，用显性人类知识结构做关联**：`[[双向链接]]` + Frontmatter 元数据 + 目录项目层级。关联可审计、可追溯。
 3. **双检索互补（不是碾压，是各管一段）**：
    - **ripgrep 全文检索** → 找片段、找关键词（已实现）
-   - **SQLite 结构化图谱检索** → 找关联、找脉络、找项目体系（路线图 Phase 2）
+   - **SQLite 结构化图谱检索** → 找关联、找脉络、找项目体系（已实现）
 
 ## 当前能力（Phase 1 / Phase 2 已完成 ✅）
 
@@ -20,9 +20,9 @@
 |---|---|
 | 双层知识库 | L1 规范/记忆/索引层（CLAUDE.md 模式，启动注入）+ L2 内容层（grep 检索）；`INDEX.md` 自动生成 |
 | 全文检索 | 内嵌 ripgrep 内核（grep + ignore crate），多关键词任一命中、智能大小写、小节上下文（`section`/`context`） |
-| **知识图谱** | SQLite `documents`/`links` 两表：`[[双向链接]]` 解析、反向链接、孤立文档检测、标签/项目维度统计；首次调用自动建库，`/rescan` 或托盘"同步索引"重建 |
+| **知识图谱** | SQLite `documents`/`links` 两表：`[[双向链接]]` 解析、反向链接、孤立文档检测、标签/项目维度统计；首次调用自动建库，`/rescan`、托盘「立即同步」或心跳自动重建 |
 | **伪命令行 Markdown 渲染** | 终端内 ANSI 富渲染（零依赖）：标题加粗、行内代码/加粗/链接/`[[双链]]` 着色、列表/引用/代码围栏；**表格按 markdown 行显示**（保留 `|` 结构，复制不失真）；frontmatter 变暗；流式回答按完整行渲染 |
-| **/view 面板渲染层** | iframe 沙箱 + postMessage 桥（视图经宿主调 `/api/*`，仅允许 api 前缀）：`/view graph` 内置知识图谱可视化（环形布局 SVG、按项目配色、孤立文档高亮）、`/view <html>` 渲染 kb 内本地 HTML、`/view off` 或 Esc 关闭 |
+| **/view 面板渲染层** | iframe 沙箱 + postMessage 桥（视图经宿主调 `/api/*`，仅允许 api 前缀，真机验证通过）：`/view graph` 内置知识图谱可视化（环形布局 SVG、按项目配色、孤立文档高亮）、`/view board` 任务看板、`/view <html>` 渲染 kb 内本地 HTML、`/view off` 或 Esc 关闭（焦点在 iframe 内时 Esc 经桥转发） |
 | **心跳自动同步（自组织自动发现）** | 默认关闭；开启后每 60s（可调）指纹比对知识库（路径+mtime+大小，排除 pending/），变化自动重建 INDEX+图谱并跑本地审计，状态栏提示「心跳开 + ⚠审计发现」；托盘勾选 / `/heartbeat` / 配置页三入口；`sync_lock` 与手动写端点防并发 |
 | **终端壳体验** | 启动欢迎横幅 + 状态汇总（版本/KB/图谱/模型/待审/进行中任务）；输入框状态机（输入中：上下边框+状态行；回车提交：边框移除、整行背景色消息块；回答后恢复新输入框）；终端内状态栏（● 服务状态/模型/KB/待审/任务/图谱，画在输入框下方，8s 轮询原地重绘）；列宽 DOM 实测防 wrap |
 | **记忆自组织（Phase 3-A 基础）** | `/audit` 本地规则健康审计（孤立/无出链/重复标题/悬空链接/提及未链接建议，零 LLM 快速确定）；`/link` 人工补链接（文件名双链、去重、自动重建图谱）；`/link-all` 一键应用建议；`/suggest` 补全缺失主题（带主题名）或**无参盲区模式**（先审计后让 LLM 分析知识盲区生成新文档，进待审）；`/diff`/`/conflicts` 行级对比与冲突检查 |
@@ -80,6 +80,7 @@ JSON
 - `endpoint`：Ollama 基址（`http://127.0.0.1:11434`）或 OpenAI 兼容基址（`https://api.deepseek.com/v1`），代理自动补 `/v1/chat/completions`
 - `api_key` 以掩码显示（`sk-****1249`）；POST 传 `****` 保留旧 key
 - 浏览器不直连 LLM，一律经 `/api/llm` 后端代理
+- config.json 另有 `heartbeat` 字段（`{enabled: false, interval_secs: 60}`），旧配置缺省自动兼容
 
 ### 终端命令
 
@@ -108,10 +109,13 @@ open <路径>           查看 KB 内 MD
 /suggest [主题]        LLM 补全缺失主题（无参 = 盲区分析模式，均进待审）
 /fetch <url> [标题]    静态抓取网页：阅读视图 / 带标题则沉淀为待审笔记
 /page <url> [标题]     动态网页读取（headless Edge/Chrome，等 JS 渲染）
-/task                  任务看板：new/start/done/drop/note/dep/rm/board
+/task                  任务看板：new/start/done/drop/note/dep/rm/plan/board
 /clear                清空多轮对话记忆
 /config               查看配置（掩码）
+/heartbeat [on|off|interval <秒>|status]  心跳自动同步开关/周期/状态（变化自动重建+审计提示）
+/health               服务健康检查
 ```
+`/page act <url> <json 动作数组>`：动态页**写侧**——click/fill/select/scroll，动作清单打印后 `y/N` 人工确认才执行（例：`/page act https://example.com [{"kind":"fill","selector":"#q","value":"hello"},{"kind":"click","selector":"#btn"}]`）。
 
 ### 打包发布
 
@@ -152,6 +156,7 @@ cp config.json dist/config.json   # 可选：携带已有 LLM 配置
 | POST | `/api/link` | 补链接（body: `{src, dst}`；文件名双链 + 去重 + 重建图谱） |
 | GET | `/api/fetch?url=` | 静态网页抓取（HTTP + HTML 文本提取，零浏览器依赖） |
 | GET | `/api/page?url=` | 动态网页读取（chromiumoxide + 系统 Edge/Chrome headless） |
+| POST | `/api/page/act` | 动作执行（body: `{url, actions: [{kind: click\|fill\|select\|scroll, selector, value?}]}`；前端人审确认后调用） |
 | GET | `/api/tasks` | 任务列表 + 看板统计（`kb/.tasks.db` 独立库） |
 | POST | `/api/tasks` | 新建任务（body: `{goal, title?}`） |
 | PATCH | `/api/tasks/{id}` | 任务更新（`{status?, note?, deps?}`，note 追加带时间戳日志） |
@@ -250,7 +255,8 @@ src/search.rs 检索（ignore 遍历 + grep crate，多关键词/智能大小写
 src/graph.rs  知识图谱（SQLite documents/links、[[链接]] 解析、反链/孤立/标签/项目查询）
 src/llm.rs    LLM 代理（非流式 JSON + 流式 SSE 透传）
 src/fetch.rs  /fetch 静态网页抓取（HTTP + HTML 文本提取）
-src/page.rs   /page 动态网页（chromiumoxide + 系统 Edge/Chrome headless CDP）
+src/page.rs   /page 动态网页 + /page act 动作执行（chromiumoxide + 系统 Edge/Chrome headless CDP）
+src/heartbeat.rs 心跳自动同步（指纹检测 / 状态结构）
 src/task.rs   任务引擎（kb/.tasks.db 独立库：状态机/依赖/日志）
 src/kb.rs     双层布局 / frontmatter 解析 / INDEX 自动生成 / 路径安全 / 待审机制
 src/config.rs 本地配置
