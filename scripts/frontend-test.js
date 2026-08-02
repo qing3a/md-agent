@@ -54,5 +54,11 @@ t('有技能尾部', Core.buildSkillTail('SK') === '相关技能（命中触发�
 const full = [Core.buildGuidePrefix({ guideText: 'G', memoryText: 'M', toolsTxt: 'T', today: 'x' }), Core.buildSkillTail('SK')].filter(Boolean).join('\n\n');
 t('技能在稳定前缀之后', full.indexOf('相关技能') > full.indexOf('回答规则'));
 
+console.log('== CE isOverflowError（fresh-window 降级触发） ==');
+t('maximum context 命中', Core.isOverflowError('This model\'s maximum context length is 128000 tokens'));
+t('token 超限命中', Core.isOverflowError('reduce the length of the messages or completion'));
+t('未配置不误判', !Core.isOverflowError('未配置 LLM'));
+t('404 不误判', !Core.isOverflowError('HTTP 404'));
+
 console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败');
 process.exit(fail ? 1 : 0);

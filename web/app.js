@@ -793,7 +793,12 @@
       if (e && e.name === 'AbortError') {
         term.writeln('\x1b[33m(回答已中断)\x1b[0m');
       } else {
-        term.writeln('\x1b[31mLLM 调用失败: ' + e.message + '\x1b[0m');
+        const msg = (e && e.message) || '';
+        // CE 双模式：上下文超限检测（不打印失败，返回标记由上层 llmOnceWithFresh 降级重试）
+        if (Core.isOverflowError(msg)) {
+          return { overflow: true };
+        }
+        term.writeln('\x1b[31mLLM 调用失败: ' + msg + '\x1b[0m');
         term.writeln('\x1b[33m提示: 配置页 http://127.0.0.1:8756/config.html（endpoint/model/api_key）\x1b[0m');
       }
       return null;
@@ -911,9 +916,23 @@
     let lastUsage = null;
     const MAX_TOOL = 3;
     let toolCount = 0;
+    // CE 双模式（fresh-window 默认）：上下文超限 → 降级最小上下文重试（只保留引导前缀 + 当前问题）
+    const llmOnceWithFresh = async (msgs) => {
+      const r = await llmStreamOnce(msgs);
+      if (!r || !r.overflow) return r;
+      term.writeln('\x1b[33m(上下文超限 → 降级最小上下文重试)\x1b[0m');
+      const fresh = [
+        { role: 'system', content: Core.buildGuidePrefix({ guideText: GUIDE_TEXT || L1_TEXT, memoryText: '', toolsTxt, today: localToday() }) },
+        { role: 'user', content: '问题：' + question },
+      ];
+      const r2 = await llmStreamOnce(fresh);
+      if (r2 && r2.overflow) return null;
+      if (r2 && !r2.toolJson) term.writeln('\x1b[90m(已丢失历史与检索片段，基于最小上下文回答)\x1b[0m');
+      return r2;
+    };
     for (;;) {
       term.writeln('\x1b[90m(' + (toolCount ? '继续' : '回答中') + '...)\x1b[0m');
-      const r = await llmStreamOnce(messages);
+      const r = await llmOnceWithFresh(messages);
       if (!r) return; // 中断/失败（内部已提示）
       if (!r.toolJson) {
         // 最终回答：llmStreamOnce 已流式渲染；收尾信息用最后一轮
@@ -938,7 +957,7 @@
         // 达上限：强制回答轮（去掉工具调用指令，避免 LLM 无限探索不收敛）
         term.writeln('\x1b[33m(工具调用已达 ' + MAX_TOOL + ' 次上限，基于已获取信息回答)\x1b[0m');
         messages.push({ role: 'user', content: '请基于上述工具返回直接给出最终回答，不要调用任何工具。' });
-        const r2 = await llmStreamOnce(messages);
+        const r2 = await llmOnceWithFresh(messages);
         if (r2 && !r2.toolJson) {
           full = r2.full;
           reasoning = r2.reasoning;

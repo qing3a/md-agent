@@ -168,6 +168,12 @@
     return skillTxt ? '相关技能（命中触发词，按技能步骤执行）：' + skillTxt : '';
   };
 
+  // CE 双模式：上下文超限错误识别（fresh-window 降级重试触发条件）
+  Core.isOverflowError = function (msg) {
+    const m = msg || '';
+    return /context|token|length|长度|超限|上限|too long|maximum/i.test(m) && !/未配置|api_key|apikey|401|403|404/i.test(m);
+  };
+
   root.Core = Core;
   if (typeof module !== 'undefined' && module.exports) module.exports = Core;
 })(typeof window !== 'undefined' ? window : globalThis);
