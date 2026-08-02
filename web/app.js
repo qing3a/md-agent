@@ -36,14 +36,53 @@
     try { localStorage.setItem('md-agent-history', JSON.stringify(history.slice(-MAX_HISTORY))); } catch (e) { /* 忽略 */ }
   }
 
-  // ---- 输入行边框：提示前一条上横线、回车后一条下横线，把输入行夹住 ----
-  // ---- 输入行边框：上下两条全宽横线（无左右竖线）；输入为追加式写入（光标自然跟随，IME 正常）；
-  //      输入行位置自然（内容末尾，默认终端行为）；状态栏为窗口底部 DOM 条 ----
+  // ---- 输入行边框 + 终端内状态栏（状态栏画在终端流内、紧跟输入行下方）----
+  // 输入行：上下两条全宽横线（无左右竖线），追加式输入（光标自然跟随，IME 正常）
+  // 状态栏：随输入行流动的一行；刷新时重绘该行并把光标送回输入行（回答输出期间不重绘）
   function hline() { return '\x1b[90m' + '─'.repeat(term.cols) + '\x1b[0m'; }
-  function showPrompt() {
-    term.write(hline() + '\r\n' + PROMPT);
+
+  // 精简 CJK 列宽（状态行截断 / 输入超长保护用）
+  function dispW(s) {
+    let w = 0;
+    for (const ch of String(s)) {
+      w += /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/.test(ch) ? 2 : 1;
+    }
+    return w;
   }
-  function closeBox() { term.write('\r\n' + hline() + '\r\n'); }
+  function visOnly(s) { return s.replace(/\x1b\[[0-9;]*m/g, ''); }
+  function truncateW(s, maxW) {
+    const plain = visOnly(s);
+    if (dispW(plain) <= maxW) return s;
+    let out = ''; let w = 0;
+    for (const ch of Array.from(plain)) {
+      const cw = dispW(ch);
+      if (w + cw > maxW - 1) break;
+      out += ch; w += cw;
+    }
+    return out + '…';
+  }
+
+  let statusLine = '';   // 状态栏最新文本（可含 ANSI）
+  let atPrompt = false;  // 光标是否停在输入行（决定状态栏能否原地重绘）
+
+  // 重绘状态行（要求光标在输入行）：下移一行 → 清行重写 → 回输入行重画
+  function drawStatusRow() {
+    if (!atPrompt || !statusLine) return;
+    if (term.buffer.active.cursorY + 1 >= term.rows) return; // 状态行在可视区外，等 showPrompt 重画
+    term.write('\x1b[1B\x1b[2K\r' + statusLine + '\x1b[1A\x1b[2K\r' + PROMPT + line);
+  }
+  function showPrompt() {
+    term.write(hline() + '\r\n' + PROMPT + line);
+    if (statusLine) {
+      term.write('\r\n' + statusLine);                 // 状态行（光标到其末尾）
+      term.write('\x1b[1A\x1b[2K\r' + PROMPT + line);  // 光标回输入行（\r 回行首，列位安全）
+    }
+    atPrompt = true;
+  }
+  function closeBox() {
+    term.write('\r\n' + hline() + '\r\n');
+    atPrompt = false;
+  }
 
   // ---- 启动欢迎 banner + 状态信息（异步汇总；bannerDone 保证状态行先于输入框打印）----
   let bannerDone = Promise.resolve();
@@ -73,11 +112,7 @@
   }
   printBanner();
 
-  // ---- 输入框底部状态栏（DOM，独立于终端流；每轮命令后刷新 + 8s 轮询）----
-  function esc(s) {
-    return String(s).replace(/[&<>"']/g, (c) =>
-      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
+  // ---- 终端内状态栏（在输入行下方；每轮命令后刷新 + 8s 轮询）----
   function refreshStatus() {
     Promise.all([
       fetch('/api/health').then((r) => r.json()).catch(() => null),
@@ -86,23 +121,18 @@
       fetch('/api/tasks').then((r) => r.json()).catch(() => null),
       fetch('/api/graph/stats').then((r) => r.json()).catch(() => null),
     ]).then(([h, c, p, t, g]) => {
-      const el = document.getElementById('statusbar');
-      if (!el) return;
       const ok = !!(h && h.status === 'ok');
       const model = (c && c.llm && c.llm.model) || '未配置 LLM';
       const kb = (c && c.kb_root) || '-';
       const pend = (p && Array.isArray(p.pending)) ? p.pending.length : '-';
       const todo = (t && t.stats) ? (t.stats.todo || 0) + (t.stats.doing || 0) : '-';
       const gs = (g && g.docs) ? (g.docs || 0) + ' 文档 / ' + (g.links || 0) + ' 链接' : '-';
-      el.innerHTML =
-        '<span class="dot ' + (ok ? 'ok' : 'err') + '">●</span>' +
-        '<span class="it">' + (ok ? '服务运行中' : '服务异常') + '</span>' +
-        '<span class="it dim">模型 ' + esc(model) + '</span>' +
-        '<span class="sp"></span>' +
-        '<span class="it dim">KB ' + esc(kb) + '</span>' +
-        '<span class="it dim">待审 ' + pend + '</span>' +
-        '<span class="it dim">任务 ' + todo + '</span>' +
-        '<span class="it dim">图谱 ' + esc(gs) + '</span>';
+      statusLine = truncateW(
+        '\x1b[' + (ok ? '32' : '31') + 'm●\x1b[0m ' + (ok ? '服务运行中' : '服务异常') +
+        '\x1b[90m · 模型 ' + model + ' · KB ' + kb + ' · 待审 ' + pend +
+        ' · 任务 ' + todo + ' · 图谱 ' + gs + '\x1b[0m',
+        term.cols - 1);
+      drawStatusRow();
     }).catch(() => {});
   }
   refreshStatus();
@@ -150,6 +180,8 @@
         term.write('\x1b[2K\r' + PROMPT + line);
       }
     } else if (code >= 32) {
+      // 超长保护：输入行 wrap 会让下方状态行错位，接近行宽时静默忽略新字符
+      if (dispW(visOnly(PROMPT + line + data)) >= term.cols - 2) return;
       line += data;
       term.write(data); // 追加式：光标自然跟随内容
     }
