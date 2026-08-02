@@ -1022,7 +1022,44 @@
 
   async function graph(path) {
     if (!path) {
-      term.writeln('\x1b[33m用法：/graph <路径或文件名> —— 显示出链/入链/关联簇\x1b[0m');
+      // 无参：结构导航（目录树 + 度数 + 孤立标记）——信息密度比全图高，不发散
+      const [g, orph] = await Promise.all([
+        api('/api/graph/graph'),
+        api('/api/graph/orphans').catch(() => null),
+      ]);
+      const orphans = orph && orph.orphans ? orph.orphans : [];
+      const byPath = {};
+      g.nodes.forEach((n) => { byPath[n.path] = n; });
+      // 目录树（按路径层级缩进）
+      const root = {};
+      g.nodes.forEach((n) => {
+        const parts = n.path.split('/');
+        let cur = root;
+        for (let i = 0; i < parts.length - 1; i++) {
+          cur.dirs = cur.dirs || {};
+          cur = cur.dirs[parts[i]] = cur.dirs[parts[i]] || {};
+        }
+        cur.files = cur.files || [];
+        cur.files.push(n);
+      });
+      term.writeln('\x1b[1m知识库结构（' + g.nodes.length + ' 篇 · ' + g.edges.length + ' 链接）\x1b[0m');
+      const walk = (node, depth) => {
+        if (node.dirs) Object.keys(node.dirs).sort().forEach((d) => {
+          term.writeln('  '.repeat(depth) + '\x1b[90m▸\x1b[0m ' + d + '/');
+          walk(node.dirs[d], depth + 1);
+        });
+        if (node.files) node.files.sort((a, b) => a.path < b.path ? -1 : 1).forEach((n) => {
+          const iso = orphans.includes(n.path);
+          term.writeln('  '.repeat(depth) +
+            (iso ? '\x1b[31m●\x1b[0m ' : '\x1b[36m·\x1b[0m ') +
+            (n.title || n.path.split('/').pop()) +
+            (iso ? ' \x1b[31m(孤立)\x1b[0m' : '') +
+            '\x1b[90m [' + n.in_degree + '↔' + n.out_degree + ']\x1b[0m');
+        });
+      };
+      walk(root, 0);
+      if (orphans.length) term.writeln('\x1b[31m孤立 ' + orphans.length + ' 篇（无入链也无出链）\x1b[0m');
+      term.writeln('\x1b[90m(查看单篇链接: /graph <路径> · 可视化: /view graph)\x1b[0m');
       return;
     }
     const [bl, lk, rel] = await Promise.all([
@@ -1196,7 +1233,7 @@
       const name = arg + '.html';
       const r = await fetch('/views/' + name);
       if (!r.ok) throw new Error('内置视图加载失败: HTTP ' + r.status);
-      openView(arg === 'graph' ? '知识图谱可视化' : '任务看板', await r.text());
+      openView(arg === 'graph' ? '知识库结构导航' : '任务看板', await r.text());
       return;
     }
     const r = await api('/api/file?path=' + encodeURIComponent(arg));

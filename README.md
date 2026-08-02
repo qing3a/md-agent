@@ -22,7 +22,7 @@
 | 全文检索 | 内嵌 ripgrep 内核（grep + ignore crate），多关键词任一命中、智能大小写、小节上下文（`section`/`context`） |
 | **知识图谱** | SQLite `documents`/`links` 两表：`[[双向链接]]` 解析、反向链接、孤立文档检测、标签/项目维度统计；首次调用自动建库，`/rescan`、托盘「立即同步」或心跳自动重建 |
 | **伪命令行 Markdown 渲染** | 终端内 ANSI 富渲染（零依赖）：标题加粗、行内代码/加粗/链接/`[[双链]]` 着色、列表/引用/代码围栏；**表格按 markdown 行显示**（保留 `|` 结构，复制不失真）；frontmatter 变暗；流式回答按完整行渲染 |
-| **/view 面板渲染层** | iframe 沙箱 + postMessage 桥（视图经宿主调 `/api/*`，仅允许 api 前缀，真机验证通过）：`/view graph` 内置知识图谱可视化（环形布局 SVG、按项目配色、孤立文档高亮）、`/view board` 任务看板、`/view <html>` 渲染 kb 内本地 HTML、`/view off` 或 Esc 关闭（焦点在 iframe 内时 Esc 经桥转发） |
+| **/view 面板渲染层** | iframe 沙箱 + postMessage 桥（视图经宿主调 `/api/*`，仅允许 api 前缀，真机验证通过）：`/view graph` **知识库结构导航**（目录层级缩进树 + 项目色点 + 孤立/悬空标记，点击文档右侧显示出链/入链并可跳转——全图环形布局发散已弃用）、`/view board` 任务看板、`/view <html>` 渲染 kb 内本地 HTML、`/view off` 或 Esc 关闭 |
 | **心跳自动同步（自组织自动发现）** | 默认关闭；开启后每 60s（可调）指纹比对知识库（路径+mtime+大小，排除 pending/），变化自动重建 INDEX+图谱并跑本地审计，状态栏提示「心跳开 + ⚠审计发现」；托盘勾选 / `/heartbeat` / 配置页三入口；`sync_lock` 与手动写端点防并发 |
 | **终端壳体验** | 启动欢迎横幅 + 状态汇总（版本/KB/图谱/模型/待审/进行中任务）；输入框状态机（输入中：上下边框+状态行；回车提交：边框移除、整行背景色消息块；回答后恢复新输入框）；终端内状态栏（● 服务状态/模型/KB/待审/任务/图谱，画在输入框下方，8s 轮询原地重绘）；列宽 DOM 实测防 wrap |
 | **记忆自组织（Phase 3-A 基础）** | `/audit` 本地规则健康审计（孤立/无出链/重复标题/悬空链接/提及未链接建议，零 LLM 快速确定）；`/link` 人工补链接（文件名双链、去重、自动重建图谱）；`/link-all` 一键应用建议；`/suggest` 补全缺失主题（带主题名）或**无参盲区模式**（先审计后让 LLM 分析知识盲区生成新文档，进待审）；`/diff`/`/conflicts` 行级对比与冲突检查 |
@@ -101,7 +101,7 @@ open <路径>           查看 KB 内 MD
 /preview <待审路径>    行级预览：批准后将写入的内容（只读）
 /approve <路径|all>    批准待审 → 写入知识库（自动重建 INDEX+图谱）
 /reject <路径|all>     丢弃待审
-/view graph|board|<html>|off  面板渲染层：图谱可视化 / 任务看板 / 本地 HTML（Esc 关闭）
+/view graph|board|<html>|off  面板渲染层：结构导航树 / 任务看板 / 本地 HTML（Esc 关闭）
 /audit                知识库健康审计（盲区/冲突/补链接建议）
 /conflicts            冲突检查（重复标题/悬空链接）   /diff <A> <B> 行级对比
 /link <源> <目标>      补链接（在源文档追加 [[目标]]，人工确认）
@@ -193,7 +193,7 @@ Phase 3-B 规划引擎（✅ 基础已实现）
 可选前置：面板渲染层 ✅ 基础已实现（/view 命令 + iframe 沙箱 + postMessage 桥）
          ├─ /view <html/目录>：iframe 沙箱渲染本地 HTML，postMessage 桥调宿主 API（仅限 /api/*）
          ├─ 通信复用现有 HTTP/SSE，不引入 WebSocket（已遵循）
-         └─ 内置视图：知识图谱可视化 ✅（/view graph）、任务看板 ✅（/view board）
+         └─ 内置视图：知识库结构导航 ✅（/view graph：目录树+链接详情，环形全图因发散弃用）、任务看板 ✅（/view board）
 可选前置：网页能力 ✅ 读已实现，写（最小版）已实现
          ├─ ✅ /fetch <url> [标题]：静态抓取 + 文本提取 → 终端阅读视图 → 可沉淀 KB（零浏览器依赖）
          ├─ ✅ /page <url> [标题]：动态网页读取（chromiumoxide + 系统 Edge/Chrome headless，等 JS 渲染）
