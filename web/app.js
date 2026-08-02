@@ -632,6 +632,211 @@
     return [...kw];
   }
 
+  // ---------- 工具注册表 + Agent Loop（Phase 3-C Step 1） ----------
+  // 工具全部映射到现有端点；LLM 显式决策（软工具调用：输出一行 JSON），宿主执行回填
+
+  let toolsCache = null;
+  async function getTools() {
+    if (toolsCache) return toolsCache;
+    try { toolsCache = await api('/api/tools'); } catch (e) { toolsCache = []; }
+    return toolsCache;
+  }
+
+  // 工具名 → 端点调用（args 为 LLM 给的参数对象）
+  const TOOL_API = {
+    'search': (a) => api('/api/search?q=' + encodeURIComponent(a.q || '') + '&layer=' + encodeURIComponent(a.layer || 'notes') + (a.ctx ? '&ctx=1' : '')),
+    'memory_search': (a) => api('/api/search?q=' + encodeURIComponent(a.q || '') + '&layer=all&ctx=1'),
+    'graph.linked': (a) => api('/api/graph/linked?path=' + encodeURIComponent(a.path || '')),
+    'graph.backlinks': (a) => api('/api/graph/backlinks?path=' + encodeURIComponent(a.path || '')),
+    'fetch': (a) => api('/api/fetch?url=' + encodeURIComponent(a.url || '')),
+    'page': (a) => api('/api/page?url=' + encodeURIComponent(a.url || '')),
+    'file': (a) => api('/api/file?path=' + encodeURIComponent(a.path || '')),
+    'tasks': () => api('/api/tasks'),
+  };
+
+  // 工具结果格式化（截断防超长；片段标注来源便于 LLM 引用）
+  async function runTool(name, args) {
+    const fn = TOOL_API[name];
+    if (!fn) throw new Error('未知工具: ' + name);
+    const r = await fn(args || {});
+    if (name === 'search' || name === 'memory_search') {
+      const hits = r.hits || [];
+      return hits.slice(0, 10).map((h) =>
+        '[' + h.file + ':' + h.line + (h.section ? ' 小节:' + h.section : '') + '] ' + (h.context || h.text || '')
+      ).join('\n') || '(无命中)';
+    }
+    if (name === 'graph.linked') {
+      return (r.linked || []).map((l) => '[[目标]] ' + (l.dst || '') + (l.resolved ? ' → ' + l.dst_path : ' (悬空)')).join('\n') || '(无出链)';
+    }
+    if (name === 'graph.backlinks') return (r.backlinks || []).join('\n') || '(无入链)';
+    if (name === 'fetch' || name === 'page') return '标题: ' + (r.title || '') + '\n' + String(r.text || '').slice(0, 3000);
+    if (name === 'file') return String(r.content || '').slice(0, 3000);
+    if (name === 'tasks') {
+      const t = r.tasks || [];
+      return t.length ? t.map((x) => '#' + x.id + ' [' + x.status + '] ' + (x.title || x.goal)).join('\n') : '(无任务)';
+    }
+    return JSON.stringify(r).slice(0, 3000);
+  }
+
+  // 解析工具调用 JSON：必须以 { 开头且 tool 在注册表
+  function tryParseTool(text) {
+    const t = String(text || '').trim();
+    if (!t.startsWith('{')) return null;
+    try {
+      const j = JSON.parse(t);
+      if (j && typeof j.tool === 'string' && TOOL_API[j.tool] && (!j.args || typeof j.args === 'object')) return j;
+    } catch (e) { /* 非工具 JSON */ }
+    return null;
+  }
+
+  // 单次 LLM 流式调用（Agent Loop 一轮）：正常回答流式渲染；首个 content 以 { 开头 → 工具模式只收集不渲染
+  // 返回 { full, reasoning, reasoningStartAt, firstContentAt, lastUsage, toolJson }；中断/失败返回 null
+  async function llmStreamOnce(messages) {
+    const reasoningStartAt = Date.now();
+    let full = '';
+    let saveSeen = false;
+    let reasoning = '';
+    let firstContentAt = null;
+    let lastUsage = null;
+    let toolMode = false;
+    let titlePrinted = false;
+    let thoughtPrinted = false;
+    let toolJson = null;
+    const TITLE = '\x1b[1;32m──── 回答 ────\x1b[0m';
+    currentAbort = new AbortController();
+    try {
+      const res = await fetch('/api/llm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages, stream: true, stream_options: { include_usage: true } }),
+        signal: currentAbort.signal,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error((err && err.error) || 'HTTP ' + res.status);
+      }
+      const ct = res.headers.get('content-type') || '';
+      if (!ct.includes('text/event-stream')) {
+        // 非流式兜底
+        const body = await res.json();
+        const msg = body.choices && body.choices[0] && body.choices[0].message;
+        full = (msg && msg.content) || '';
+        reasoning = (msg && msg.reasoning_content) || '';
+        lastUsage = body.usage || null;
+        toolJson = tryParseTool(full);
+        if (!toolJson) { term.writeln(TITLE); term.write(renderMdFile(full)); }
+        return { full, reasoning, reasoningStartAt, firstContentAt, lastUsage, toolJson };
+      }
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      // 流式 markdown：按完整行渲染（保留打字机效果，且行内样式正确）
+      const md = createMdRenderer();
+      let lineBuf = '';
+      let held = []; // 含 <!-- 的行可能是写回块前奏，暂缓显示（避免露出一小段标记）
+      const printTitle = () => {
+        if (titlePrinted) return;
+        titlePrinted = true;
+        term.writeln(TITLE);
+      };
+      const feedDelta = (d) => {
+        lineBuf += d;
+        let nl;
+        while ((nl = lineBuf.indexOf('\n')) !== -1) {
+          const line = lineBuf.slice(0, nl);
+          lineBuf = lineBuf.slice(nl + 1);
+          if (line.includes('<!--')) held.push(line);
+          else for (const l of md.feed(line)) term.writeln(l);
+        }
+      };
+      // 解析 SSE：按 \n\n 切块，取 data: 行
+      const consume = (s) => {
+        let idx;
+        while ((idx = s.indexOf('\n\n')) !== -1) {
+          const block = s.slice(0, idx);
+          s = s.slice(idx + 2);
+          const line = block.split('\n').find((l) => l.startsWith('data:'));
+          if (!line) continue;
+          const data = line.slice(5).trim();
+          if (data === '[DONE]') continue;
+          try {
+            const j = JSON.parse(data);
+            if (j.usage) lastUsage = j.usage; // include_usage 结束块（该块 choices 为空）
+            const d = j.choices && j.choices[0] && j.choices[0].delta;
+            const rc = d && d.reasoning_content;
+            if (rc) {
+              reasoning += rc;
+              if (!titlePrinted && !thoughtPrinted) {
+                thoughtPrinted = true;
+                term.writeln('\x1b[90m🧠 思考中…\x1b[0m');
+              }
+            }
+            const delta = d && d.content;
+            if (!delta) continue;
+            if (firstContentAt === null) {
+              firstContentAt = Date.now(); // reasoning 结束 = 首个 content 到达
+              if (thoughtPrinted) term.write('\x1b[1A\x1b[2K\r'); // 清掉「思考中…」行
+              // 工具调用识别：首个 content 以 { 开头 → 整轮工具模式（不打印标题、不渲染）
+              toolMode = delta.trimStart().startsWith('{');
+              if (!toolMode) printTitle();
+            }
+            full += delta;
+            if (toolMode) continue; // 工具轮只收集（不渲染）
+            // 写回块起就不再展示（继续收集用于落盘）
+            if (!saveSeen) {
+              if (full.includes('<!-- md-agent-save -->')) {
+                saveSeen = true;
+                term.write('\n');
+                continue;
+              }
+              feedDelta(delta);
+            }
+          } catch (e) { /* 忽略非 JSON 行 */ }
+        }
+        return s;
+      };
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf = consume(buf + dec.decode(value, { stream: true }));
+      }
+      consume(buf + dec.decode());
+      // 冲刷末尾未换行的行（写回块已触发时丢弃残留的标记前缀）
+      if (!toolMode && lineBuf.length && !saveSeen) {
+        for (const l of md.feed(lineBuf)) term.writeln(l);
+      }
+      if (!toolMode) {
+        for (const l of md.flush()) term.writeln(l);
+        // 写回块未触发（如正文含普通 HTML 注释）→ 补显暂缓行
+        if (!saveSeen && held.length) {
+          for (const line of held) {
+            for (const l of md.feed(line)) term.writeln(l);
+          }
+          for (const l of md.flush()) term.writeln(l);
+        }
+      }
+    } catch (e) {
+      if (e && e.name === 'AbortError') {
+        term.writeln('\x1b[33m(回答已中断)\x1b[0m');
+      } else {
+        term.writeln('\x1b[31mLLM 调用失败: ' + e.message + '\x1b[0m');
+        term.writeln('\x1b[33m提示: 配置页 http://127.0.0.1:8756/config.html（endpoint/model/api_key）\x1b[0m');
+      }
+      return null;
+    } finally {
+      currentAbort = null;
+    }
+    // 工具模式：流结束后解析完整 JSON；误判（正常回答以 { 开头）→ 补标题 + 整段渲染
+    if (toolMode) {
+      toolJson = tryParseTool(full);
+      if (!toolJson) {
+        term.writeln(TITLE);
+        term.write(renderMdFile(full));
+      }
+    }
+    return { full, reasoning, reasoningStartAt, firstContentAt, lastUsage, toolJson };
+  }
+
   async function ask(question) {
     term.writeln('\x1b[90m(Agent: 提取关键词 → 检索 L2 → 调用 LLM)\x1b[0m');
     const kws = extractKeywords(question);
@@ -677,6 +882,11 @@
     }
 
     // 2. 组装 Prompt（system + 多轮历史 + 当前问题）
+    const tools = await getTools();
+    const toolsTxt = tools.map((t) =>
+      '  - ' + t.name + '(' + t.params.map((p) => p.name + (p.required ? '' : '?')).join(', ') + '): ' + t.desc +
+      (t.example ? ' | 例: ' + t.example : '')
+    ).join('\n');
     const frag = atFrag
       .concat(
         top.map(
@@ -690,6 +900,13 @@
       '你是本地双层 MD 知识库的检索问答助手。',
       '以下是知识库 L1 规范/记忆/索引层（权威约定，需遵循）：',
       L1_TEXT || '(L1 未加载)',
+      '',
+      '工具调用（可选——上方检索片段可能不完整，需要更多知识库/网页/文件信息时主动使用）：',
+      '需要工具时，**只输出一行 JSON**（不要任何其它文字、不要代码块标记、不要解释）：',
+      '{"tool":"<工具名>","args":{...}}',
+      '可用工具：',
+      toolsTxt || '(工具清单加载失败)',
+      '调用后你会收到「工具返回」，基于它继续回答；不需要工具时直接回答。',
       '',
       '回答规则：',
       '1. 优先依据用户消息中给出的检索片段回答，引用格式 [文件:行号]；',
@@ -715,134 +932,41 @@
       { role: 'user', content: userMsg },
     ];
 
-    // 3. 经后端代理流式调用 LLM（Ctrl+C / Esc 可中断）
-    term.writeln('\x1b[90m(回答中...)\x1b[0m');
+    // 3. Agent Loop：LLM 显式调工具 → 宿主执行回填 → 循环（≤MAX_TOOL 次）；无工具 → 最终回答
     let full = '';
-    let saveSeen = false;
-    // 推理折叠：reasoning_content 不展示全文，仅记时长；首个 content 到达即 reasoning 结束
     let reasoning = '';
-    let reasoningStartAt = Date.now();
+    let reasoningStartAt = null;
     let firstContentAt = null;
-    let lastUsage = null; // 本次回答 token 用量（流式 include_usage 结束块 / 非流式 body.usage；缺失则跳过）
-    currentAbort = new AbortController();
-    try {
-      const res = await fetch('/api/llm', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages, stream: true, stream_options: { include_usage: true } }),
-        signal: currentAbort.signal,
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error((err && err.error) || 'HTTP ' + res.status);
+    let lastUsage = null;
+    const MAX_TOOL = 3;
+    let toolCount = 0;
+    for (;;) {
+      term.writeln('\x1b[90m(' + (toolCount ? '继续' : '回答中') + '...)\x1b[0m');
+      const r = await llmStreamOnce(messages);
+      if (!r) return; // 中断/失败（内部已提示）
+      if (!r.toolJson) {
+        // 最终回答：llmStreamOnce 已流式渲染；收尾信息用最后一轮
+        full = r.full;
+        reasoning = r.reasoning;
+        reasoningStartAt = r.reasoningStartAt;
+        firstContentAt = r.firstContentAt;
+        lastUsage = r.lastUsage;
+        break;
       }
-      const ct = res.headers.get('content-type') || '';
-      if (!ct.includes('text/event-stream')) {
-        // 非流式兜底
-        const body = await res.json();
-        const msg = body.choices && body.choices[0] && body.choices[0].message;
-        full = (msg && msg.content) || '';
-        reasoning = (msg && msg.reasoning_content) || '';
-        lastUsage = body.usage || null;
-        term.writeln('\x1b[1;32m──── 回答 ────\x1b[0m');
-        term.write(renderMdFile(full));
-      } else {
-        const reader = res.body.getReader();
-        const dec = new TextDecoder();
-        let buf = '';
-        let titlePrinted = false;   // ──── 回答 ──── 延迟到首个 content delta（reasoning 结束后）
-        let thoughtPrinted = false; // 🧠 思考中… 已打印（reasoning 开始时写一次，不跟随更新）
-        // 流式 markdown：按完整行渲染（保留打字机效果，且行内样式正确）
-        const md = createMdRenderer();
-        let lineBuf = '';
-        let held = []; // 含 <!-- 的行可能是写回块前奏，暂缓显示（避免露出一小段标记）
-        const printTitle = () => {
-          if (titlePrinted) return;
-          titlePrinted = true;
-          term.writeln('\x1b[1;32m──── 回答 ────\x1b[0m');
-        };
-        const feedDelta = (d) => {
-          lineBuf += d;
-          let nl;
-          while ((nl = lineBuf.indexOf('\n')) !== -1) {
-            const line = lineBuf.slice(0, nl);
-            lineBuf = lineBuf.slice(nl + 1);
-            if (line.includes('<!--')) held.push(line);
-            else for (const l of md.feed(line)) term.writeln(l);
-          }
-        };
-        // 解析 SSE：按 \n\n 切块，取 data: 行
-        const consume = (s) => {
-          let idx;
-          while ((idx = s.indexOf('\n\n')) !== -1) {
-            const block = s.slice(0, idx);
-            s = s.slice(idx + 2);
-            const line = block.split('\n').find((l) => l.startsWith('data:'));
-            if (!line) continue;
-            const data = line.slice(5).trim();
-            if (data === '[DONE]') continue;
-            try {
-              const j = JSON.parse(data);
-              if (j.usage) lastUsage = j.usage; // include_usage 结束块（该块 choices 为空）
-              const d = j.choices && j.choices[0] && j.choices[0].delta;
-              const rc = d && d.reasoning_content;
-              if (rc) {
-                reasoning += rc;
-                if (!titlePrinted && !thoughtPrinted) {
-                  thoughtPrinted = true;
-                  term.writeln('\x1b[90m🧠 思考中…\x1b[0m');
-                }
-              }
-              const delta = d && d.content;
-              if (!delta) continue;
-              if (firstContentAt === null) {
-                firstContentAt = Date.now(); // reasoning 结束 = 首个 content 到达
-                if (thoughtPrinted) term.write('\x1b[1A\x1b[2K\r'); // 清掉「思考中…」行
-                printTitle();
-              }
-              full += delta;
-              // 写回块起就不再展示（继续收集用于落盘）
-              if (!saveSeen) {
-                if (full.includes('<!-- md-agent-save -->')) {
-                  saveSeen = true;
-                  term.write('\n');
-                  continue;
-                }
-                feedDelta(delta);
-              }
-            } catch (e) { /* 忽略非 JSON 行 */ }
-          }
-          return s;
-        };
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf = consume(buf + dec.decode(value, { stream: true }));
-        }
-        consume(buf + dec.decode());
-        // 冲刷末尾未换行的行（写回块已触发时丢弃残留的标记前缀）
-        if (lineBuf.length && !saveSeen) {
-          for (const l of md.feed(lineBuf)) term.writeln(l);
-        }
-        for (const l of md.flush()) term.writeln(l);
-        // 写回块未触发（如正文含普通 HTML 注释）→ 补显暂缓行
-        if (!saveSeen && held.length) {
-          for (const line of held) {
-            for (const l of md.feed(line)) term.writeln(l);
-          }
-          for (const l of md.flush()) term.writeln(l);
-        }
+      // 工具调用轮：终端审计行 + 执行 + 结果回填
+      const tj = r.toolJson;
+      term.writeln('\x1b[36m🛠 调用 ' + tj.tool + '(' + JSON.stringify(tj.args || {}) + ')\x1b[0m');
+      let result;
+      try { result = await runTool(tj.tool, tj.args); }
+      catch (e) { result = '工具调用失败: ' + ((e && e.message) || e); }
+      messages.push({ role: 'assistant', content: r.full });
+      messages.push({ role: 'user', content: '工具 ' + tj.tool + ' 返回（权威上下文，引用标注 [工具:' + tj.tool + ']）：\n' + String(result).slice(0, 4000) });
+      full = ''; // 工具轮内容不渲染
+      toolCount++;
+      if (toolCount >= MAX_TOOL) {
+        term.writeln('\x1b[33m(工具调用已达 ' + MAX_TOOL + ' 次上限，停止循环)\x1b[0m');
+        break;
       }
-    } catch (e) {
-      if (e && e.name === 'AbortError') {
-        term.writeln('\x1b[33m(回答已中断)\x1b[0m');
-      } else {
-        term.writeln('\x1b[31mLLM 调用失败: ' + e.message + '\x1b[0m');
-        term.writeln('\x1b[33m提示: 配置页 http://127.0.0.1:8756/config.html（endpoint/model/api_key）\x1b[0m');
-      }
-      return;
-    } finally {
-      currentAbort = null;
     }
     term.writeln('');
     // 推理折叠行 + 本次回答 token 用量（回答渲染完成后、引用来源前；无则静默跳过）
@@ -853,6 +977,7 @@
     if (lastUsage && lastUsage.total_tokens) {
       term.writeln('\x1b[90m本次输出 ' + lastUsage.total_tokens + ' tokens\x1b[0m');
     }
+
 
     const cleanFull = full.replace(/\n?<!--\s*md-agent-save\s*-->[\s\S]*$/, '').trim();
 

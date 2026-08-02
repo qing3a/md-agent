@@ -41,6 +41,7 @@ pub async fn serve(
 
     let app = Router::new()
         .route("/api/health", get(health))
+        .route("/api/tools", get(tools_handler))
         .route("/api/search", get(search_handler))
         .route("/api/l1", get(l1_handler))
         .route("/api/file", get(file_read))
@@ -83,6 +84,81 @@ pub async fn serve(
 }
 
 // ---------- handlers ----------
+
+/// 声明式工具清单（Phase 3-C Step 1）：LLM 显式工具调用的决策依据；
+/// 工具全部映射到现有端点（前端编排执行，宿主侧仅声明）。
+fn tools_json() -> Value {
+    json!([
+        {
+            "name": "search",
+            "desc": "检索知识库 L2 内容层（全文 grep，多关键词任一命中，返回命中片段与所属小节）",
+            "params": [
+                {"name": "q", "type": "string", "required": true, "desc": "检索关键词，空格分隔"},
+                {"name": "layer", "type": "string", "required": false, "desc": "notes（默认，仅内容层）| all（含 L1 规范/记忆）"},
+                {"name": "ctx", "type": "string", "required": false, "desc": "传 1 返回命中行前后上下文片段"}
+            ],
+            "example": "{\"q\":\"托盘 架构\",\"layer\":\"notes\",\"ctx\":\"1\"}"
+        },
+        {
+            "name": "memory_search",
+            "desc": "记忆检索：检索整个持久记忆系统（L1 规范/记忆/索引 + L2 内容层），返回 top 片段——回答涉及历史决策/规范/既有知识时先查这里",
+            "params": [
+                {"name": "q", "type": "string", "required": true, "desc": "检索关键词，空格分隔"}
+            ],
+            "example": "{\"q\":\"双层记忆 架构\"}"
+        },
+        {
+            "name": "graph.linked",
+            "desc": "查文档的出链（该文档的 [[双链]] 指向谁，含悬空检测）",
+            "params": [
+                {"name": "path", "type": "string", "required": true, "desc": "文档相对 KB 根路径，如 notes/架构/托盘应用.md"}
+            ],
+            "example": "{\"path\":\"notes/架构/托盘应用.md\"}"
+        },
+        {
+            "name": "graph.backlinks",
+            "desc": "查文档的入链（谁链向该文档）",
+            "params": [
+                {"name": "path", "type": "string", "required": true, "desc": "文档相对 KB 根路径"}
+            ],
+            "example": "{\"path\":\"notes/架构/托盘应用.md\"}"
+        },
+        {
+            "name": "fetch",
+            "desc": "抓取网页正文（静态 HTTP + HTML 解析，无 JS 渲染）",
+            "params": [
+                {"name": "url", "type": "string", "required": true, "desc": "完整 URL，如 https://example.com"}
+            ],
+            "example": "{\"url\":\"https://example.com\"}"
+        },
+        {
+            "name": "page",
+            "desc": "读取动态网页正文（headless Edge/Chrome，等 JS 渲染，较慢约 5-10s）",
+            "params": [
+                {"name": "url", "type": "string", "required": true, "desc": "完整 URL"}
+            ],
+            "example": "{\"url\":\"https://example.com\"}"
+        },
+        {
+            "name": "file",
+            "desc": "读取 KB 内 Markdown 文件全文（L1 或 L2）",
+            "params": [
+                {"name": "path", "type": "string", "required": true, "desc": "文件相对 KB 根路径，如 MEMORY.md 或 notes/xxx.md"}
+            ],
+            "example": "{\"path\":\"MEMORY.md\"}"
+        },
+        {
+            "name": "tasks",
+            "desc": "列出任务引擎的当前任务（状态机：待办/进行中/完成/放弃）",
+            "params": [],
+            "example": "{}"
+        }
+    ])
+}
+
+async fn tools_handler() -> Json<Value> {
+    Json(tools_json())
+}
 
 async fn health() -> Json<serde_json::Value> {
     Json(json!({

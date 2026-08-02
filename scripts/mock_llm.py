@@ -31,10 +31,16 @@ class Handler(BaseHTTPRequestHandler):
         last_user = user_msgs[-1] if user_msgs else "(无 user 消息)"
         stream = body.get("stream") is True
 
-        content = (
-            "【mock 回答】消息数=%d，模型=%s，stream=%s。最后一条用户消息：%s"
-            % (len(messages), model, stream, last_user[:80])
-        )
+        # 工具调用模拟（Phase 3-C Step 1 测试）：用户消息含「调用工具」且本轮尚无工具返回 →
+        # 返回工具调用 JSON（前端识别后执行 /api/search 并回填）
+        tool_trigger = "调用工具"
+        if tool_trigger in last_user and "工具 search 返回" not in last_user:
+            content = '{"tool":"search","args":{"q":"托盘 架构","layer":"notes","ctx":"1"}}'
+        else:
+            content = (
+                "【mock 回答】消息数=%d，模型=%s，stream=%s。最后一条用户消息：%s"
+                % (len(messages), model, stream, last_user[:80])
+            )
         # 触发词：最后一条用户消息含「记住/沉淀」时返回写回块（测试 Agent 写回链路）
         if ("记住" in last_user) or ("沉淀" in last_user):
             content += (
