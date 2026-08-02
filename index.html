@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="md-agent：本地双层 MD 知识库 Agent —— 以 Markdown 为原生知识载体，无向量库、纯文本检索、本地常驻、网页终端。">
+    <title>md-agent · 本地双层 MD 知识库 Agent</title>
+    <style>
+        :root {
+            --bg: #12121a;
+            --bg2: #1a1a26;
+            --panel: #1e1e2e;
+            --border: #2e2e42;
+            --text: #e8e6e0;
+            --muted: #9a98a8;
+            --accent: #e0a458;
+            --accent-dim: rgba(224,164,88,0.15);
+            --green: #7acf59;
+            --code: "Consolas","JetBrains Mono",monospace;
+        }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        html { scroll-behavior:smooth; }
+        body {
+            background: var(--bg);
+            background-image: radial-gradient(1200px 600px at 80% -10%, rgba(224,164,88,0.08), transparent),
+                              radial-gradient(900px 500px at 10% 110%, rgba(122,207,89,0.05), transparent);
+            color: var(--text);
+            font-family: "Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+            line-height: 1.7;
+            -webkit-font-smoothing: antialiased;
+        }
+        a { color: inherit; text-decoration: none; }
+
+        .nav {
+            position: sticky; top:0; z-index:100;
+            background: rgba(18,18,26,0.85);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid var(--border);
+        }
+        .nav-inner {
+            max-width: 1080px; margin:0 auto; padding: 14px 24px;
+            display: flex; align-items: center; gap: 20px;
+        }
+        .nav-brand { font-family: var(--code); font-weight: bold; color: var(--accent); font-size: 1.05rem; letter-spacing: 0.5px; }
+        .nav-brand::before { content: "> "; color: var(--green); }
+        .nav-links { display: flex; gap: 18px; margin-left: auto; }
+        .nav-links a { color: var(--muted); font-size: 0.92rem; }
+        .nav-links a:hover { color: var(--accent); }
+        .nav-gh {
+            padding: 6px 16px; border: 1px solid var(--accent);
+            color: var(--accent); border-radius: 6px; font-size: 0.88rem;
+            transition: all .2s;
+        }
+        .nav-gh:hover { background: var(--accent-dim); }
+
+        .hero { max-width: 1080px; margin:0 auto; padding: 84px 24px 40px; text-align: center; }
+        .eyebrow {
+            display: inline-block; font-size: 0.82rem; letter-spacing: 3px;
+            color: var(--green); border: 1px solid rgba(122,207,89,0.35);
+            border-radius: 20px; padding: 4px 16px; background: rgba(122,207,89,0.06);
+        }
+        .hero h1 {
+            font-family: var(--code);
+            font-size: 3.6rem; margin: 26px 0 14px; letter-spacing: 2px;
+            color: var(--text);
+        }
+        .hero h1 span { color: var(--accent); }
+        .tagline {
+            font-family: "楷体","STKaiti",serif;
+            font-size: 1.15rem; color: var(--text);
+            max-width: 640px; margin: 0 auto 10px;
+        }
+        .tagline-sub { color: var(--muted); font-size: 0.95rem; max-width: 640px; margin: 0 auto; }
+        .chips { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin: 26px 0 30px; }
+        .chip {
+            font-size: 0.85rem; color: var(--muted);
+            border: 1px solid var(--border); border-radius: 16px;
+            padding: 4px 14px; background: var(--panel);
+        }
+        .cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+        .btn {
+            padding: 11px 28px; border-radius: 6px; font-size: 0.98rem; letter-spacing: 1px;
+            transition: all .2s; font-family: inherit;
+        }
+        .btn-primary { background: var(--accent); color: #1a1406; font-weight: 600; }
+        .btn-primary:hover { filter: brightness(1.1); transform: translateY(-1px); }
+        .btn-ghost { border: 1px solid var(--border); color: var(--text); }
+        .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+        /* 终端窗 */
+        .term {
+            max-width: 720px; margin: 48px auto 0; text-align: left;
+            background: #16161f; border: 1px solid var(--border); border-radius: 10px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5); overflow: hidden;
+        }
+        .term-bar {
+            display: flex; align-items: center; gap: 8px;
+            padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--border);
+        }
+        .dot { width: 11px; height: 11px; border-radius: 50%; }
+        .dot.r { background: #e06c75; } .dot.y { background: #e5c07b; } .dot.g { background: #98c379; }
+        .term-title { margin-left: 8px; font-family: var(--code); font-size: 0.78rem; color: var(--muted); }
+        .term-body { padding: 18px 20px; font-family: var(--code); font-size: 0.84rem; line-height: 1.9; }
+        .term-body .prompt { color: var(--green); }
+        .term-body .cmd { color: var(--text); }
+        .term-body .out { color: var(--muted); white-space: pre-wrap; }
+        .term-body .hl { color: var(--accent); }
+        .term-body .dim { color: #5a5870; }
+
+        section { max-width: 1080px; margin: 0 auto; padding: 64px 24px; }
+        .sec-head { text-align: center; margin-bottom: 40px; }
+        .sec-index {
+            display: inline-block; font-family: var(--code); font-size: 0.78rem;
+            letter-spacing: 3px; color: var(--accent); margin-bottom: 8px;
+        }
+        .sec-head h2 { font-size: 1.8rem; letter-spacing: 3px; }
+        .sec-head p { color: var(--muted); font-size: 0.95rem; margin-top: 8px; }
+
+        .feat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; }
+        .feat {
+            background: var(--panel); border: 1px solid var(--border);
+            border-radius: 12px; padding: 26px;
+            transition: transform .25s, border-color .25s;
+        }
+        .feat:hover { transform: translateY(-3px); border-color: rgba(224,164,88,0.5); }
+        .feat .icon { font-size: 1.5rem; }
+        .feat h3 { font-size: 1.12rem; margin: 12px 0 8px; color: var(--accent); }
+        .feat p { font-size: 0.9rem; color: var(--muted); }
+        .feat code {
+            font-family: var(--code); font-size: 0.8rem;
+            background: var(--bg2); border: 1px solid var(--border);
+            border-radius: 4px; padding: 1px 6px; color: var(--green);
+        }
+
+        .layers { display: grid; gap: 12px; max-width: 760px; margin: 0 auto; }
+        .layer {
+            display: flex; gap: 18px; align-items: flex-start;
+            background: var(--panel); border: 1px solid var(--border);
+            border-radius: 10px; padding: 20px 24px;
+        }
+        .layer .num {
+            font-family: var(--code); color: var(--accent); font-size: 0.95rem;
+            flex-shrink: 0; padding-top: 2px;
+        }
+        .layer h3 { font-size: 1.05rem; margin-bottom: 4px; }
+        .layer p { font-size: 0.88rem; color: var(--muted); }
+
+        .quick { max-width: 760px; margin: 0 auto; }
+        .quick pre {
+            background: var(--panel); border: 1px solid var(--border);
+            border-radius: 10px; padding: 20px 24px; overflow-x: auto;
+            font-family: var(--code); font-size: 0.85rem; line-height: 1.9;
+        }
+        .quick pre .c { color: #5a5870; }
+        .quick pre .p { color: var(--green); }
+        .quick pre .v { color: var(--accent); }
+
+        .roadmap { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+        .phase {
+            border: 1px solid var(--border); border-radius: 10px;
+            padding: 16px 22px; background: var(--panel); text-align: center;
+        }
+        .phase .st { font-family: var(--code); font-size: 0.85rem; }
+        .phase.done .st { color: var(--green); }
+        .phase.next .st { color: var(--accent); }
+        .phase .name { font-size: 0.9rem; color: var(--muted); margin-top: 4px; }
+
+        footer {
+            border-top: 1px solid var(--border);
+            padding: 36px 24px 48px; text-align: center;
+            color: var(--muted); font-size: 0.85rem;
+        }
+        footer .flink { color: var(--accent); }
+        @media (max-width: 640px) {
+            .hero h1 { font-size: 2.5rem; }
+            .nav-links { display: none; }
+        }
+    </style>
+</head>
+<body>
+    <nav class="nav">
+        <div class="nav-inner">
+            <span class="nav-brand">md-agent</span>
+            <div class="nav-links">
+                <a href="#features">特性</a>
+                <a href="#arch">架构</a>
+                <a href="#quick">快速开始</a>
+                <a href="#roadmap">路线</a>
+            </div>
+            <a class="nav-gh" href="https://github.com/qing3a/md-agent" target="_blank" rel="noopener">GitHub</a>
+        </div>
+    </nav>
+
+    <header class="hero">
+        <span class="eyebrow">本地双层 MD 知识库 Agent</span>
+        <h1>md-<span>agent</span></h1>
+        <p class="tagline">知识人写人读，AI 只负责整理、关联、推演、生成。</p>
+        <p class="tagline-sub">以 Markdown 为原生知识载体 · 无向量库 · 纯文本检索 · 本地常驻托盘 · 网页终端交互</p>
+        <div class="chips">
+            <span class="chip">🔍 ripgrep 全文检索</span>
+            <span class="chip">🕸 SQLite 知识图谱</span>
+            <span class="chip">🤖 LLM 代理 · SSE 流式</span>
+            <span class="chip">📋 写回待审 · 可审计</span>
+        </div>
+        <div class="cta">
+            <a class="btn btn-primary" href="https://github.com/qing3a/md-agent" target="_blank" rel="noopener">GitHub 仓库</a>
+            <a class="btn btn-ghost" href="#quick">快速开始</a>
+        </div>
+
+        <div class="term">
+            <div class="term-bar">
+                <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+                <span class="term-title">md-agent — 127.0.0.1:8756</span>
+            </div>
+            <div class="term-body">
+                <span class="prompt">&gt; </span><span class="cmd">/search 存续 发展 均衡</span><br>
+                <span class="out">L2 命中 3 处：</span><br>
+                <span class="out">  第一章（道之门）<span class="hl">[文件:12]</span> · 众妙之门，此消彼长是四象的开始</span><br>
+                <span class="out">  第七章（道神）<span class="hl">[文件:41]</span> · 不自生故能长生</span><br>
+                <span class="prompt">&gt; </span><span class="cmd">/graph 第一章（道之门）</span><br>
+                <span class="out">出链 3 · 入链 5 · 关联簇 8（含悬空 1）</span><br>
+                <span class="prompt">&gt; </span><span class="cmd">你的问题（回车）</span><br>
+                <span class="out">注入 L1 规范 → 检索 L2 → 拼 Prompt → 流式回答 → 自动写回待审 <span class="dim">(pending/ 待 /approve)</span></span>
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <section id="features">
+            <div class="sec-head">
+                <span class="sec-index">FEATURES</span>
+                <h2>核心特性</h2>
+                <p>Phase 1（托盘+检索+Agent）+ Phase 2（知识图谱）已完成</p>
+            </div>
+            <div class="feat-grid">
+                <div class="feat">
+                    <div class="icon">📚</div>
+                    <h3>双层知识库</h3>
+                    <p>L1 规范/记忆/索引层（CLAUDE.md 模式，启动注入）+ L2 内容层（按需检索）。<code>INDEX.md</code> 自动生成。</p>
+                </div>
+                <div class="feat">
+                    <div class="icon">🔍</div>
+                    <h3>ripgrep 全文检索</h3>
+                    <p>内嵌 ripgrep 内核：多关键词任一命中、智能大小写、小节上下文（<code>section</code>/<code>context</code>）。</p>
+                </div>
+                <div class="feat">
+                    <div class="icon">🕸</div>
+                    <h3>SQLite 知识图谱</h3>
+                    <p><code>[[双向链接]]</code> 解析、反向链接、孤立文档检测、标签/项目维度统计——关联可审计、可追溯。</p>
+                </div>
+                <div class="feat">
+                    <div class="icon">🤖</div>
+                    <h3>LLM 代理 + 流式</h3>
+                    <p>OpenAI 兼容（Ollama / DeepSeek 等），后端代理防 CORS 与密钥暴露；<code>SSE</code> 流式透传。</p>
+                </div>
+                <div class="feat">
+                    <div class="icon">💬</div>
+                    <h3>Agent 问答回路</h3>
+                    <p>启动注入 L1 → 提取关键词 → 检索 L2 → 拼 Prompt → 流式回答，回答带 <code>[文件:行号]</code> 引用；会话内 4 轮记忆。</p>
+                </div>
+                <div class="feat">
+                    <div class="icon">📋</div>
+                    <h3>写回沉淀 · 待审</h3>
+                    <p>LLM 生成的新知识先进 <code>pending/</code>，<code>/approve</code> 确认后落地（自动重建 INDEX+图谱），不污染知识库。</p>
+                </div>
+                <div class="feat">
+                    <div class="icon">🖥</div>
+                    <h3>托盘常驻</h3>
+                    <p>tray-icon + winit，右键菜单：打开终端 / 同步索引 / 退出。release 单 exe，双击即用。</p>
+                </div>
+                <div class="feat">
+                    <div class="icon">⌨️</div>
+                    <h3>网页终端</h3>
+                    <p>xterm.js 富渲染：标题加粗、行内代码、<code>[[双链]]</code> 着色、表格保留 <code>|</code> 结构、frontmatter 变暗。</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="arch">
+            <div class="sec-head">
+                <span class="sec-index">ARCHITECTURE</span>
+                <h2>四层架构</h2>
+            </div>
+            <div class="layers">
+                <div class="layer">
+                    <div class="num">01</div>
+                    <div>
+                        <h3>常驻底座层</h3>
+                        <p>Rust 托盘常驻 + Axum 本地服务（127.0.0.1，同源托管前端免 CORS）</p>
+                    </div>
+                </div>
+                <div class="layer">
+                    <div class="num">02</div>
+                    <div>
+                        <h3>知识内核层</h3>
+                        <p>双层 MD 布局 / frontmatter 解析 / INDEX 自动生成 / 路径安全</p>
+                    </div>
+                </div>
+                <div class="layer">
+                    <div class="num">03</div>
+                    <div>
+                        <h3>检索引擎层</h3>
+                        <p>ignore 遍历 + grep crate（内嵌 ripgrep），行级小节切分</p>
+                    </div>
+                </div>
+                <div class="layer">
+                    <div class="num">04</div>
+                    <div>
+                        <h3>交互层</h3>
+                        <p>xterm.js 网页终端（Agent 回路 + 管理命令 + 配置页）</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="quick">
+            <div class="sec-head">
+                <span class="sec-index">QUICK START</span>
+                <h2>快速开始</h2>
+            </div>
+            <div class="quick">
+                <pre><span class="c"># 从源码运行（托盘模式）</span>
+<span class="p">$</span> cargo run
+<span class="c"># 纯服务模式（调试） / 自定义端口</span>
+<span class="p">$</span> cargo run -- --no-tray
+<span class="p">$</span> cargo run -- --port 9000
+
+<span class="c"># 浏览器打开可视化配置页，填写 endpoint / model / api_key</span>
+<span class="v">http://127.0.0.1:8756/config.html</span>
+
+<span class="c"># 直接输入问题走 Agent 问答；常用命令：</span>
+<span class="p">&gt;</span> /search 关键词      <span class="c"># 全文检索（显示所属小节）</span>
+<span class="p">&gt;</span> /graph 路径        <span class="c"># 知识图谱：出链 / 入链 / 关联簇</span>
+<span class="p">&gt;</span> /digest 主题       <span class="c"># 检索结果整理成结构化笔记</span>
+<span class="p">&gt;</span> /pending           <span class="c"># 查看待审 → /approve 落地</span>
+<span class="p">&gt;</span> /help              <span class="c"># 全部命令</span></pre>
+            </div>
+        </section>
+
+        <section id="roadmap">
+            <div class="sec-head">
+                <span class="sec-index">ROADMAP</span>
+                <h2>迭代路线</h2>
+            </div>
+            <div class="roadmap">
+                <div class="phase done">
+                    <div class="st">Phase 1 ✅</div>
+                    <div class="name">托盘 + 检索 + Agent 回路 + 写回</div>
+                </div>
+                <div class="phase done">
+                    <div class="st">Phase 2 ✅</div>
+                    <div class="name">SQLite 知识图谱</div>
+                </div>
+                <div class="phase next">
+                    <div class="st">Phase 3 ▶</div>
+                    <div class="name">自组织工作流（待审机制已就绪）</div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>md-agent · Rust · Axum · ripgrep · SQLite · tray-icon · xterm.js</p>
+        <p style="margin-top:10px">
+            <a class="flink" href="https://github.com/qing3a/md-agent" target="_blank" rel="noopener">GitHub 仓库</a>
+            &nbsp;·&nbsp;
+            <a class="flink" href="https://github.com/qing3a/md-agent/blob/main/README.md" target="_blank" rel="noopener">README</a>
+            &nbsp;·&nbsp;
+            <a class="flink" href="https://qing3a.github.io/daode-xingdao-lun/" target="_blank" rel="noopener">作者总站</a>
+        </p>
+    </footer>
+</body>
+</html>
