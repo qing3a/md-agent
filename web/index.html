@@ -19,59 +19,23 @@
   .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #45475a; }
   .xterm-viewport { scrollbar-width: thin; scrollbar-color: #313244 transparent; }
 
-  /* ---- DOM 输入条（原流内输入框迁出；边框用 CSS border 跟随宽度，resize 零变形）---- */
+  /* ---- DOM 输入条（原流内输入框迁出；上下边框包裹输入行，跟随滚动淡出）---- */
   #input-bar {
-    border-top: 1px solid #313244;
     background: #181825;
-    padding: 6px 10px;
+    transition: opacity .25s ease;
   }
-  #quick-btns { display: flex; gap: 6px; margin-bottom: 6px; }
+  #quick-btns { display: flex; gap: 6px; padding: 6px 10px; }
   #quick-btns button {
     background: #313244; color: #a6adc8; border: none; border-radius: 5px;
     padding: 2px 10px; font-size: 12px; cursor: pointer;
   }
   #quick-btns button:hover { background: #45475a; color: #cdd6f4; }
   #quick-btns button:disabled { opacity: .5; cursor: default; }
-  #input-wrap { position: relative; display: flex; align-items: flex-start; }
-  #prompt-tag { color: #89b4fa; font-weight: 700; margin: 2px 8px 0 0; font-size: 14px; line-height: 20px; }
-  #cmd-input {
-    flex: 1; background: transparent; border: none; outline: none;
-    color: #cdd6f4; font-size: 14px; font-family: Consolas, "Cascadia Mono", monospace;
-    resize: none; line-height: 20px; padding: 0;
-  }
-  #cmd-input::placeholder { color: #6c7086; }
-  #send-btn {
-    background: #313244; color: #cdd6f4; border: none; border-radius: 5px;
-    padding: 3px 12px; font-size: 13px; cursor: pointer; margin: 1px 0 0 8px;
-  }
-  #send-btn:hover { background: #45475a; }
-  #send-btn:disabled { opacity: .5; cursor: default; }
-
+  /* 输入框上下两条全宽横线（定稿视觉：上边框 + 输入行 + 下边框） */
   /* 命令补全面板：悬浮在输入框上方（absolute 定位，不占布局） */
-  #autocomplete {
-    position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 50;
-    background: #181825; border: 1px solid #45475a; border-radius: 6px;
-    max-height: 240px; overflow-y: auto; min-width: 280px;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, .4);
-  }
-  #autocomplete.hidden { display: none; }
-  #autocomplete .ac-item { padding: 5px 12px; font-size: 13px; color: #a6adc8; cursor: pointer; }
-  #autocomplete .ac-item.sel { background: #313244; color: #cdd6f4; }
-  #autocomplete .ac-desc { color: #6c7086; font-size: 11px; margin-left: 8px; }
 
   /* ---- DOM 状态条（原流内状态行迁出；8s 轮询刷文本，不随终端滚动）---- */
-  #status-bar {
-    display: flex; align-items: center; gap: 8px;
-    background: #11111b; border-top: 1px solid #313244;
-    padding: 4px 12px; font-size: 12px; color: #a6adc8;
-    white-space: nowrap; overflow: hidden;
-  }
-  #status-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-  #status-dot.ok { background: #a6e3a1; }
   #status-dot.bad { background: #f38ba8; }
-  #status-text { overflow: hidden; text-overflow: ellipsis; }
-  #status-warn { color: #f9e2af; flex: none; }
-
   /* /view 面板渲染层：iframe 沙箱浮层（图谱可视化等 HTML 视图） */
   #view-overlay {
     position: fixed; inset: 0; z-index: 100; background: #11111b;
@@ -95,7 +59,7 @@
 <div id="app">
   <div id="terminal"></div>
 
-  <!-- DOM 输入条：快捷按钮 + 输入框 + 补全面板（原流内输入框/状态行迁出终端流） -->
+  <!-- 快捷工具栏（DOM）：输入框/状态栏回流内终端流（贴内容末尾），按钮行保留 -->
   <div id="input-bar">
     <div id="quick-btns">
       <button data-cmd="/sync" title="重建 INDEX.md（自动索引 L2）">同步</button>
@@ -105,19 +69,6 @@
       <button data-cmd="/clear" title="清空多轮对话记忆">清记忆</button>
       <button data-cmd="/help" title="命令列表">帮助</button>
     </div>
-    <div id="input-wrap">
-      <span id="prompt-tag">❯</span>
-      <textarea id="cmd-input" rows="1" spellcheck="false" placeholder="输入问题，或 /help 查看命令（Enter 提交，Shift+Enter 换行，↑↓ 翻历史，Tab 补全）"></textarea>
-      <button id="send-btn">发送</button>
-      <div id="autocomplete" class="hidden"></div>
-    </div>
-  </div>
-
-  <!-- DOM 状态条：服务/模型/KB/待审/任务/图谱/心跳 + 审计警告 -->
-  <div id="status-bar">
-    <span id="status-dot" title="服务状态"></span>
-    <span id="status-text">状态加载中…</span>
-    <span id="status-warn" style="display:none"></span>
   </div>
 </div>
 

@@ -20,9 +20,19 @@
   fit.fit();
   // resize 防抖（150ms），避免拖动窗口时频繁重排终端
   let fitTimer = null;
+  // resize 重画输入框（方案 A：reflow 变形后重画 4 行结构，光标送回输入行）
+  function redrawPromptIfVisible() {
+    if (!atPrompt) return;
+    if (term.buffer.active.cursorY + 3 >= term.rows) return;
+    term.write('\x1b[1A\x1b[2K\r' + hline());                 // 上边框
+    term.write('\x1b[1B\x1b[2K\r' + PROMPT + line);           // 输入行
+    term.write('\x1b[1B\x1b[2K\r' + hline());                 // 下边框
+    term.write('\x1b[1B\x1b[2K\r' + (statusLine || ''));      // 状态行
+    term.write('\x1b[3A\x1b[2K\r' + PROMPT + line);           // 光标回输入行
+  }
   window.addEventListener('resize', () => {
     clearTimeout(fitTimer);
-    fitTimer = setTimeout(() => fit.fit(), 150);
+    fitTimer = setTimeout(() => { fit.fit(); redrawPromptIfVisible(); }, 150);
   });
 
   const PROMPT = '\x1b[1;34mmd-agent>\x1b[0m ';
@@ -40,42 +50,60 @@
     try { localStorage.setItem('md-agent-history', JSON.stringify(history.slice(-MAX_HISTORY))); } catch (e) { /* 忽略 */ }
   }
 
-  // ---- DOM chrome（输入条 / 状态条 / 补全面板）----
-  // UI 迁出终端流：输入框、边框、状态栏全部为 DOM 元素（业界标准——resize 由 CSS 自动适配，不再有字符边框变形）
-  const cmdInput = document.getElementById('cmd-input');
-  const sendBtn = document.getElementById('send-btn');
-  const autoPanel = document.getElementById('autocomplete');
-  const statusDot = document.getElementById('status-dot');
-  const statusText = document.getElementById('status-text');
-  const statusWarn = document.getElementById('status-warn');
+  // ---- 流内输入框 + 状态行（输入框在内容末尾：上边框/输入行/下边框/状态行 4 行结构）----
+  let line = '';                       // 当前输入行内容
+  let statusLine = '';                 // 状态栏最新文本（可含 ANSI）
+  let atPrompt = false;                // 光标是否停在输入框（决定状态栏能否原地重绘）
+  function hline() { return '\x1b[90m' + '\u2500'.repeat(trueCols()) + '\x1b[0m'; }
+  function dispW(s) {
+    let w = 0;
+    for (const ch of String(s)) {
+      w += /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/.test(ch) ? 2 : 1;
+    }
+    return w;
+  }
+  function visOnly(s) { return s.replace(/\x1b\[[0-9;]*m/g, ''); }
+  function truncateW(s, maxW) {
+    const plain = visOnly(s);
+    if (dispW(plain) <= maxW) return s;
+    let out = ''; let w = 0;
+    for (const ch of Array.from(plain)) {
+      const cw = dispW(ch);
+      if (w + cw > maxW - 1) break;
+      out += ch; w += cw;
+    }
+    return out + '\u2026';
+  }
+  // 重绘状态行（要求光标在输入框）：下移两行（越过下边框）到状态行，重绘后回输入框
+  function drawStatusRow() {
+    if (!atPrompt || !statusLine) return;
+    if (term.buffer.active.cursorY + 2 >= term.rows) return;
+    term.write('\x1b[2B\x1b[2K\r' + statusLine + '\x1b[2A\x1b[2K\r' + PROMPT + line);
+  }
+  // 输入框（输入中）：上边框 + 输入行 + 下边框 + 状态行；光标回输入行
+  function showPrompt() {
+    term.write(hline() + '\r\n' + PROMPT + line + '\r\n' + hline() + '\r\n' + (statusLine || ''));
+    term.write('\x1b[2A\x1b[2K\r' + PROMPT + line);
+    atPrompt = true;
+  }
+  // 回车提交：输入框边框与状态行移除、输入行变整行背景色块（已提交消息），回答从下方开始
+  function submitMsg() {
+    atPrompt = false;
+    const bg = '\x1b[48;2;49;50;68m';
+    term.write('\x1b[1A\x1b[2K\r');
+    term.write('\x1b[1B\x1b[2K\r' + bg + ' '.repeat(trueCols()) + '\r' + PROMPT + line + '\x1b[0m');
+    term.write('\x1b[1B\x1b[2K\r');
+    term.write('\x1b[1B\x1b[2K\r');
+    term.write('\r\n');
+  }
+  // 流内重绘输入行（退格/历史/补全用）
+  function redrawInput() { term.write('\x1b[2K\r' + PROMPT + line); }
   const quickBtns = [...document.querySelectorAll('#quick-btns button')];
-  const inputBar = document.getElementById('input-bar');
 
   let busy = false;          // 命令/回答进行中（提交/按钮禁用，输入框仍可编辑）
   let cmdHistory = [];       // 命令行历史（会话内；区别于多轮对话 history）
   let histIdx = -1;
   let currentAbort = null;   // 当前 LLM 流的 AbortController（Ctrl+C 中断回答）
-
-  // ---------- 输入条跟随滚动（复刻"输入框在内容末尾、随内容流动"语义）----------
-  // 滚上历史 → 输入条淡出（占位保留，布局不跳）；回到底部/输入时自动滚底恢复
-  function atBufferBottom() {
-    try {
-      const buf = term.buffer.active;
-      return buf.viewportY >= buf.baseY - 1;
-    } catch (e) {
-      const vp = document.querySelector('.xterm-viewport');
-      if (!vp) return true;
-      return vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 8;
-    }
-  }
-  function syncInputBar() {
-    inputBar.classList.toggle('scrolled-away', !atBufferBottom());
-  }
-  term.onScroll(() => syncInputBar());
-  function ensureInputVisible() {
-    term.scrollToBottom();
-    syncInputBar();
-  }
 
   // 终端实测列宽（消息块铺背景用；term.cols 是 fit 估算值，实测偏大 2 列）
   function trueCols() {
@@ -92,17 +120,14 @@
   // ---------- 输入与提交 ----------
 
   // 提交一条命令/问题：流内整行背景块 + 执行；回答期间（busy）忽略
+  // 提交一条命令/问题（快捷按钮/流内回车统一入口）：整行背景块 + 执行；回答期间（busy）忽略
   async function submitCmd(text) {
     const t = String(text || '').trim();
     if (!t || busy || confirmCb) return;
-    const bg = '\x1b[48;2;49;50;68m'; // #313244 深蓝灰背景（提交消息块）
-    for (const seg of t.split('\n')) {
-      term.write(bg + ' '.repeat(trueCols()) + '\r' + PROMPT + seg + '\x1b[0m\r\n');
-    }
-    cmdInput.value = '';
-    autoSize();
+    line = t;
+    submitMsg();      // 流内提交块（边框移除 + 背景色 + 清状态行）
+    line = '';
     pushHistory(t);
-    closeAuto();
     busy = true;
     setBusyUI();
     try {
@@ -112,49 +137,37 @@
     } finally {
       busy = false;
       setBusyUI();
+      showPrompt();   // 回答结束后重画输入框（上边框/输入行/下边框/状态行）
       refreshStatus();
-      cmdInput.focus();
     }
   }
 
   function setBusyUI() {
-    sendBtn.disabled = busy;
     quickBtns.forEach((b) => (b.disabled = busy));
   }
 
-  // textarea 自适应高度（1~3 行）
-  function autoSize() {
-    cmdInput.rows = Math.min(1 + (cmdInput.value.match(/\n/g) || []).length, 3);
-  }
-
-  cmdInput.addEventListener('input', () => { autoSize(); renderAutoComplete(); ensureInputVisible(); });
-  cmdInput.addEventListener('focus', () => { ensureInputVisible(); if (!cmdInput.value) openAuto(true); });
-  cmdInput.addEventListener('keydown', (ev) => {
+  // xterm 按键扩展：↑↓ 历史、Tab 命令补全、Ctrl+C 中断（流内输入，焦点在终端）
+  term.attachCustomKeyEventHandler((ev) => {
     const k = ev.key;
-    if (k === 'Enter' && !ev.shiftKey) {
+    if (k === 'ArrowUp' || k === 'ArrowDown') {
       ev.preventDefault();
-      if (autoOpen() && acSel >= 0) { acceptAuto(); return; }
-      submitCmd(cmdInput.value);
-    } else if (k === 'ArrowDown' || k === 'ArrowUp') {
-      if (autoOpen()) { ev.preventDefault(); moveAc(k === 'ArrowDown' ? 1 : -1); return; }
-      if (!cmdInput.value) { ev.preventDefault(); navHistory(k === 'ArrowUp' ? 1 : -1); }
-    } else if (k === 'Tab') {
-      if (autoOpen()) { ev.preventDefault(); acceptAuto(); }
-      else { ev.preventDefault(); openAuto(true); }
-    } else if (k === 'Escape') {
-      if (autoOpen()) { ev.preventDefault(); closeAuto(); }
-    } else if (k === 'c' && ev.ctrlKey && !cmdInput.value && currentAbort) {
+      navHistory(k === 'ArrowUp' ? 1 : -1);
+      return false;
+    }
+    if (k === 'Tab') {
+      ev.preventDefault();
+      completeCmd();
+      return false;
+    }
+    if (k === 'c' && ev.ctrlKey && currentAbort) {
       ev.preventDefault();
       currentAbort.abort();
       term.writeln('\x1b[90m(已发送中断)\x1b[0m');
+      return false;
     }
+    return true;
   });
-  sendBtn.addEventListener('click', () => submitCmd(cmdInput.value));
   quickBtns.forEach((btn) => btn.addEventListener('click', () => submitCmd(btn.dataset.cmd)));
-  // 点击输入区外部关闭补全
-  document.addEventListener('click', (ev) => {
-    if (!cmdInput.contains(ev.target) && !autoPanel.contains(ev.target)) closeAuto();
-  });
 
   // ---------- 输入历史（会话内，空输入时 ArrowUp/Down 翻动） ----------
   function pushHistory(t) {
@@ -171,12 +184,10 @@
     } else {       // 下（更新）
       if (histIdx === -1) return;
       histIdx++;
-      if (histIdx >= cmdHistory.length) { histIdx = -1; cmdInput.value = ''; autoSize(); return; }
+      if (histIdx >= cmdHistory.length) { histIdx = -1; line = ''; redrawInput(); return; }
     }
-    cmdInput.value = cmdHistory[histIdx] || '';
-    autoSize();
-    const len = cmdInput.value.length;
-    cmdInput.setSelectionRange(len, len);
+    line = cmdHistory[histIdx] || '';
+    redrawInput();
   }
 
   // ---------- 命令补全面板 ----------
@@ -193,66 +204,17 @@
     ['/config', '查看配置'], ['/heartbeat', '心跳自动同步'], ['/health', '健康检查'],
     ['clear', '清屏'],
   ];
-  let acItems = [];
-  let acSel = -1;
-  function autoOpen() { return !autoPanel.classList.contains('hidden'); }
-  function closeAuto() { autoPanel.classList.add('hidden'); acItems = []; acSel = -1; }
-  function escHtml(s) {
-    return String(s).replace(/[&<>"']/g, (m) =>
-      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+  // ---------- 命令补全（流内 Tab 循环；/ 开头才触发，无下拉浮层） ----------
+  let acIdx = -1;
+  function completeCmd() {
+    const head = line.match(/^(\/[^\s]*)/);
+    if (!head) return;
+    const list = COMMANDS.map(([c]) => c).filter((c) => c.startsWith(head[1]) && c !== head[1]);
+    if (!list.length) return;
+    acIdx = (acIdx + 1) % list.length;
+    line = list[acIdx];
+    redrawInput();
   }
-  function renderAutoComplete(force) {
-    const v = cmdInput.value;
-    const head = (v.match(/^\s*(\/[^\s]*)?/) || [])[1] || '';
-    let list;
-    if (head) {
-      // 命令补全：/ 开头才触发；无匹配或已完整输入 → 关闭
-      list = COMMANDS.filter(([c]) => c.startsWith(head)).slice(0, 8);
-      if (!list.length || list[0][0] === head) { closeAuto(); return; }
-      acSel = list.findIndex(([c]) => c === head); // 精确匹配才默认选中；否则 -1（Enter 提交，不被补全劫持）
-    } else if (force) {
-      list = COMMANDS.slice(0, 8); // 显式打开（focus）→ 常用命令
-      acSel = 0;
-    } else {
-      closeAuto(); return; // 普通提问不弹补全
-    }
-    acItems = list;
-    autoPanel.innerHTML = acItems.map(([c, d], i) =>
-      '<div class="ac-item' + (i === acSel ? ' sel' : '') + '" data-i="' + i + '">' +
-      escHtml(c) + '<span class="ac-desc">' + escHtml(d) + '</span></div>'
-    ).join('');
-    autoPanel.classList.remove('hidden');
-  }
-  function updateSelUI() {
-    autoPanel.querySelectorAll('.ac-item').forEach((el, i) => el.classList.toggle('sel', i === acSel));
-  }
-  function moveAc(d) {
-    if (!acItems.length) return;
-    acSel = (acSel + d + acItems.length) % acItems.length;
-    updateSelUI();
-    const sel = autoPanel.querySelector('.ac-item.sel');
-    if (sel) sel.scrollIntoView({ block: 'nearest' });
-  }
-  function acceptAuto() {
-    if (acSel < 0 || !acItems.length) return;
-    const cmd = acItems[acSel][0];
-    cmdInput.value = cmd + cmdInput.value.replace(/^\s*\/?[^\s]*/, '');
-    autoSize();
-    closeAuto();
-    const len = cmdInput.value.length;
-    cmdInput.setSelectionRange(len, len);
-    cmdInput.focus();
-  }
-  function openAuto(selectFirst) {
-    renderAutoComplete(true);
-    if (selectFirst && acItems.length) { acSel = 0; updateSelUI(); }
-  }
-  autoPanel.addEventListener('click', (ev) => {
-    const el = ev.target.closest('.ac-item');
-    if (!el) return;
-    acSel = parseInt(el.dataset.i, 10);
-    acceptAuto();
-  });
 
   // ---- 启动欢迎 banner + 状态信息（异步汇总；bannerDone 保证状态行先于输入框打印）----
   let bannerDone = Promise.resolve();
@@ -282,7 +244,7 @@
   }
   printBanner();
 
-  // ---- DOM 状态条（输入框下方固定行；命令后刷新 + 8s 轮询，不随终端滚动）----
+  // ---- 终端内状态栏（输入框下方第 4 行；命令后刷新 + 8s 轮询，原地重绘）----
   function refreshStatus() {
     Promise.all([
       fetch('/api/health').then((r) => r.json()).catch(() => null),
@@ -299,23 +261,21 @@
       const todo = (t && t.stats) ? (t.stats.todo || 0) + (t.stats.doing || 0) : '-';
       const gs = (g && g.docs) ? (g.docs || 0) + ' 文档 / ' + (g.links || 0) + ' 链接' : '-';
       const hbTxt = hb ? (hb.enabled ? '心跳开' : '心跳关') : '';
-      statusDot.className = ok ? 'ok' : 'bad';
-      statusDot.title = ok ? '服务运行中' : '服务异常';
-      const parts = [
-        ok ? '服务运行中' : '服务异常',
-        '模型 ' + model, 'KB ' + kb, '待审 ' + pend, '任务 ' + todo, '图谱 ' + gs,
-      ];
-      if (hbTxt) parts.push(hbTxt);
-      statusText.textContent = parts.join(' · ');
-      let warn = '';
+      let auditTxt = '';
       if (hb && hb.audit && (hb.audit.orphans || hb.audit.dangling || hb.audit.duplicates || hb.audit.mentions)) {
-        warn = '⚠ 审计' +
+        auditTxt = ' ⚠审计' +
           (hb.audit.orphans ? '孤立' + hb.audit.orphans : '') +
           (hb.audit.dangling ? '悬空' + hb.audit.dangling : '') +
           (hb.audit.duplicates ? '重复' + hb.audit.duplicates : '');
       }
-      statusWarn.textContent = warn;
-      statusWarn.style.display = warn ? '' : 'none';
+      statusLine = truncateW(
+        '\x1b[' + (ok ? '32' : '31') + 'm●\x1b[0m ' + (ok ? '服务运行中' : '服务异常') +
+        '\x1b[90m · 模型 ' + model + ' · KB ' + kb + ' · 待审 ' + pend +
+        ' · 任务 ' + todo + ' · 图谱 ' + gs +
+        (hbTxt ? ' · ' + hbTxt : '') +
+        (auditTxt ? '\x1b[33m' + auditTxt + '\x1b[0m' : '') + '\x1b[0m',
+        trueCols() - 1);
+      drawStatusRow();
     }).catch(() => {});
   }
   refreshStatus();
@@ -338,7 +298,7 @@
       term.writeln('\x1b[33mL1 加载失败: ' + e.message + '\x1b[0m');
     }
     await bannerDone;
-    cmdInput.focus();
+    showPrompt(); // 输入框（上边框/输入行/下边框/状态行）在内容末尾
   })();
 
   // 终端确认机制：confirm(msg) 挂起等待 y/n 按键（写操作人审闭环的基础设施）
@@ -352,15 +312,37 @@
     });
   }
 
-  // 终端键盘只处理 confirm（y/n）；普通输入走 DOM 输入框（cmdInput）
+  // 终端键盘：confirm 分支 + 流内输入（回车提交/退格/追加式）
   term.onData((data) => {
-    if (!confirmCb) return;
     const code = data.charCodeAt(0);
-    const c = data.trim().toLowerCase();
-    const cb = confirmCb;
-    if (c === 'y') { confirmCb = null; term.writeln('\x1b[32m✓ 已确认\x1b[0m'); cb(true); cmdInput.focus(); }
-    else if (c === 'n' || data === '\r' || code === 27) { confirmCb = null; term.writeln('\x1b[90m已取消\x1b[0m'); cb(false); cmdInput.focus(); }
-    else { term.write('\b \b'); } // 忽略其他键
+    // 终端确认机制（写操作人审：y/n）
+    if (confirmCb) {
+      const c = data.trim().toLowerCase();
+      const cb = confirmCb;
+      if (c === 'y') { confirmCb = null; term.writeln('\x1b[32m✓ 已确认\x1b[0m'); cb(true); showPrompt(); }
+      else if (c === 'n' || data === '\r' || code === 27) { confirmCb = null; term.writeln('\x1b[90m已取消\x1b[0m'); cb(false); showPrompt(); }
+      else { term.write('\b \b'); }
+      return;
+    }
+    if (data === '\r') {
+      const cmd = line.trim();
+      submitCmd(cmd); // 统一提交入口（提交块 + run + finally showPrompt）
+      return;
+    }
+    if (data === '\x7f' || data === '\x08') {
+      // 退格（兼容 DEL/BS）：Array.from 字符级切片（代理对安全，不劈 emoji），整行重绘
+      if (line.length) {
+        const chars = Array.from(line);
+        chars.pop();
+        line = chars.join('');
+        redrawInput();
+      }
+    } else if (code >= 32) {
+      // 超长保护：输入行 wrap 会让下方边框/状态行错位，接近行宽时静默忽略
+      if (dispW(visOnly(PROMPT + line + data)) >= trueCols() - 2) return;
+      line += data;
+      term.write(data); // 追加式：光标自然跟随内容
+    }
   });
 
   // 本地日期（YYYY-MM-DD），避免 toISOString 的 UTC 偏移把凌晨算成前一天
