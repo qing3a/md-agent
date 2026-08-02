@@ -678,14 +678,65 @@
     return JSON.stringify(r).slice(0, 3000);
   }
 
-  // 解析工具调用 JSON：必须以 { 开头且 tool 在注册表
+  // 栈扫描提取顶层 JSON 对象（正确处理嵌套 args 与字符串内大括号）
+  function extractJsonObjects(text) {
+    const out = [];
+    let i = 0;
+    while (i < text.length) {
+      if (text[i] !== '{') { i++; continue; }
+      let depth = 0, j = i, inStr = false;
+      for (; j < text.length; j++) {
+        const ch = text[j];
+        if (inStr) {
+          if (ch === '\\') j++;
+          else if (ch === '"') inStr = false;
+          continue;
+        }
+        if (ch === '"') inStr = true;
+        else if (ch === '{') depth++;
+        else if (ch === '}') { depth--; if (depth === 0) break; }
+      }
+      if (depth !== 0) break; // 未闭合，放弃
+      out.push(text.slice(i, j + 1));
+      i = j + 1;
+    }
+    return out;
+  }
+
+  // 解析工具调用 JSON：必须以 { 开头；支持一次输出多个工具 JSON（DeepSeek 会用空格分隔），取第一个合法；
+  // 兼容平铺参数（{"tool":"x","q":..}）与 args 包裹（{"tool":"x","args":{..}}）
   function tryParseTool(text) {
     const t = String(text || '').trim();
     if (!t.startsWith('{')) return null;
-    try {
-      const j = JSON.parse(t);
-      if (j && typeof j.tool === 'string' && TOOL_API[j.tool] && (!j.args || typeof j.args === 'object')) return j;
-    } catch (e) { /* 非工具 JSON */ }
+    for (const raw of extractJsonObjects(t)) {
+      try {
+        const j = JSON.parse(raw);
+        if (j && typeof j.tool === 'string' && TOOL_API[j.tool]) {
+          const args = (j.args && typeof j.args === 'object' && !Array.isArray(j.args)) ? j.args : j;
+          return { tool: j.tool, args };
+        }
+      } catch (e) { /* 跳过非工具 JSON 对象 */ }
+    }
+    return null;
+  }
+
+  // 流结束后全文检测工具调用：DeepSeek 可能先输出简短说明再输出工具 JSON（前缀 <200 字视为工具意图）
+  function detectToolInFull(text) {
+    const t = String(text || '').trim();
+    if (t.startsWith('{')) return tryParseTool(t);
+    const ti = t.indexOf('{"tool"');
+    if (ti === -1) return null;
+    const lead = t.slice(0, ti).trim();
+    if (lead.length > 200) return null; // 前缀是长正文，非工具调用
+    for (const raw of extractJsonObjects(t.slice(ti))) {
+      try {
+        const j = JSON.parse(raw);
+        if (j && typeof j.tool === 'string' && TOOL_API[j.tool]) {
+          const args = (j.args && typeof j.args === 'object' && !Array.isArray(j.args)) ? j.args : j;
+          return { tool: j.tool, args };
+        }
+      } catch (e) { /* 跳过 */ }
+    }
     return null;
   }
 
@@ -826,13 +877,15 @@
     } finally {
       currentAbort = null;
     }
-    // 工具模式：流结束后解析完整 JSON；误判（正常回答以 { 开头）→ 补标题 + 整段渲染
+    // 工具识别：纯 JSON 开头（toolMode）→ 解析；否则全文检测（DeepSeek 可能先简短说明再调工具）
     if (toolMode) {
       toolJson = tryParseTool(full);
       if (!toolJson) {
         term.writeln(TITLE);
         term.write(renderMdFile(full));
       }
+    } else {
+      toolJson = detectToolInFull(full);
     }
     return { full, reasoning, reasoningStartAt, firstContentAt, lastUsage, toolJson };
   }
@@ -901,9 +954,9 @@
       '以下是知识库 L1 规范/记忆/索引层（权威约定，需遵循）：',
       L1_TEXT || '(L1 未加载)',
       '',
-      '工具调用（可选——上方检索片段可能不完整，需要更多知识库/网页/文件信息时主动使用）：',
-      '需要工具时，**只输出一行 JSON**（不要任何其它文字、不要代码块标记、不要解释）：',
-      '{"tool":"<工具名>","args":{...}}',
+      '工具调用（需要更多知识库/网页/文件信息时主动使用）：',
+      '调用工具时**第一行就输出**：{"tool":"<工具名>","args":{...}}（不要先输出解释或其它文字，不要代码块标记）；',
+      '需要多个信息时可连续输出多行工具调用。',
       '可用工具：',
       toolsTxt || '(工具清单加载失败)',
       '调用后你会收到「工具返回」，基于它继续回答；不需要工具时直接回答。',
@@ -960,11 +1013,21 @@
       try { result = await runTool(tj.tool, tj.args); }
       catch (e) { result = '工具调用失败: ' + ((e && e.message) || e); }
       messages.push({ role: 'assistant', content: r.full });
-      messages.push({ role: 'user', content: '工具 ' + tj.tool + ' 返回（权威上下文，引用标注 [工具:' + tj.tool + ']）：\n' + String(result).slice(0, 4000) });
+      messages.push({ role: 'user', content: '工具 ' + tj.tool + ' 返回（基于它直接回答；仍缺关键信息才可再调用工具，引用标注 [工具:' + tj.tool + ']）：\n' + String(result).slice(0, 4000) });
       full = ''; // 工具轮内容不渲染
       toolCount++;
       if (toolCount >= MAX_TOOL) {
-        term.writeln('\x1b[33m(工具调用已达 ' + MAX_TOOL + ' 次上限，停止循环)\x1b[0m');
+        // 达上限：强制回答轮（去掉工具调用指令，避免 LLM 无限探索不收敛）
+        term.writeln('\x1b[33m(工具调用已达 ' + MAX_TOOL + ' 次上限，基于已获取信息回答)\x1b[0m');
+        messages.push({ role: 'user', content: '请基于上述工具返回直接给出最终回答，不要调用任何工具。' });
+        const r2 = await llmStreamOnce(messages);
+        if (r2 && !r2.toolJson) {
+          full = r2.full;
+          reasoning = r2.reasoning;
+          reasoningStartAt = r2.reasoningStartAt;
+          firstContentAt = r2.firstContentAt;
+          lastUsage = r2.lastUsage;
+        }
         break;
       }
     }
