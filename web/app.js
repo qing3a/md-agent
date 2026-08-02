@@ -49,11 +49,33 @@
   const statusText = document.getElementById('status-text');
   const statusWarn = document.getElementById('status-warn');
   const quickBtns = [...document.querySelectorAll('#quick-btns button')];
+  const inputBar = document.getElementById('input-bar');
 
   let busy = false;          // 命令/回答进行中（提交/按钮禁用，输入框仍可编辑）
   let cmdHistory = [];       // 命令行历史（会话内；区别于多轮对话 history）
   let histIdx = -1;
   let currentAbort = null;   // 当前 LLM 流的 AbortController（Ctrl+C 中断回答）
+
+  // ---------- 输入条跟随滚动（复刻"输入框在内容末尾、随内容流动"语义）----------
+  // 滚上历史 → 输入条淡出（占位保留，布局不跳）；回到底部/输入时自动滚底恢复
+  function atBufferBottom() {
+    try {
+      const buf = term.buffer.active;
+      return buf.viewportY >= buf.baseY - 1;
+    } catch (e) {
+      const vp = document.querySelector('.xterm-viewport');
+      if (!vp) return true;
+      return vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 8;
+    }
+  }
+  function syncInputBar() {
+    inputBar.classList.toggle('scrolled-away', !atBufferBottom());
+  }
+  term.onScroll(() => syncInputBar());
+  function ensureInputVisible() {
+    term.scrollToBottom();
+    syncInputBar();
+  }
 
   // 终端实测列宽（消息块铺背景用；term.cols 是 fit 估算值，实测偏大 2 列）
   function trueCols() {
@@ -105,8 +127,8 @@
     cmdInput.rows = Math.min(1 + (cmdInput.value.match(/\n/g) || []).length, 3);
   }
 
-  cmdInput.addEventListener('input', () => { autoSize(); renderAutoComplete(); });
-  cmdInput.addEventListener('focus', () => { if (!cmdInput.value) openAuto(true); });
+  cmdInput.addEventListener('input', () => { autoSize(); renderAutoComplete(); ensureInputVisible(); });
+  cmdInput.addEventListener('focus', () => { ensureInputVisible(); if (!cmdInput.value) openAuto(true); });
   cmdInput.addEventListener('keydown', (ev) => {
     const k = ev.key;
     if (k === 'Enter' && !ev.shiftKey) {
@@ -179,15 +201,22 @@
     return String(s).replace(/[&<>"']/g, (m) =>
       ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
   }
-  function renderAutoComplete() {
+  function renderAutoComplete(force) {
     const v = cmdInput.value;
     const head = (v.match(/^\s*(\/[^\s]*)?/) || [])[1] || '';
-    const list = head
-      ? COMMANDS.filter(([c]) => c.startsWith(head)).slice(0, 8)
-      : COMMANDS.slice(0, 8); // 空输入 → 常用命令
-    if (!list.length || (head && list[0][0] === head)) { closeAuto(); return; }
+    let list;
+    if (head) {
+      // 命令补全：/ 开头才触发；无匹配或已完整输入 → 关闭
+      list = COMMANDS.filter(([c]) => c.startsWith(head)).slice(0, 8);
+      if (!list.length || list[0][0] === head) { closeAuto(); return; }
+      acSel = list.findIndex(([c]) => c === head); // 精确匹配才默认选中；否则 -1（Enter 提交，不被补全劫持）
+    } else if (force) {
+      list = COMMANDS.slice(0, 8); // 显式打开（focus）→ 常用命令
+      acSel = 0;
+    } else {
+      closeAuto(); return; // 普通提问不弹补全
+    }
     acItems = list;
-    acSel = Math.max(0, list.findIndex(([c]) => c === head));
     autoPanel.innerHTML = acItems.map(([c, d], i) =>
       '<div class="ac-item' + (i === acSel ? ' sel' : '') + '" data-i="' + i + '">' +
       escHtml(c) + '<span class="ac-desc">' + escHtml(d) + '</span></div>'
@@ -215,7 +244,7 @@
     cmdInput.focus();
   }
   function openAuto(selectFirst) {
-    renderAutoComplete();
+    renderAutoComplete(true);
     if (selectFirst && acItems.length) { acSel = 0; updateSelUI(); }
   }
   autoPanel.addEventListener('click', (ev) => {
