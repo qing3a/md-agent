@@ -38,12 +38,9 @@
 
   // ---- 输入行边框：提示前一条上横线、回车后一条下横线，把输入行夹住 ----
   // ---- 输入行边框：上下两条全宽横线（无左右竖线）；输入为追加式写入（光标自然跟随，IME 正常）；
-  //      状态栏（DOM）在输入行下一行——showPrompt 垫空行保证输入行恒在可视区底部 ----
+  //      输入行位置自然（内容末尾，默认终端行为）；状态栏为窗口底部 DOM 条 ----
   function hline() { return '\x1b[90m' + '─'.repeat(term.cols) + '\x1b[0m'; }
   function showPrompt() {
-    // 内容不满一屏时补空行，让输入行落在可视区最后一行（状态栏紧贴其下）
-    const n = term.rows - 1 - term.buffer.active.cursorY;
-    if (n > 0) term.write('\n'.repeat(n));
     term.write(hline() + '\r\n' + PROMPT);
   }
   function closeBox() { term.write('\r\n' + hline() + '\r\n'); }
