@@ -1,0 +1,31 @@
+[package]
+name = "md-agent"
+version = "0.1.0"
+edition = "2021"
+description = "本地双层 MD 知识库 Agent：系统托盘 + Axum 服务 + 内嵌 ripgrep 检索 + xterm.js 终端"
+license = "MIT"
+
+[dependencies]
+# HTTP 服务
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "net"] }
+tower-http = { version = "0.6", features = ["fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 检索引擎（内嵌 ripgrep 内核：grep 为元 crate，ignore 负责文件遍历）
+grep = "0.3"
+regex = "1"
+ignore = "0.4"
+# LLM 代理（Ollama / OpenAI 兼容，走后端防 CORS 与密钥暴露）
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+futures-util = "0.3"
+# 知识图谱（SQLite 元数据 + 双向链接）
+rusqlite = { version = "0.32", features = ["bundled"] }
+# 杂项
+chrono = "0.4"
+# 系统托盘
+tray-icon = "0.24"
+winit = "0.30"
+
+[profile.release]
+strip = true

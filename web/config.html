@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>md-agent 配置</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; padding: 40px 20px;
+    background: #1e1e2e; color: #cdd6f4;
+    font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  }
+  .card {
+    max-width: 560px; margin: 0 auto;
+    background: #181825; border: 1px solid #313244; border-radius: 12px;
+    padding: 28px 32px;
+  }
+  h1 { margin: 0 0 4px; font-size: 20px; color: #f5e0dc; }
+  .sub { color: #7f849c; font-size: 13px; margin: 0 0 24px; }
+  label { display: block; font-size: 13px; color: #a6adc8; margin: 14px 0 6px; }
+  input {
+    width: 100%; padding: 9px 12px; border-radius: 8px;
+    border: 1px solid #313244; background: #11111b; color: #cdd6f4;
+    font-size: 14px; outline: none;
+  }
+  input:focus { border-color: #89b4fa; }
+  input::placeholder { color: #585b70; }
+  .row { display: flex; gap: 10px; margin-top: 22px; }
+  button {
+    flex: 1; padding: 10px 0; border-radius: 8px; border: none;
+    font-size: 14px; cursor: pointer; font-weight: 600;
+  }
+  #saveBtn { background: #89b4fa; color: #11111b; }
+  #saveBtn:hover { background: #a6c8ff; }
+  #testBtn { background: #313244; color: #cdd6f4; }
+  #testBtn:hover { background: #45475a; }
+  #status {
+    margin-top: 20px; padding: 12px; border-radius: 8px;
+    background: #11111b; color: #a6adc8; font-size: 13px;
+    white-space: pre-wrap; word-break: break-all; min-height: 20px;
+    font-family: Consolas, monospace;
+  }
+  #status.ok { color: #a6e3a1; }
+  #status.err { color: #f38ba8; }
+  .mask-hint { font-size: 12px; color: #585b70; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>md-agent 配置</h1>
+  <p class="sub">本地双层 MD 知识库 Agent · API Key 仅保存在本机 config.json（掩码显示）</p>
+
+  <label for="endpoint">LLM 接口地址（Ollama 基址或 OpenAI 兼容基址）</label>
+  <input id="endpoint" placeholder="https://api.deepseek.com/v1">
+
+  <label for="model">模型</label>
+  <input id="model" placeholder="deepseek-v4-flash">
+
+  <label for="apiKey">API Key（留空 = 保持已保存值；填新值 = 覆盖）</label>
+  <input id="apiKey" type="password" autocomplete="off">
+  <div class="mask-hint" id="keyHint">未设置</div>
+
+  <label for="kbRoot">KB 根目录（相对路径，如 kb）</label>
+  <input id="kbRoot" placeholder="kb">
+
+  <div class="row">
+    <button id="saveBtn">保存</button>
+    <button id="testBtn">测试连接</button>
+  </div>
+
+  <div id="status">就绪</div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status');
+
+  function setStatus(text, cls) {
+    statusEl.textContent = text;
+    statusEl.className = cls || '';
+  }
+
+  async function load() {
+    try {
+      const r = await (await fetch('/api/config')).json();
+      $('endpoint').value = r.llm.endpoint || '';
+      $('model').value = r.llm.model || '';
+      $('kbRoot').value = r.kb_root || '';
+      const masked = r.llm.api_key || '';
+      $('keyHint').textContent = masked ? '已保存（掩码）: ' + masked + '　·　输入新值可覆盖' : '未设置';
+      $('apiKey').value = '';
+      $('apiKey').placeholder = masked ? '当前: ' + masked : 'sk-...';
+      setStatus('已加载当前配置');
+    } catch (e) {
+      setStatus('加载配置失败: ' + e.message, 'err');
+    }
+  }
+
+  async function save() {
+    const payload = {
+      kb_root: $('kbRoot').value.trim(),
+      llm: {
+        endpoint: $('endpoint').value.trim(),
+        model: $('model').value.trim(),
+        // 留空传掩码哨兵 → 后端保留旧 key
+        api_key: $('apiKey').value.trim() || '****',
+      },
+    };
+    try {
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || ('HTTP ' + res.status));
+      $('keyHint').textContent = '已保存（掩码）: ' + (body.config.llm.api_key || '未设置');
+      $('apiKey').value = '';
+      setStatus('✓ 已保存（' + new Date().toLocaleTimeString() + '）', 'ok');
+    } catch (e) {
+      setStatus('保存失败: ' + e.message, 'err');
+    }
+  }
+
+  async function testConn() {
+    setStatus('测试中（使用已保存配置，非流式）...');
+    try {
+      const res = await fetch('/api/llm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: '回复"ok"即可' }] }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || ('HTTP ' + res.status));
+      const text = body.choices && body.choices[0] && body.choices[0].message && body.choices[0].message.content;
+      setStatus('✓ 连接成功 · 模型 ' + (body.model || '?') + '\n回复: ' + (text || '(空)'), 'ok');
+    } catch (e) {
+      setStatus('连接失败: ' + e.message, 'err');
+    }
+  }
+
+  $('saveBtn').addEventListener('click', save);
+  $('testBtn').addEventListener('click', testConn);
+  load();
+</script>
+</body>
+</html>

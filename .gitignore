@@ -1,0 +1,7 @@
+/target
+# release 打包产物（按 README「打包发布」自行构建）
+/dist
+kb/INDEX.md
+kb/.md-graph.db
+kb/.md-graph.db-*
+config.json
