@@ -177,8 +177,25 @@
     if (!line) { await bannerDone; showPrompt(); }
   })();
 
+  // 终端确认机制：confirm(msg) 挂起等待 y/n 按键（写操作人审闭环的基础设施）
+  let confirmCb = null;
+  function confirm(msg) {
+    return new Promise((resolve) => {
+      confirmCb = (ok) => resolve(ok);
+      term.writeln('\x1b[33m' + msg + ' \x1b[1m(y/N)\x1b[0m');
+    });
+  }
+
   term.onData((data) => {
     const code = data.charCodeAt(0);
+    if (confirmCb) {
+      const c = data.trim().toLowerCase();
+      const cb = confirmCb;
+      if (c === 'y') { confirmCb = null; term.writeln('\x1b[32m✓ 已确认\x1b[0m'); cb(true); }
+      else if (c === 'n' || data === '\r' || code === 27) { confirmCb = null; term.writeln('\x1b[90m已取消\x1b[0m'); cb(false); }
+      else { term.write('\b \b'); } // 忽略其他键
+      return;
+    }
     if (data === '\r') {
       const cmd = line.trim();
       submitMsg(); // 回车提交：边框移除 + 整行背景色块
@@ -710,6 +727,38 @@
       term.writeln('\x1b[32m✓ 依赖已更新: #' + id + ' ← #' + deps.join(' #') + '\x1b[0m');
       return;
     }
+    if (sub === 'plan') {
+      const goal = s.join(' ').trim();
+      if (!goal) {
+        term.writeln('\x1b[33m用法: /task plan <目标> —— LLM 拆解为串行子任务链\x1b[0m');
+        return;
+      }
+      term.writeln('\x1b[90m(LLM 拆解中…)\x1b[0m');
+      const text = await llmText([
+        { role: 'system', content:
+          '你是任务规划器。把用户目标拆解为 3-8 个可执行的子任务，按依赖顺序排列。' +
+          '只输出任务列表，每行一个，格式：- 子任务描述。不要输出任何其他内容。' },
+        { role: 'user', content: goal },
+      ]);
+      const items = text.split('\n').map((l) => l.trim()).filter(Boolean)
+        .map((l) => {
+          const m = l.match(/^[-*•]\s+(.+)$/) || l.match(/^\d+[.、]\s*(.+)$/);
+          return m ? m[1].replace(/^"|"$/g, '').trim() : null;
+        })
+        .filter((t) => t && t.length > 1);
+      if (!items.length) { term.writeln('\x1b[31m拆解结果无法解析:\x1b[0m ' + text.slice(0, 200)); return; }
+      term.writeln('\x1b[33m拆解出 ' + items.length + ' 个子任务，创建任务链…\x1b[0m');
+      const main = await api('/api/tasks', { method: 'POST', body: JSON.stringify({ goal, title: goal.slice(0, 30) }) });
+      let prev = main.task.id;
+      for (const it of items) {
+        const r = await api('/api/tasks', { method: 'POST', body: JSON.stringify({ goal: it }) });
+        await patch(r.task.id, { deps: [String(prev)] }); // 串行依赖链
+        prev = r.task.id;
+      }
+      term.writeln('\x1b[32m✓ 任务链已创建: #' + main.task.id + ' → ' + items.length + ' 个子任务（/task 查看，可删改；依赖未完成时无法流转）\x1b[0m');
+      refreshStatus();
+      return;
+    }
     // 默认 list：文字看板
     const d = await api('/api/tasks');
     const tasks = d.tasks || [];
@@ -733,12 +782,59 @@
     term.writeln('\x1b[90m(流转: start/done/drop <id> [备注]  |  日志: note  |  依赖: dep  |  删除: rm  |  看板: board)\x1b[0m');
   }
 
+  // /page act <url> <json> —— 写侧：动作清单人审确认后执行（click/fill/select/scroll）
+  async function pageActCmd(parts) {
+    const url = parts[0];
+    const rest = parts.slice(1).join(' ');
+    if (!url || !rest) {
+      term.writeln('\x1b[33m用法: /page act <url> <json 动作数组>\x1b[0m');
+      term.writeln('\x1b[90m  例: /page act https://example.com [{"kind":"click","selector":"#btn"},{"kind":"fill","selector":"#q","value":"hello"}]\x1b[0m');
+      term.writeln('\x1b[90m  动作: click / fill(值) / select(值) / scroll\x1b[0m');
+      return;
+    }
+    let actions;
+    try { actions = JSON.parse(rest); } catch (e) {
+      term.writeln('\x1b[31m动作 JSON 解析失败: ' + e.message + '\x1b[0m');
+      return;
+    }
+    if (!Array.isArray(actions) || !actions.length) {
+      term.writeln('\x1b[31m动作列表不能为空\x1b[0m');
+      return;
+    }
+    // 人审闭环：先出动作清单，确认后才执行
+    term.writeln('\x1b[1m动作清单（人工确认）\x1b[0m');
+    actions.forEach((a, i) => {
+      const v = a.value !== undefined ? ' = ' + a.value : '';
+      term.writeln('  ' + (i + 1) + '. \x1b[36m' + (a.kind || 'click') + '\x1b[0m ' + a.selector + v);
+    });
+    const ok = await confirm('确认执行以上 ' + actions.length + ' 个动作？');
+    if (!ok) { term.writeln('\x1b[90m(已取消，未执行任何操作)\x1b[0m'); return; }
+    term.writeln('\x1b[90m(执行中…)\x1b[0m');
+    let r;
+    try {
+      r = await api('/api/page/act', { method: 'POST', body: JSON.stringify({ url, actions }) });
+    } catch (e) {
+      term.writeln('\x1b[31m执行失败: ' + e + '\x1b[0m');
+      return;
+    }
+    term.writeln('\x1b[32m✓ ' + r.message + '\x1b[0m' + (r.title ? ' · ' + r.title : ''));
+    term.writeln('─'.repeat(40));
+    (r.text || '').split('\n').slice(0, 20).forEach((l) => term.writeln(l));
+    if ((r.text || '').length > 800) term.writeln('\x1b[90m…\x1b[0m');
+  }
+
   // /page <url> [标题] —— 动态网页读取（headless Edge/Chrome，等待 JS 渲染后取正文）
   async function pageCmd(parts) {
+    // /page act <url> <json 动作数组>：写侧——动作清单人审确认后执行
+    if (parts[0] === 'act') {
+      await pageActCmd(parts.slice(1));
+      return;
+    }
     const url = parts[0];
     if (!url) {
       term.writeln('\x1b[33m用法: /page <url> [标题]\x1b[0m');
       term.writeln('\x1b[90m  动态/JS 渲染页面用本命令；纯静态页面建议 /fetch（更快）\x1b[0m');
+      term.writeln('\x1b[90m  操作页面: /page act <url> <json 动作数组>（动作清单人工确认后执行）\x1b[0m');
       return;
     }
     const titleArg = parts.slice(1).join(' ').trim();

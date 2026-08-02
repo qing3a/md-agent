@@ -108,6 +108,26 @@ pub fn update(
         if !STATUSES.contains(&s) {
             return Err(format!("非法状态 {s}，可选: {}", STATUSES.join("/")));
         }
+        // 依赖就绪校验：进入 doing/done 时所有依赖必须已完成
+        if (s == "doing" || s == "done") && !task.deps.is_empty() {
+            let mut missing: Vec<String> = Vec::new();
+            for d in &task.deps {
+                match d.parse::<i64>() {
+                    Ok(did) => match get(&conn, did) {
+                        Some(dep) if dep.status != "done" => {
+                            let label = if dep.title.is_empty() { dep.goal } else { dep.title };
+                            missing.push(format!("#{did} {label}"))
+                        }
+                        Some(_) => {}
+                        None => missing.push(format!("#{did}（不存在）")),
+                    },
+                    Err(_) => missing.push(format!("{d}（非法依赖）")),
+                }
+            }
+            if !missing.is_empty() {
+                return Err(format!("依赖未完成，无法流转: {}", missing.join("、")));
+            }
+        }
         task.status = s.to_string();
     }
     if let Some(n) = note {

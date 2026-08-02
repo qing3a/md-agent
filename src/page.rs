@@ -113,3 +113,119 @@ async fn read_page(browser: &Browser, url: &str, engine: &str) -> Result<PageRes
         engine: engine.to_string(),
     })
 }
+
+// ---------- /page act：动作执行（写侧，前端人审清单确认后调用）----------
+
+#[derive(Debug, serde::Deserialize, Clone)]
+pub struct ActStep {
+    pub kind: String, // click | fill | select | scroll
+    pub selector: String,
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ActResult {
+    pub ok: bool,
+    pub step: usize,
+    pub message: String,
+    pub title: String,
+    pub text: String,
+}
+
+/// 在页面上依次执行动作，返回执行结果与页面文本摘要
+pub async fn act_page(url: &str, steps: &[ActStep]) -> Result<ActResult, String> {
+    let (exe, engine) =
+        chrome_executable().ok_or_else(|| "未找到本机 Chrome/Edge（需任一浏览器支持 headless CDP）".to_string())?;
+    let config = BrowserConfig::builder()
+        .chrome_executable(exe)
+        .no_sandbox()
+        .build()
+        .map_err(|e| format!("浏览器配置失败: {e}"))?;
+    let (mut browser, mut handler) = Browser::launch(config)
+        .await
+        .map_err(|e| format!("启动浏览器失败（{engine}）: {e}"))?;
+    let driver = tokio::spawn(async move { while handler.next().await.is_some() {} });
+
+    let out = tokio::time::timeout(Duration::from_secs(30), async {
+        let page = browser
+            .new_page(url)
+            .await
+            .map_err(|e| format!("打开页面失败: {e}"))?;
+        let _ = page.wait_for_navigation().await;
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        for (i, st) in steps.iter().enumerate() {
+            let label = format!("第 {} 步 {} {}", i + 1, st.kind, st.selector);
+            match st.kind.as_str() {
+                "click" => {
+                    let el = page
+                        .find_element(&st.selector)
+                        .await
+                        .map_err(|e| format!("{label}: 元素未找到: {e}"))?;
+                    el.click().await.map_err(|e| format!("{label}: 点击失败: {e}"))?;
+                }
+                "fill" => {
+                    let el = page
+                        .find_element(&st.selector)
+                        .await
+                        .map_err(|e| format!("{label}: 元素未找到: {e}"))?;
+                    el.click().await.map_err(|e| format!("{label}: 聚焦失败: {e}"))?;
+                    el.type_str(st.value.as_deref().unwrap_or(""))
+                        .await
+                        .map_err(|e| format!("{label}: 输入失败: {e}"))?;
+                }
+                "select" => {
+                    let v = st.value.as_deref().unwrap_or("");
+                    let js = format!(
+                        "(()=>{{const el=document.querySelector({:?});if(!el)return false;el.value={:?};el.dispatchEvent(new Event('change',{{bubbles:true}}));return true;}})()",
+                        st.selector, v
+                    );
+                    let ok: bool = page
+                        .evaluate(js)
+                        .await
+                        .map_err(|e| format!("{label}: 执行失败: {e}"))?
+                        .into_value::<bool>()
+                        .unwrap_or(false);
+                    if !ok {
+                        return Err(format!("{label}: 元素未找到"));
+                    }
+                }
+                "scroll" => {
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        .await
+                        .map_err(|e| format!("{label}: 滚动失败: {e}"))?;
+                }
+                other => return Err(format!("未知动作 {other}（可选 click/fill/select/scroll）")),
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        let title = page.get_title().await.ok().flatten().unwrap_or_default();
+        let text: String = page
+            .evaluate("document.body ? document.body.innerText : ''")
+            .await
+            .map_err(|e| format!("读取页面文本失败: {e}"))?
+            .into_value::<String>()
+            .unwrap_or_default();
+        let text = text
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ActResult {
+            ok: true,
+            step: steps.len(),
+            message: format!("{} 个动作执行完成", steps.len()),
+            title,
+            text: text.chars().take(4000).collect(),
+        })
+    })
+    .await;
+
+    let _ = browser.close().await;
+    let _ = driver.await;
+    match out {
+        Ok(r) => r,
+        Err(_) => Err("页面操作超时(30s)".to_string()),
+    }
+}

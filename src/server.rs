@@ -47,6 +47,7 @@ pub async fn serve(
         .route("/api/link", post(link_add))
         .route("/api/fetch", get(fetch_page))
         .route("/api/page", get(page_read))
+        .route("/api/page/act", post(page_act))
         .route("/api/tasks", get(tasks_list))
         .route("/api/tasks", post(tasks_create))
         .route("/api/tasks/{id}", patch(tasks_update))
@@ -277,6 +278,20 @@ async fn fetch_page(Query(p): Query<FetchParams>) -> Response {
 /// /page 动态网页（headless Chrome/Edge CDP，等 JS 渲染）
 async fn page_read(Query(p): Query<FetchParams>) -> Response {
     match crate::page::extract_page(&p.url).await {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+/// /page act：动作执行（click/fill/select/scroll；前端人审清单确认后调用）
+#[derive(Deserialize)]
+struct PageActBody {
+    url: String,
+    actions: Vec<crate::page::ActStep>,
+}
+
+async fn page_act(Json(b): Json<PageActBody>) -> Response {
+    match crate::page::act_page(&b.url, &b.actions).await {
         Ok(r) => Json(r).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
     }
