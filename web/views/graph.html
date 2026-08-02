@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>知识图谱</title>
+<style>
+  body { margin: 0; background: #11111b; color: #cdd6f4;
+         font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; overflow: hidden; }
+  #wrap { display: flex; height: 100vh; }
+  #svgbox { flex: 1; position: relative; min-width: 0; }
+  svg { width: 100%; height: 100%; display: block; }
+  #side { width: 260px; padding: 14px; border-left: 1px solid #313244;
+          overflow: auto; font-size: 12px; box-sizing: border-box; }
+  h1 { font-size: 14px; color: #f5e0dc; margin: 0 0 10px; }
+  #stats div { margin: 3px 0; }
+  #legend div { margin: 3px 0; }
+  #legend span { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+                 margin-right: 4px; vertical-align: middle; }
+  #orphans { margin-top: 12px; color: #f38ba8; }
+  #orphans ul { margin: 4px 0 0; padding-left: 16px; }
+  #orphans li { cursor: pointer; }
+  #detail { background: #181825; border: 1px solid #313244; border-radius: 6px;
+            padding: 8px 10px; margin-top: 12px; display: none; word-break: break-all; line-height: 1.6; }
+  #detail b { color: #f5e0dc; }
+  .edge { stroke: #45475a; stroke-width: 1; }
+  .node circle { stroke: #11111b; stroke-width: 2; }
+  .node text { fill: #cdd6f4; font-size: 10px; pointer-events: none; }
+  .node:hover circle { stroke: #f5e0dc; stroke-width: 3; }
+  .node.orphan circle { stroke: #f38ba8; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="svgbox"><svg id="svg"></svg></div>
+  <div id="side">
+    <h1>知识图谱</h1>
+    <div id="stats">加载中…</div>
+    <div id="legend"></div>
+    <div id="orphans"></div>
+    <div id="detail"></div>
+  </div>
+</div>
+<script>
+  var COLORS = ['#89b4fa', '#a6e3a1', '#f9e2af', '#f38ba8', '#cba6f7', '#94e2d5', '#fab387', '#eba0ac'];
+
+  function el(name, attrs, parent) {
+    var e = document.createElementNS('http://www.w3.org/2000/svg', name);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+
+  async function main() {
+    var g = await hostApi('/api/graph/graph');
+    var nodes = g.nodes;
+    var edges = g.edges.filter(function (e) { return e.dst_path; });
+
+    var stats = document.getElementById('stats');
+    stats.innerHTML =
+      '<div>文档: <b>' + nodes.length + '</b></div>' +
+      '<div>链接: <b>' + g.edges.length + '</b>（悬空 ' + (g.edges.length - edges.length) + '）</div>';
+    if (!nodes.length) {
+      stats.innerHTML += '<div style="color:#f38ba8">图谱为空，终端执行 /rescan 重建</div>';
+      return;
+    }
+
+    // 项目配色 + 图例
+    var projects = [...new Set(nodes.map(function (n) { return n.project; }))];
+    var pcolor = {};
+    projects.forEach(function (p, i) { pcolor[p] = COLORS[i % COLORS.length]; });
+    var legend = document.getElementById('legend');
+    projects.forEach(function (p) {
+      var d = document.createElement('div');
+      var s = document.createElement('span');
+      s.style.background = pcolor[p];
+      d.appendChild(s);
+      d.appendChild(document.createTextNode(p));
+      legend.appendChild(d);
+    });
+
+    // 环形布局
+    var W = window.innerWidth - 260, H = window.innerHeight - 8;
+    var cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2 - 80;
+    var pos = {};
+    nodes.forEach(function (n, i) {
+      var a = -Math.PI / 2 + 2 * Math.PI * i / Math.max(nodes.length, 1);
+      pos[n.path] = { x: cx + R * Math.cos(a), y: cy + R * Math.sin(a) };
+    });
+
+    var svg = document.getElementById('svg');
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    edges.forEach(function (e) {
+      el('line', { class: 'edge', x1: pos[e.src].x, y1: pos[e.src].y, x2: pos[e.dst_path].x, y2: pos[e.dst_path].y }, svg);
+    });
+
+    var detail = document.getElementById('detail');
+    nodes.forEach(function (n) {
+      var orphan = n.in_degree === 0 && n.out_degree === 0;
+      var g2 = el('g', { class: 'node' + (orphan ? ' orphan' : '') }, svg);
+      el('circle', { r: 8, fill: pcolor[n.project], cx: pos[n.path].x, cy: pos[n.path].y }, g2);
+      var t = el('text', { x: pos[n.path].x + 12, y: pos[n.path].y + 4 }, g2);
+      t.textContent = n.title || n.path;
+      el('title', {}, g2).textContent = n.path + '  (入 ' + n.in_degree + ' / 出 ' + n.out_degree + ')';
+      g2.addEventListener('click', function () {
+        detail.style.display = 'block';
+        detail.innerHTML =
+          '<b>' + (n.title || n.path) + '</b><br>' +
+          '路径: ' + n.path + '<br>' +
+          '项目: ' + n.project + '<br>' +
+          '标签: ' + (n.tags || '-') + '<br>' +
+          '入链: ' + n.in_degree + ' / 出链: ' + n.out_degree +
+          (orphan ? '<br><span style="color:#f38ba8">孤立文档：无入链也无出链</span>' : '');
+      });
+    });
+
+    var orphans = nodes.filter(function (n) { return n.in_degree === 0 && n.out_degree === 0; });
+    if (orphans.length) {
+      var ol = document.getElementById('orphans');
+      ol.innerHTML = '<div><b>孤立文档 (' + orphans.length + ')</b></div><ul>';
+      orphans.forEach(function (n) {
+        var li = document.createElement('li');
+        li.textContent = n.path;
+        li.addEventListener('click', function () {
+          detail.style.display = 'block';
+          detail.innerHTML = '<b>' + (n.title || n.path) + '</b><br>' + n.path +
+            '<br><span style="color:#f38ba8">孤立文档：无入链也无出链，可考虑补 [[链接]]</span>';
+        });
+        ol.appendChild(li);
+      });
+      ol.innerHTML += '</ul>';
+    }
+  }
+
+  main().catch(function (e) {
+    document.getElementById('stats').innerHTML =
+      '<div style="color:#f38ba8">加载失败: ' + e.message + '</div>';
+  });
+</script>
+</body>
+</html>

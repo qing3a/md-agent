@@ -192,6 +192,13 @@
       case '/projects': await projects(); break;
       case '/tags': await tags(); break;
       case '/rescan': await rescan(); break;
+      case '/pending': await pendingList(); break;
+      case '/approve': await pendingAct('approve', rest[0]); break;
+      case '/reject': await pendingAct('reject', rest[0]); break;
+      case '/view': await viewCmd(rest[0]); break;
+      case '/audit': await auditCmd(); break;
+      case '/link': await linkCmd(rest[0], rest[1]); break;
+      case '/suggest': await suggest(rest.join(' ')); break;
       case '/health': await health(); break;
       case 'clear': term.clear(); break;
       default:
@@ -216,6 +223,12 @@
     term.writeln('  /orphans               孤立文档（无入链也无出链）');
     term.writeln('  /projects              项目维度统计   /tags 标签统计');
     term.writeln('  /rescan                重建知识图谱（SQLite）');
+    term.writeln('  /pending               查看待审（LLM 写回/生成笔记先进这里）');
+    term.writeln('  /approve <路径|all>    批准待审 → 写入知识库   /reject 丢弃');
+    term.writeln('  /view graph|<html>|off  面板渲染层：内置图谱可视化 / 本地 HTML 视图（Esc 关闭）');
+    term.writeln('  /audit                知识库健康审计（盲区/冲突/补链接建议）');
+    term.writeln('  /link <源> <目标>      补链接（在源文档追加 [[目标]]，人工确认）');
+    term.writeln('  /suggest <主题>        LLM 补全缺失主题的新文档（进待审）');
     term.writeln('  /clear                 清空多轮对话记忆');
     term.writeln('  /config                查看本地配置（掩码）  配置页: /config.html');
     term.writeln('  /health                服务健康检查');
@@ -344,13 +357,15 @@
         // 流式 markdown：按完整行渲染（保留打字机效果，且行内样式正确）
         const md = createMdRenderer();
         let lineBuf = '';
+        let held = []; // 含 <!-- 的行可能是写回块前奏，暂缓显示（避免露出一小段标记）
         const feedDelta = (d) => {
           lineBuf += d;
           let nl;
           while ((nl = lineBuf.indexOf('\n')) !== -1) {
             const line = lineBuf.slice(0, nl);
             lineBuf = lineBuf.slice(nl + 1);
-            for (const l of md.feed(line)) term.writeln(l);
+            if (line.includes('<!--')) held.push(line);
+            else for (const l of md.feed(line)) term.writeln(l);
           }
         };
         // 解析 SSE：按 \n\n 切块，取 data: 行
@@ -387,11 +402,18 @@
           buf = consume(buf + dec.decode(value, { stream: true }));
         }
         consume(buf + dec.decode());
-        // 冲刷末尾未换行的行
-        if (lineBuf.length) {
+        // 冲刷末尾未换行的行（写回块已触发时丢弃残留的标记前缀）
+        if (lineBuf.length && !saveSeen) {
           for (const l of md.feed(lineBuf)) term.writeln(l);
         }
         for (const l of md.flush()) term.writeln(l);
+        // 写回块未触发（如正文含普通 HTML 注释）→ 补显暂缓行
+        if (!saveSeen && held.length) {
+          for (const line of held) {
+            for (const l of md.feed(line)) term.writeln(l);
+          }
+          for (const l of md.flush()) term.writeln(l);
+        }
       }
     } catch (e) {
       term.writeln('\x1b[31mLLM 调用失败: ' + e.message + '\x1b[0m');
@@ -402,12 +424,12 @@
 
     const cleanFull = full.replace(/\n?<!--\s*md-agent-save\s*-->[\s\S]*$/, '').trim();
 
-    // 4. 写回沉淀（解析回答末尾的 md-agent-save 块）
+    // 4. 写回沉淀（解析回答末尾的 md-agent-save 块 → 进待审）
     const save = parseSaveBlock(full);
     if (save) {
       try {
         const savedPath = await applySave(save);
-        term.writeln('\x1b[32m✓ 已写回: \x1b[0m' + savedPath);
+        term.writeln('\x1b[32m✓ 已进入待审: \x1b[0m' + savedPath + '  （/approve 确认生效，/reject 丢弃）');
       } catch (e) {
         term.writeln('\x1b[31m写回失败: ' + e.message + '\x1b[0m');
       }
@@ -454,36 +476,61 @@
     return r.content || '';
   }
 
-  // 写回落盘：新建 L2 补 frontmatter；MEMORY 按当日小节追加；写完刷新 INDEX
-  async function applySave(save) {
+  // 写回落盘（Phase 3 前置：待审机制）
+  // pending=true（默认）：LLM 生成的新笔记 / MEMORY 条目先进 pending/，/approve 确认后落地
+  // pending=false（/remember 用户主动沉淀）：直接写盘 + 刷新 INDEX/图谱
+  async function applySave(save, opts = {}) {
+    const pending = opts.pending !== false;
     const path = save.path.trim().replace(/\\/g, '/').replace(/^\/+/, '');
     let content = save.content.trim();
     if (!path || !content) return '写回内容为空';
     if (path === 'INDEX.md') return '拒绝写回自动生成的 INDEX.md';
     const today = localToday();
+    const title = (content.match(/^#\s+(.+)/m) || [])[1] ||
+      path.split('/').pop().replace(/\.md$/i, '') || '未命名';
+
+    if (pending) {
+      // —— 待审：不直接落知识库 ——
+      let target;
+      if (path === 'MEMORY.md') {
+        target = 'pending/MEMORY.' + Date.now() + '.md';
+        // 保留条目原文（approve 时后端按当日小节合并）
+        if (!/^##\s/.test(content)) content = '## ' + today + '\n' + content;
+      } else {
+        target = 'pending/' + path;
+        if (!/^---/.test(content)) {
+          content = '---\ntype: note\ntitle: ' + title + '\ntags: []\nupdated: ' + today + '\n---\n\n' + content;
+        }
+      }
+      await api('/api/file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: target, content }),
+      });
+      return target;
+    }
+
+    // —— 直接写（用户主动沉淀）——
     const exists = await fileExists(path);
     const old = exists ? await getFileContent(path) : '';
-
     if (!exists) {
       if (path === 'MEMORY.md') {
         content = '## ' + today + '\n- ' + content.replace(/^[-#\s]+/, '');
       } else {
-        const title = (content.match(/^#\s+(.+)/m) || [])[1] ||
-          path.split('/').pop().replace(/\.md$/i, '') || '未命名';
         content = '---\ntype: note\ntitle: ' + title + '\ntags: []\nupdated: ' + today + '\n---\n\n' + content;
       }
     } else if (path === 'MEMORY.md' && !/^##\s/.test(content)) {
       // 已有当日小节则加 bullet，否则新起标题
       content = (old.includes('## ' + today) ? '- ' : '## ' + today + '\n- ') + content;
     }
-
     const merged = exists ? old.trimEnd() + '\n\n' + content + '\n' : content;
     await api('/api/file', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path, content: merged }),
     });
-    try { await api('/api/kb/sync', { method: 'POST' }); } catch (e) { /* 索引刷新失败不阻塞 */ }
+    try { await api('/api/kb/sync', { method: 'POST' }); } catch (e) { /* 不阻塞 */ }
+    try { await api('/api/graph/sync', { method: 'POST' }); } catch (e) { /* 不阻塞 */ }
     return path;
   }
 
@@ -503,7 +550,7 @@
       term.writeln('\x1b[33m内容为空\x1b[0m');
       return;
     }
-    const saved = await applySave({ path, mode: 'append', content: text });
+    const saved = await applySave({ path, mode: 'append', content: text }, { pending: false });
     term.writeln('\x1b[32m✓ 已沉淀: \x1b[0m' + saved);
   }
 
@@ -568,7 +615,7 @@
     term.writeln(renderMdFile(noteText));
     const safe = (topic.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '') || '整理笔记').slice(0, 30);
     const saved = await applySave({ path: 'notes/' + safe + '.md', mode: 'new', content: noteText });
-    term.writeln('\x1b[32m✓ 笔记已写入: \x1b[0m' + saved);
+    term.writeln('\x1b[32m✓ 笔记已进入待审: \x1b[0m' + saved + '  （/approve 确认写入）');
   }
 
   // ---------- 知识图谱命令 ----------
@@ -618,6 +665,208 @@
     const r = await api('/api/graph/sync', { method: 'POST' });
     const g = r.graph;
     term.writeln('\x1b[32m✓\x1b[0m 图谱已重建: ' + g.docs + ' 文档 / ' + g.links + ' 链接 / ' + g.dangling + ' 悬空');
+  }
+
+  // ---------- 待审机制（生成 → 预览 → 确认） ----------
+
+  async function pendingList() {
+    const r = await api('/api/kb/pending');
+    if (!r.pending.length) {
+      term.writeln('待审区为空（LLM 写回/生成笔记先进这里，/approve 确认后落地）。');
+      return;
+    }
+    term.writeln('待审文件（/approve <路径或 all> 确认 | /reject 丢弃 | open 预览）:');
+    for (const p of r.pending) {
+      term.writeln(
+        '  ' + (p.kind === 'memory' ? '\x1b[33m[记忆]\x1b[0m' : '\x1b[36m[笔记]\x1b[0m') +
+        '  ' + p.path + (p.title ? '  \x1b[90m(' + p.title + ')\x1b[0m' : '')
+      );
+    }
+  }
+
+  async function pendingAct(act, name) {
+    if (!name) {
+      term.writeln('\x1b[33m用法：/' + act + ' <路径或 all>\x1b[0m');
+      return;
+    }
+    const r = await api('/api/kb/pending/' + act, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: name }),
+    });
+    if (r.errors && r.errors.length) {
+      term.writeln('\x1b[31m' + act + ' 失败: ' + r.errors.join('; ') + '\x1b[0m');
+    }
+    if (r.ok && r.ok.length) {
+      for (const o of r.ok) {
+        term.writeln(
+          '\x1b[32m✓ ' + (act === 'approve' ? '已批准' : '已拒绝') + ': \x1b[0m' + o.path +
+          (o.target && o.target !== o.path ? ' → ' + o.target : '') +
+          (o.note ? '  \x1b[90m' + o.note + '\x1b[0m' : '')
+        );
+      }
+      if (act === 'approve') term.writeln('\x1b[90m(INDEX 与知识图谱已重建)\x1b[0m');
+    }
+  }
+
+  // ---------- /view 面板渲染层（iframe 沙箱 + postMessage 桥） ----------
+
+  const viewOverlay = document.getElementById('view-overlay');
+  const viewFrame = document.getElementById('view-frame');
+  const viewTitle = document.getElementById('view-title');
+
+  // 注入视图的桥脚本：window.hostApi(path, opts) → postMessage 给宿主 → 宿主调 /api/* 后回传
+  const BRIDGE = '<script>' +
+    'window.hostApi=function(path,opts){return new Promise(function(res,rej){' +
+    'var id=Math.random().toString(36).slice(2);' +
+    'function h(ev){if(ev.data&&ev.data.id===id){window.removeEventListener("message",h);ev.data.ok?res(ev.data.data):rej(new Error(ev.data.error||"host error"));}}' +
+    'window.addEventListener("message",h);' +
+    'window.parent.postMessage({type:"api",id:id,method:(opts&&opts.method)||"GET",path:path,body:opts&&opts.body},"*");' +
+    '});};' +
+    '<\/script>';
+
+  function closeView() {
+    viewOverlay.classList.add('hidden');
+    viewFrame.srcdoc = '';
+  }
+
+  function openView(title, html) {
+    viewTitle.textContent = title;
+    viewFrame.srcdoc = BRIDGE + html;
+    viewOverlay.classList.remove('hidden');
+  }
+
+  document.getElementById('view-close').addEventListener('click', closeView);
+  window.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && !viewOverlay.classList.contains('hidden')) closeView();
+  });
+
+  // postMessage 桥：iframe 视图 → 宿主 API（只允许 /api/ 前缀）
+  window.addEventListener('message', async (ev) => {
+    if (ev.source !== viewFrame.contentWindow) return;
+    const msg = ev.data;
+    if (!msg || msg.type !== 'api') return;
+    if (!msg.path || !msg.path.startsWith('/api/')) {
+      viewFrame.contentWindow.postMessage({ id: msg.id, ok: false, error: '仅允许 /api/ 接口' }, '*');
+      return;
+    }
+    try {
+      const res = await fetch(msg.path, {
+        method: msg.method || 'GET',
+        headers: { 'Content-Type': 'application/json' },
+        body: msg.body ? JSON.stringify(msg.body) : undefined,
+      });
+      const data = await res.json().catch(() => ({}));
+      viewFrame.contentWindow.postMessage({ id: msg.id, ok: res.ok, data }, '*');
+    } catch (e) {
+      viewFrame.contentWindow.postMessage({ id: msg.id, ok: false, error: String(e) }, '*');
+    }
+  });
+
+  // /view graph      内置知识图谱可视化
+  // /view <路径>      kb 内本地 HTML 视图
+  // /view off        关闭（或 Esc）
+  async function viewCmd(arg) {
+    if (!arg || arg === 'off') {
+      closeView();
+      return;
+    }
+    if (arg === 'graph') {
+      const r = await fetch('/views/graph.html');
+      if (!r.ok) throw new Error('内置视图加载失败: HTTP ' + r.status);
+      openView('知识图谱可视化', await r.text());
+      return;
+    }
+    const r = await api('/api/file?path=' + encodeURIComponent(arg));
+    openView(r.path, r.content);
+  }
+
+  // ---------- 记忆自组织（Phase 3-A：审计 / 补链接 / 补文档） ----------
+
+  async function auditCmd() {
+    term.writeln('知识库健康审计中...');
+    const r = await api('/api/audit');
+    term.writeln('\x1b[1m文档 ' + r.docs + ' / 链接 ' + r.links + '\x1b[0m' + (r.dangling.length ? '\x1b[33m（悬空 ' + r.dangling.length + '）\x1b[0m' : ''));
+    if (r.orphans.length) {
+      term.writeln('\x1b[33m⚠ 孤立文档（' + r.orphans.length + '）——无入链也无出链:\x1b[0m');
+      for (const p of r.orphans) term.writeln('  ' + p + '  \x1b[90m(建议 /link ' + p + ' <关联文档> 或归档)\x1b[0m');
+    }
+    if (r.no_out.length) {
+      term.writeln('\x1b[33m⚠ 无出链文档（' + r.no_out.length + '）——从不链向别人:\x1b[0m');
+      for (const p of r.no_out) term.writeln('  ' + p);
+    }
+    if (r.duplicates.length) {
+      term.writeln('\x1b[31m⚠ 重复标题（' + r.duplicates.length + '）:\x1b[0m');
+      for (const [t, n] of r.duplicates) term.writeln('  "' + t + '" × ' + n);
+    }
+    if (r.dangling.length) {
+      term.writeln('\x1b[33m⚠ 悬空链接（' + r.dangling.length + '）:\x1b[0m');
+      for (const [s, d] of r.dangling) term.writeln('  ' + s + ' → [[' + d + ']]');
+    }
+    if (r.mentions.length) {
+      term.writeln('\x1b[36m💡 建议补链接（' + r.mentions.length + '）——正文提到但未链接:\x1b[0m');
+      for (const m of r.mentions.slice(0, 20)) {
+        term.writeln('  ' + m.src + '  →  [[\x1b[1m' + m.dst + '\x1b[0m]]  \x1b[90m(/link ' + m.src + ' ' + m.dst_path + ')\x1b[0m');
+      }
+      if (r.mentions.length > 20) term.writeln('  ... 共 ' + r.mentions.length + ' 条');
+    }
+    if (!r.orphans.length && !r.no_out.length && !r.duplicates.length && !r.dangling.length && !r.mentions.length) {
+      term.writeln('\x1b[32m✓ 知识库健康，无盲区无冲突\x1b[0m');
+    }
+  }
+
+  async function linkCmd(src, dst) {
+    if (!src || !dst) {
+      term.writeln('\x1b[33m用法：/link <源文档> <目标文档>\x1b[0m');
+      return;
+    }
+    const r = await api('/api/link', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ src, dst }),
+    });
+    if (r.ok) {
+      term.writeln('\x1b[32m✓ 已补链接: \x1b[0m' + r.src + ' 追加 ' + r.link + '（INDEX 与图谱已重建）');
+    } else {
+      term.writeln('\x1b[33m' + (r.note || '未添加') + ': ' + r.src + ' → ' + r.dst + '\x1b[0m');
+    }
+  }
+
+  // /suggest <主题>：LLM 补全知识库缺失主题的新文档 → 进待审
+  async function suggest(topic) {
+    if (!topic) {
+      term.writeln('\x1b[33m用法：/suggest <主题> —— LLM 生成知识库缺失主题的新文档（进待审）\x1b[0m');
+      return;
+    }
+    term.writeln('\x1b[90m(补全: LLM 生成「' + topic + '」新文档 → 待审)\x1b[0m');
+    const kws = extractKeywords(topic);
+    const query = kws.length ? kws.join(' ') : topic;
+    let sr;
+    try {
+      sr = await api('/api/search?q=' + encodeURIComponent(query) + '&layer=notes&ctx=1');
+    } catch (e) {
+      sr = { hits: [] };
+    }
+    const top = sr.hits.slice(0, 8);
+    const frag = top
+      .map((h) => '[来源 ' + h.file + ':' + h.line + ']\n' + (h.context || h.text))
+      .join('\n\n');
+    const system =
+      '你是知识库补全助手。主题在知识库中可能资料不足，请生成一篇新文档：' +
+      '以 # 标题开头，包含 概述、要点列表、相关条目；' +
+      '相关条目中引用知识库已有文档用 [[文件名]] 双链（只引用确实相关的）。' +
+      '若已有片段，基于片段补全；若知识库确实没有该主题资料，基于模型知识撰写并注明"知识库暂无该主题资料"。' +
+      '直接输出文档正文，不要额外解释。';
+    const userMsg = '主题：' + topic + '\n\n知识库相关片段（可能为空）：\n' + (frag || '(无)');
+    const noteText = await llmText([
+      { role: 'system', content: system },
+      { role: 'user', content: userMsg },
+    ]);
+    term.writeln('\x1b[1;32m──── 生成文档（待审）────\x1b[0m');
+    term.writeln(renderMdFile(noteText));
+    const safe = (topic.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '') || '新文档').slice(0, 30);
+    const saved = await applySave({ path: 'notes/' + safe + '.md', mode: 'new', content: noteText });
+    term.writeln('\x1b[32m✓ 已进入待审: \x1b[0m' + saved + '  （/approve 确认写入）');
   }
 
   // ---------- 管理命令 ----------

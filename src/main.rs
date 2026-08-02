@@ -42,7 +42,7 @@ fn main() {
         }
     }
 
-    let kb_root = kb::kb_root();
+    let kb_root = resolved_kb_root();
     let web_dir = web_dir();
     if let Err(e) = kb::ensure_layout(&kb_root) {
         eprintln!("初始化 KB 失败: {e}");
@@ -92,6 +92,24 @@ fn web_dir() -> PathBuf {
         .ok()
         .and_then(|p| p.parent().map(|p| p.join("web")))
         .unwrap_or_else(|| PathBuf::from("web"))
+}
+
+/// KB 根目录：config.json 的 kb_root 优先（相对路径按当前工作目录解析），
+/// 未配置时回落 kb::kb_root()（env MD_AGENT_KB > ./kb > exe 旁 kb）。改动需重启生效。
+fn resolved_kb_root() -> PathBuf {
+    let cfg = config::load();
+    let p = cfg.kb_root.trim();
+    if p.is_empty() {
+        return kb::kb_root();
+    }
+    let pb = PathBuf::from(p);
+    if pb.is_absolute() {
+        pb
+    } else if let Ok(cwd) = std::env::current_dir() {
+        cwd.join(pb)
+    } else {
+        pb
+    }
 }
 
 fn print_help() {

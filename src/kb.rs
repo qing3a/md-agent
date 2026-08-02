@@ -217,6 +217,149 @@ pub fn list_l1(root: &Path, full: bool) -> Vec<L1File> {
     out
 }
 
+// ---------- 待审机制（Phase 3 前置：生成 → 预览 → 确认） ----------
+
+#[derive(Debug, Serialize)]
+pub struct PendingItem {
+    /// 相对 kb 根，含 pending/ 前缀
+    pub path: String,
+    /// note（新笔记）| memory（记忆条目）
+    pub kind: String,
+    pub title: String,
+}
+
+/// 列出待审文件：pending/ 下的 .md；文件名 MEMORY.* 前缀 = 记忆条目，其余 = 新笔记
+pub fn list_pending(root: &Path) -> Vec<PendingItem> {
+    let dir = root.join("pending");
+    let mut out = Vec::new();
+    if !dir.is_dir() {
+        return out;
+    }
+    let walker = ignore::WalkBuilder::new(&dir)
+        .hidden(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .build();
+    for entry in walker {
+        let Ok(entry) = entry else { continue };
+        let Some(ft) = entry.file_type() else { continue };
+        if !ft.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let kind = if name.starts_with("MEMORY.") { "memory" } else { "note" };
+        let content = fs::read_to_string(path).unwrap_or_default();
+        let (meta, body) = parse_frontmatter(&content);
+        let title = meta
+            .get("title")
+            .cloned()
+            .or_else(|| first_heading(body))
+            .unwrap_or_default();
+        out.push(PendingItem {
+            path: rel,
+            kind: kind.to_string(),
+            title,
+        });
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
+/// 批准待审：新笔记移动到目标路径；记忆条目合并进 MEMORY.md。
+/// 返回 (落地路径, 备注)。成功后由调用方重建 INDEX 与图谱。
+pub fn approve_pending(root: &Path, rel: &str) -> Result<(String, Option<String>), String> {
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let pending_dir = root.join("pending");
+    let src = root.join(rel);
+    let src_canon = src.canonicalize().map_err(|e| format!("待审文件不存在: {e}"))?;
+    if !src_canon.starts_with(&pending_dir) {
+        return Err("路径超出待审目录".to_string());
+    }
+    if !src_canon.is_file() {
+        return Err("不是文件".to_string());
+    }
+
+    let stripped = rel
+        .strip_prefix("pending/")
+        .unwrap_or(rel)
+        .to_string();
+    if stripped.starts_with("MEMORY.") {
+        // 记忆条目 → 合并进 MEMORY.md
+        let content = fs::read_to_string(&src_canon).map_err(|e| e.to_string())?;
+        append_memory_entry(&root, &content)?;
+        fs::remove_file(&src_canon).map_err(|e| e.to_string())?;
+        Ok(("MEMORY.md".to_string(), Some("记忆条目已按当日小节合并".to_string())))
+    } else {
+        // 新笔记 → 移动到目标路径（保留 pending/ 后的相对结构）
+        let dst = root.join(&stripped);
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::rename(&src_canon, &dst).map_err(|e| format!("移动失败: {e}"))?;
+        Ok((stripped, None))
+    }
+}
+
+/// 拒绝待审：删除；rel 支持 "all" 批量。返回删除数量。
+pub fn reject_pending(root: &Path, rel: &str) -> Result<usize, String> {
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let pending_dir = root.join("pending");
+    let mut removed = 0usize;
+    if rel == "all" {
+        for item in list_pending(&root) {
+            let p = root.join(&item.path);
+            if p.is_file() {
+                let _ = fs::remove_file(&p);
+                removed += 1;
+            }
+        }
+        return Ok(removed);
+    }
+    let src = root.join(rel);
+    let src_canon = src.canonicalize().map_err(|e| format!("待审文件不存在: {e}"))?;
+    if !src_canon.starts_with(&pending_dir) {
+        return Err("路径超出待审目录".to_string());
+    }
+    fs::remove_file(&src_canon).map_err(|e| e.to_string())?;
+    Ok(1)
+}
+
+/// 记忆条目合并进 MEMORY.md（按当日小节；自带 ## 标题的原样追加）
+fn append_memory_entry(root: &Path, content: &str) -> Result<(), String> {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let mem = root.join("MEMORY.md");
+    let old = fs::read_to_string(&mem).unwrap_or_default();
+    let entry = content.trim();
+    let merged = if entry.starts_with("## ") {
+        if old.trim().is_empty() {
+            format!("{entry}\n")
+        } else {
+            format!("{}\n\n{entry}\n", old.trim_end())
+        }
+    } else if old.contains(&format!("## {today}")) {
+        format!("{}\n- {}\n", old.trim_end(), entry.trim_start_matches(['-', '#', ' ']).trim())
+    } else if old.trim().is_empty() {
+        format!("# 记忆\n\n## {today}\n- {}\n", entry.trim_start_matches(['-', '#', ' ']).trim())
+    } else {
+        format!(
+            "{}\n\n## {today}\n- {}\n",
+            old.trim_end(),
+            entry.trim_start_matches(['-', '#', ' ']).trim()
+        )
+    };
+    fs::write(mem, merged).map_err(|e| e.to_string())
+}
+
 /// 路径安全校验：目标（或其最近已存在祖先）必须在 KB 根内。
 /// 读/写共用：文件不存在时沿父链上溯到 KB 根，因此新建文件也能通过。
 pub fn resolve_in_kb(root: &Path, rel: &str) -> Option<PathBuf> {

@@ -7,10 +7,38 @@
 <style>
   html, body { margin: 0; height: 100%; background: #1e1e2e; }
   #terminal { height: 100%; padding: 10px; box-sizing: border-box; }
+
+  /* /view 面板渲染层：iframe 沙箱浮层（图谱可视化等 HTML 视图） */
+  #view-overlay {
+    position: fixed; inset: 0; z-index: 100; background: #11111b;
+    display: flex; flex-direction: column;
+  }
+  #view-overlay.hidden { display: none; }
+  #view-overlay header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 14px; background: #181825; border-bottom: 1px solid #313244;
+  }
+  #view-overlay header span { color: #f5e0dc; font-weight: 600; font-size: 13px; }
+  #view-overlay header button {
+    background: #313244; color: #cdd6f4; border: none; border-radius: 6px;
+    padding: 4px 12px; font-size: 12px; cursor: pointer;
+  }
+  #view-overlay header button:hover { background: #45475a; }
+  #view-frame { flex: 1; border: none; width: 100%; }
 </style>
 </head>
 <body>
 <div id="terminal"></div>
+
+<!-- /view 渲染层：iframe 沙箱（sandbox=allow-scripts，跨源桥接走 postMessage） -->
+<div id="view-overlay" class="hidden">
+  <header>
+    <span id="view-title">视图</span>
+    <button id="view-close" title="关闭视图 (Esc)">× 关闭</button>
+  </header>
+  <iframe id="view-frame" sandbox="allow-scripts"></iframe>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script src="app.js"></script>

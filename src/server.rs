@@ -30,14 +30,20 @@ pub async fn serve(
         .route("/api/file", get(file_read))
         .route("/api/file", post(file_write))
         .route("/api/kb/sync", post(kb_sync))
+        .route("/api/kb/pending", get(kb_pending_list))
+        .route("/api/kb/pending/approve", post(kb_pending_approve))
+        .route("/api/kb/pending/reject", post(kb_pending_reject))
         .route("/api/graph/sync", post(graph_sync))
         .route("/api/graph/stats", get(graph_stats))
+        .route("/api/graph/graph", get(graph_graph))
         .route("/api/graph/backlinks", get(graph_backlinks))
         .route("/api/graph/linked", get(graph_linked))
         .route("/api/graph/related", get(graph_related))
         .route("/api/graph/orphans", get(graph_orphans))
         .route("/api/graph/tags", get(graph_tags))
         .route("/api/graph/projects", get(graph_projects))
+        .route("/api/audit", get(audit_report))
+        .route("/api/link", post(link_add))
         .route("/api/config", get(config_get))
         .route("/api/config", post(config_set))
         .route("/api/llm", post(llm_chat))
@@ -170,6 +176,124 @@ async fn kb_sync(State(st): State<AppState>) -> Response {
     }
 }
 
+// ---------- 记忆自组织（Phase 3-A：审计 / 补链接） ----------
+
+async fn audit_report(State(st): State<AppState>) -> Response {
+    if let Err(e) = ensure_graph(&st.kb_root) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
+    }
+    match crate::graph::audit(&st.kb_root) {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct LinkBody {
+    src: String,
+    dst: String,
+}
+
+/// 补链接：在 src 文档末尾追加 `- 关联：[[dst]]`，重建 INDEX + 图谱。
+/// 由用户主动调用 = 已人工确认（不进待审）。
+async fn link_add(State(st): State<AppState>, Json(body): Json<LinkBody>) -> Response {
+    if let Err(e) = ensure_graph(&st.kb_root) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
+    }
+    let src = match crate::graph::resolve_doc(&st.kb_root, &body.src) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("源文档未找到: {}", body.src) })),
+            )
+                .into_response();
+        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    };
+    let dst = match crate::graph::resolve_doc(&st.kb_root, &body.dst) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("目标文档未找到: {}", body.dst) })),
+            )
+                .into_response();
+        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    };
+    if src == dst {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "不能链接到自身" }))).into_response();
+    }
+
+    let file = st.kb_root.join(&src);
+    let Ok(mut content) = tokio::fs::read_to_string(&file).await else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "读取源文档失败" }))).into_response();
+    };
+    // 双链约定用文件名（如 [[托盘应用]]），不用完整路径
+    let dst_stem = std::path::Path::new(&dst)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&dst)
+        .to_string();
+    let link_line = format!("- 关联：[[{dst_stem}]]");
+    if content.contains(&link_line)
+        || content.contains(&format!("[[{dst_stem}]]"))
+        || content.contains(&format!("[[{dst_stem}.md]]"))
+    {
+        return Json(json!({ "ok": false, "note": "链接已存在", "src": src, "dst": dst })).into_response();
+    }
+    content = format!("{}\n\n{}", content.trim_end(), link_line);
+    if let Err(e) = tokio::fs::write(&file, content).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+    }
+    let _ = crate::kb::sync_index(&st.kb_root);
+    let _ = crate::graph::sync_graph(&st.kb_root);
+    Json(json!({ "ok": true, "src": src, "dst": dst, "link": link_line })).into_response()
+}
+
+// ---------- 待审机制 ----------
+
+async fn kb_pending_list(State(st): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({ "pending": crate::kb::list_pending(&st.kb_root) }))
+}
+
+#[derive(Deserialize)]
+struct PendingBody {
+    path: String,
+}
+
+async fn kb_pending_approve(State(st): State<AppState>, Json(body): Json<PendingBody>) -> Response {
+    let paths: Vec<String> = if body.path == "all" {
+        crate::kb::list_pending(&st.kb_root).into_iter().map(|p| p.path).collect()
+    } else {
+        vec![body.path]
+    };
+    if paths.is_empty() {
+        return Json(json!({ "ok": [], "errors": [], "note": "待审区为空" })).into_response();
+    }
+    let mut ok: Vec<serde_json::Value> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for p in paths {
+        match crate::kb::approve_pending(&st.kb_root, &p) {
+            Ok((target, note)) => ok.push(json!({ "path": p, "target": target, "note": note })),
+            Err(e) => errors.push(format!("{p}: {e}")),
+        }
+    }
+    if !ok.is_empty() {
+        let _ = crate::kb::sync_index(&st.kb_root);
+        let _ = crate::graph::sync_graph(&st.kb_root);
+    }
+    Json(json!({ "ok": ok, "errors": errors })).into_response()
+}
+
+async fn kb_pending_reject(State(st): State<AppState>, Json(body): Json<PendingBody>) -> Response {
+    match crate::kb::reject_pending(&st.kb_root, &body.path) {
+        Ok(n) => Json(json!({ "ok": [json!({ "path": body.path, "removed": n })], "errors": [] })).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
 // ---------- 知识图谱 ----------
 
 /// 图谱库不存在时自动全量同步（惰性初始化）
@@ -198,6 +322,16 @@ async fn graph_stats(State(st): State<AppState>) -> Response {
     }
     match crate::graph::stats(&st.kb_root) {
         Ok(s) => Json(s).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+async fn graph_graph(State(st): State<AppState>) -> Response {
+    if let Err(e) = ensure_graph(&st.kb_root) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
+    }
+    match crate::graph::graph_data(&st.kb_root) {
+        Ok(d) => Json(d).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
 }

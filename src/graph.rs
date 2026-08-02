@@ -113,6 +113,10 @@ fn collect_md_files(root: &Path) -> Vec<PathBuf> {
             continue;
         }
         let p = entry.path();
+        // 待审目录不进图谱（Phase 3 前置：pending 待确认后才落地）
+        if p.components().any(|c| c.as_os_str() == "pending") {
+            continue;
+        }
         if p.extension().and_then(|e| e.to_str()) == Some("md") {
             files.push(p.to_path_buf());
         }
@@ -363,6 +367,251 @@ pub fn linked(root: &Path, path: &str) -> Result<Vec<LinkEntry>, String> {
             dst_path,
         })
         .collect())
+}
+
+#[derive(Debug, Serialize)]
+pub struct NodeInfo {
+    pub path: String,
+    pub title: String,
+    pub project: String,
+    pub tags: String,
+    pub in_degree: usize,
+    pub out_degree: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EdgeInfo {
+    pub src: String,
+    pub dst_path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GraphData {
+    pub nodes: Vec<NodeInfo>,
+    pub edges: Vec<EdgeInfo>,
+}
+
+/// 全量图谱数据（供 /view 可视化视图）
+pub fn graph_data(root: &Path) -> Result<GraphData, String> {
+    let conn = connect(root)?;
+    let mut stmt = conn
+        .prepare("SELECT path, title, project, tags FROM documents ORDER BY path")
+        .map_err(|e| e.to_string())?;
+    let mut nodes: Vec<NodeInfo> = Vec::new();
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows.flatten() {
+        nodes.push(NodeInfo {
+            path: row.0,
+            title: row.1,
+            project: row.2,
+            tags: row.3,
+            in_degree: 0,
+            out_degree: 0,
+        });
+    }
+
+    let mut stmt = conn
+        .prepare("SELECT src, dst_path FROM links ORDER BY src")
+        .map_err(|e| e.to_string())?;
+    let mut edges: Vec<EdgeInfo> = Vec::new();
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))
+        .map_err(|e| e.to_string())?;
+    for row in rows.flatten() {
+        edges.push(EdgeInfo {
+            src: row.0,
+            dst_path: row.1,
+        });
+    }
+
+    // 度数：入链/出链（孤立 = 双零）
+    let mut outd: HashMap<&str, usize> = HashMap::new();
+    let mut ind: HashMap<&str, usize> = HashMap::new();
+    for e in &edges {
+        *outd.entry(e.src.as_str()).or_insert(0) += 1;
+        if let Some(d) = &e.dst_path {
+            *ind.entry(d.as_str()).or_insert(0) += 1;
+        }
+    }
+    for n in &mut nodes {
+        n.out_degree = outd.get(n.path.as_str()).copied().unwrap_or(0);
+        n.in_degree = ind.get(n.path.as_str()).copied().unwrap_or(0);
+    }
+    Ok(GraphData { nodes, edges })
+}
+
+/// 按名称/路径解析文档（供 /link 等命令）
+pub fn resolve_doc(root: &Path, name: &str) -> Result<Option<String>, String> {
+    let conn = connect(root)?;
+    find_doc(&conn, name)
+}
+
+// ---------- 健康审计（Phase 3-A 记忆自组织：盲区/冲突/补链接建议） ----------
+
+#[derive(Debug, Serialize)]
+pub struct Mention {
+    pub src: String,
+    pub dst: String,
+    pub dst_path: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditReport {
+    pub docs: usize,
+    pub links: usize,
+    pub dangling: Vec<(String, String)>,
+    pub orphans: Vec<String>,
+    pub no_out: Vec<String>,
+    pub duplicates: Vec<(String, usize)>,
+    pub mentions: Vec<Mention>,
+}
+
+/// 提及未链接检测：正文出现其他文档的「文件名 stem / 标题」但未建 [[链接]]。
+/// 关键词策略：中文文件名直接用 stem；ASCII stem（如 MEMORY）用其标题（长度≥3 才用，控噪声）。
+pub fn audit(root: &Path) -> Result<AuditReport, String> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let conn = connect(&root)?;
+
+    let docs: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT path, title FROM documents ORDER BY path")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(Result::ok).collect()
+    };
+
+    // 已存在链接：src -> 链接目标集合（dst_path + 原始 dst）
+    let mut existing: HashMap<String, HashSet<String>> = HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT src, dst, dst_path FROM links")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows.flatten() {
+            let set = existing.entry(row.0).or_default();
+            set.insert(row.1);
+            if let Some(p) = row.2 {
+                set.insert(p);
+            }
+        }
+    }
+
+    // 悬空链接
+    let dangling: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT src, dst FROM links WHERE dst_path IS NULL ORDER BY src")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(Result::ok).collect()
+    };
+
+    // 孤立（无入链无出链）
+    let orphans: Vec<String> = orphans(&root)?;
+
+    // 无出链（有入链或无，但从不链向别人）
+    let no_out: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT path FROM documents d
+                 WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.src = d.path)
+                 ORDER BY path",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(Result::ok).collect()
+    };
+
+    // 重复标题
+    let duplicates: Vec<(String, usize)> = {
+        let mut stmt = conn
+            .prepare("SELECT title, COUNT(*) FROM documents WHERE title != '' GROUP BY title HAVING COUNT(*) > 1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize)))
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(Result::ok).collect()
+    };
+
+    // 提及未链接
+    let mut mentions: Vec<Mention> = Vec::new();
+    {
+        // 关键词表：other_path -> keyword
+        let mut keywords: Vec<(String, String)> = Vec::new();
+        for (path, title) in &docs {
+            let stem = Path::new(path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(path)
+                .to_string();
+            if stem.chars().any(|c| !c.is_ascii()) {
+                keywords.push((path.clone(), stem));
+            } else if title.chars().count() >= 3 {
+                // ASCII 文件名（如 MEMORY/INDEX）→ 用标题做关键词
+                keywords.push((path.clone(), title.clone()));
+            }
+        }
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        for (src, _) in &docs {
+            let Ok(content) = std::fs::read_to_string(root.join(src)) else {
+                continue;
+            };
+            for (dst_path, kw) in &keywords {
+                if dst_path == src {
+                    continue;
+                }
+                if kw.chars().count() < 2 {
+                    continue;
+                }
+                if existing.get(src).map(|s| s.contains(dst_path)).unwrap_or(false) {
+                    continue;
+                }
+                if content.contains(kw.as_str()) && seen.insert((src.clone(), dst_path.clone())) {
+                    mentions.push(Mention {
+                        src: src.clone(),
+                        dst: kw.clone(),
+                        dst_path: dst_path.clone(),
+                    });
+                }
+            }
+        }
+        mentions.sort_by(|a, b| a.src.cmp(&b.src).then(a.dst_path.cmp(&b.dst_path)));
+    }
+
+    Ok(AuditReport {
+        docs: docs.len(),
+        links: conn
+            .query_row("SELECT COUNT(*) FROM links", [], |r| r.get::<_, i64>(0))
+            .map(|v| v as usize)
+            .unwrap_or(0),
+        dangling,
+        orphans,
+        no_out,
+        duplicates,
+        mentions,
+    })
 }
 
 /// 关联簇：出链 + 入链（去重，按文档路径）
