@@ -77,6 +77,8 @@ pub async fn serve(
         .route("/api/config", get(config_get))
         .route("/api/config", post(config_set))
         .route("/api/llm", post(llm_chat))
+        .route("/api/context/log", post(context_log))
+        .route("/api/context/stats", get(context_stats))
         .fallback_service(tower_http::services::ServeDir::new(state.web_dir.clone()))
         .with_state(state);
 
@@ -884,4 +886,113 @@ async fn tasks_delete(State(s): State<AppState>, AxumPath(id): AxumPath<i64>) ->
         Ok(false) => (StatusCode::NOT_FOUND, Json(json!({ "error": format!("任务 #{id} 不存在") }))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
+}
+
+// ---------- Context Engineering 记账（CE 第 1 步：记账先行，零侵入） ----------
+// 记录每次 Agent 请求的 token 用量与缓存命中（前端从 /api/llm 响应 usage 透传上报），
+// 供 /api/context/stats 聚合——D1（缓存命中率是否核心）的数据来源。
+
+#[derive(Deserialize)]
+struct ContextLogBody {
+    kind: Option<String>,
+    tool_count: Option<u32>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_read: Option<u64>,
+    cache_creation: Option<u64>,
+    total_tokens: Option<u64>,
+}
+
+async fn context_log(State(s): State<AppState>, Json(b): Json<ContextLogBody>) -> Response {
+    let line = json!({
+        "ts": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+        "kind": b.kind.unwrap_or_else(|| "question".to_string()),
+        "tool_count": b.tool_count.unwrap_or(0),
+        "input_tokens": b.input_tokens.unwrap_or(0),
+        "output_tokens": b.output_tokens.unwrap_or(0),
+        "cache_read": b.cache_read.unwrap_or(0),
+        "cache_creation": b.cache_creation.unwrap_or(0),
+        "total_tokens": b.total_tokens.unwrap_or(0),
+    });
+    let path = s.kb_root.join(".context-log.jsonl");
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(mut f) => {
+            let mut line = line.to_string();
+            line.push('\n');
+            if f.write_all(line.as_bytes()).is_err() {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "写入失败" }))).into_response();
+            }
+        }
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+        }
+    }
+    Json(json!({ "ok": true })).into_response()
+}
+
+async fn context_stats(State(s): State<AppState>) -> Response {
+    let path = s.kb_root.join(".context-log.jsonl");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => {
+            return Json(json!({
+                "total": 0, "by_kind": {}, "input_tokens": 0, "output_tokens": 0,
+                "cache_read": 0, "cache_creation": 0, "cache_read_ratio": null,
+                "avg_tool_count": 0, "overflow_count": 0
+            }))
+            .into_response()
+        }
+    };
+    let mut total = 0u64;
+    let mut input = 0u64;
+    let mut output = 0u64;
+    let mut cr = 0u64;
+    let mut cc = 0u64;
+    let mut tools = 0u64;
+    let mut tool_n = 0u64;
+    let mut by_kind: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            total += 1;
+            let kind = v["kind"].as_str().unwrap_or("question").to_string();
+            *by_kind.entry(kind).or_insert(0) += 1;
+            input += v["input_tokens"].as_u64().unwrap_or(0);
+            output += v["output_tokens"].as_u64().unwrap_or(0);
+            cr += v["cache_read"].as_u64().unwrap_or(0);
+            cc += v["cache_creation"].as_u64().unwrap_or(0);
+            let tc = v["tool_count"].as_u64().unwrap_or(0);
+            if tc > 0 {
+                tools += tc;
+                tool_n += 1;
+            }
+        }
+    }
+    // 命中率近似：有 cache_creation（miss）时 = cr/(cr+cc)；否则 = cr/(cr+input) 兜底
+    let ratio = if cr + cc > 0 {
+        Some(cr as f64 / (cr + cc) as f64)
+    } else if cr + input > 0 {
+        Some(cr as f64 / (cr + input) as f64)
+    } else {
+        None
+    };
+    Json(json!({
+        "total": total,
+        "by_kind": by_kind,
+        "input_tokens": input,
+        "output_tokens": output,
+        "cache_read": cr,
+        "cache_creation": cc,
+        "cache_read_ratio": ratio,
+        "avg_tool_count": if tool_n > 0 { tools as f64 / tool_n as f64 } else { 0.0 },
+        "overflow_count": 0,
+    }))
+    .into_response()
 }

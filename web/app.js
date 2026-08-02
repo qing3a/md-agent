@@ -969,6 +969,27 @@
       term.writeln('\x1b[90m本次输出 ' + lastUsage.total_tokens + ' tokens\x1b[0m');
     }
 
+    // CE 记账（Phase 3-C 第 1 步：记账先行，零侵入）——上报用量与缓存命中，供 /api/context/stats
+    // DeepSeek 用 prompt_cache_hit/miss_tokens；Anthropic 风格用 cache_read/creation_input_tokens
+    if (lastUsage && (lastUsage.prompt_cache_hit_tokens || lastUsage.cache_read_input_tokens || lastUsage.total_tokens)) {
+      const u = lastUsage;
+      const cacheRead = u.prompt_cache_hit_tokens ?? u.cache_read_input_tokens ?? 0;
+      const cacheCreation = u.prompt_cache_miss_tokens ?? u.cache_creation_input_tokens ?? 0;
+      fetch('/api/context/log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind: 'question',
+          tool_count: toolCount,
+          input_tokens: u.prompt_tokens ?? u.input_tokens ?? 0,
+          output_tokens: u.completion_tokens ?? u.output_tokens ?? 0,
+          cache_read: cacheRead,
+          cache_creation: cacheCreation,
+          total_tokens: u.total_tokens || 0,
+        }),
+      }).catch(() => {});
+    }
+
 
     const cleanFull = full.replace(/\n?<!--\s*md-agent-save\s*-->[\s\S]*$/, '').trim();
 

@@ -5,5 +5,6 @@ kb/INDEX.md
 kb/.md-graph.db
 kb/.md-graph.db-*
 kb/.tasks.db
+kb/.context-log.jsonl
 config.json
 .zcode/
