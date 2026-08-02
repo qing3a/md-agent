@@ -198,16 +198,22 @@
       case '/digest': await digest(rest.join(' ')); break;
       case '/clear': history = []; saveHistory(); term.writeln('多轮记忆已清空'); break;
       case '/link-all': await linkAll(); break;
+      case '/fetch': await fetchCmd(rest); break;
+      case '/page': await pageCmd(rest); break;
+      case '/task': await taskCmd(rest); break;
       case '/graph': await graph(rest.join(' ')); break;
       case '/orphans': await orphans(); break;
       case '/projects': await projects(); break;
       case '/tags': await tags(); break;
       case '/rescan': await rescan(); break;
       case '/pending': await pendingList(); break;
+      case '/preview': await previewPending(rest[0]); break;
       case '/approve': await pendingAct('approve', rest[0]); break;
       case '/reject': await pendingAct('reject', rest[0]); break;
       case '/view': await viewCmd(rest[0]); break;
       case '/audit': await auditCmd(); break;
+      case '/conflicts': await conflicts(); break;
+      case '/diff': await diffCmd(rest[0], rest[1]); break;
       case '/link': await linkCmd(rest[0], rest[1]); break;
       case '/suggest': await suggest(rest.join(' ')); break;
       case '/health': await health(); break;
@@ -235,12 +241,20 @@
     term.writeln('  /projects              项目维度统计   /tags 标签统计');
     term.writeln('  /rescan                重建知识图谱（SQLite）');
     term.writeln('  /pending               查看待审（LLM 写回/生成笔记先进这里）');
+    term.writeln('  /preview <待审路径>     行级预览：确认批准后将写入的内容');
     term.writeln('  /approve <路径|all>    批准待审 → 写入知识库   /reject 丢弃');
     term.writeln('  /view graph|<html>|off  面板渲染层：内置图谱可视化 / 本地 HTML 视图（Esc 关闭）');
     term.writeln('  /audit                知识库健康审计（盲区/冲突/补链接建议）');
+    term.writeln('  /conflicts             冲突检查（重复标题/悬空链接）   /diff <A> <B> 行级对比');
     term.writeln('  /link <源> <目标>      补链接（在源文档追加 [[目标]]，人工确认）');
     term.writeln('  /link-all              一键应用 /audit 的全部补链接建议');
     term.writeln('  /suggest <主题>        LLM 补全缺失主题的新文档（进待审）');
+    term.writeln('  /fetch <url> [标题]    抓取网页：阅读视图 / 带标题则沉淀为待审笔记');
+    term.writeln('  /page <url> [标题]     动态网页读取（headless Edge/Chrome，等 JS 渲染）');
+    term.writeln('  /task                  任务看板（Phase 3-B 引擎）');
+    term.writeln('    /task new <目标> [--title <标题>]  新建   start/done/drop <id> 流转');
+    term.writeln('    /task note <id> <内容> 追加日志   dep <id> <依赖id...>   rm <id> 删除');
+    term.writeln('    /task board           打开 HTML 看板（/view board）');
     term.writeln('  /clear                 清空多轮对话记忆');
     term.writeln('  /config                查看本地配置（掩码）  配置页: /config.html');
     term.writeln('  /health                服务健康检查');
@@ -489,6 +503,145 @@
     return r.content || '';
   }
 
+  // /fetch <url> [标题] —— 静态抓取网页：阅读视图；带标题则全文沉淀为待审笔记
+  async function fetchCmd(parts) {
+    const url = parts[0];
+    if (!url) {
+      term.writeln('\x1b[33m用法: /fetch <url> [标题]\x1b[0m');
+      term.writeln('\x1b[90m  不带标题 → 仅抓取并展示正文前 4000 字（阅读视图）\x1b[0m');
+      term.writeln('\x1b[90m  带标题   → 全文写入 notes/ 待审，/approve 后入库\x1b[0m');
+      return;
+    }
+    const titleArg = parts.slice(1).join(' ').trim();
+    term.writeln('\x1b[90m(抓取 ' + url + ' …)\x1b[0m');
+    let r;
+    try {
+      r = await api('/api/fetch?url=' + encodeURIComponent(url));
+    } catch (e) {
+      term.writeln('\x1b[31m抓取失败: ' + e + '\x1b[0m');
+      return;
+    }
+    term.writeln('\x1b[1;36m' + r.title + '\x1b[0m' + (r.truncated ? ' \x1b[33m(正文已截断至 2 万字)\x1b[0m' : ''));
+    term.writeln('\x1b[90m来源: ' + url + '\x1b[0m');
+    term.writeln('─'.repeat(48));
+    r.text.slice(0, 4000).split('\n').forEach((l) => term.writeln(l));
+    if (r.text.length > 4000) term.writeln('\x1b[90m… 正文共 ' + r.text.length + ' 字\x1b[0m');
+    term.writeln('─'.repeat(48));
+    if (!titleArg) {
+      term.writeln('\x1b[90m(沉淀全文 → /fetch <url> <标题>)\x1b[0m');
+      return;
+    }
+    const safe = (titleArg.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '') || '网页摘录').slice(0, 30);
+    const content = '# ' + titleArg + '\n\n> 来源: ' + url + '\n\n' + r.text + '\n';
+    const saved = await applySave({ path: 'notes/' + safe + '.md', mode: 'new', content });
+    term.writeln('\x1b[32m✓ 已进入待审: \x1b[0m' + saved + '  （/approve 确认写入）');
+  }
+
+  // /task —— Phase 3-B 任务引擎：文字看板 + 流转/依赖/日志（HTML 看板: /task board）
+  async function taskCmd(parts) {
+    const sub = parts[0] || 'list';
+    const s = parts.slice(1);
+    const idOf = (x) => parseInt(x, 10);
+    const patch = async (id, body) => {
+      const r = await api('/api/tasks/' + id, { method: 'PATCH', body: JSON.stringify(body) });
+      return r.task;
+    };
+    if (sub === 'new') {
+      const ti = s.indexOf('--title');
+      const title = ti >= 0 ? s.slice(ti + 1).join(' ') : '';
+      const goal = (ti >= 0 ? s.slice(0, ti) : s).join(' ').trim();
+      if (!goal) { term.writeln('\x1b[33m用法: /task new <目标> [--title <标题>]\x1b[0m'); return; }
+      const r = await api('/api/tasks', { method: 'POST', body: JSON.stringify({ goal, title }) });
+      term.writeln('\x1b[32m✓ 新任务 #' + r.task.id + '\x1b[0m ' + (r.task.title || r.task.goal));
+      return;
+    }
+    if (sub === 'board') { await viewCmd('board'); return; }
+    if (sub === 'rm') {
+      await api('/api/tasks/' + idOf(s[0]), { method: 'DELETE' });
+      term.writeln('\x1b[32m✓ 已删除任务 #' + s[0] + '\x1b[0m');
+      return;
+    }
+    if (sub === 'start' || sub === 'done' || sub === 'drop') {
+      const st = { start: 'doing', done: 'done', drop: 'dropped' }[sub];
+      const id = idOf(s[0]);
+      const note = s.slice(1).join(' ').trim() || null;
+      const t = await patch(id, { status: st, note });
+      term.writeln('\x1b[32m✓ 任务 #' + id + ' → ' + t.status + '\x1b[0m' + (t.title ? ' ' + t.title : ''));
+      if (note) term.writeln('  \x1b[90m日志: ' + note + '\x1b[0m');
+      return;
+    }
+    if (sub === 'note') {
+      const id = idOf(s[0]);
+      const note = s.slice(1).join(' ').trim();
+      if (!note) { term.writeln('\x1b[33m用法: /task note <id> <内容>\x1b[0m'); return; }
+      await patch(id, { note });
+      term.writeln('\x1b[32m✓ 已追加日志到 #' + id + '\x1b[0m');
+      return;
+    }
+    if (sub === 'dep') {
+      const id = idOf(s[0]);
+      const deps = s.slice(1);
+      if (!id || !deps.length) { term.writeln('\x1b[33m用法: /task dep <id> <依赖id...>\x1b[0m'); return; }
+      await patch(id, { deps });
+      term.writeln('\x1b[32m✓ 依赖已更新: #' + id + ' ← #' + deps.join(' #') + '\x1b[0m');
+      return;
+    }
+    // 默认 list：文字看板
+    const d = await api('/api/tasks');
+    const tasks = d.tasks || [];
+    if (!tasks.length) {
+      term.writeln('\x1b[90m(暂无任务。新建: /task new <目标> [--title <标题>])\x1b[0m');
+      return;
+    }
+    const stName = { todo: '待办', doing: '进行中', done: '完成', dropped: '已放弃' };
+    const stColor = { todo: '\x1b[90m', doing: '\x1b[33m', done: '\x1b[32m', dropped: '\x1b[31m' };
+    ['todo', 'doing', 'done', 'dropped'].forEach((st) => {
+      const group = tasks.filter((t) => t.status === st);
+      if (!group.length) return;
+      term.writeln('\x1b[1m── ' + stName[st] + ' (' + group.length + ')\x1b[0m');
+      group.forEach((t) => {
+        const dep = t.deps.length ? ' \x1b[90m依赖: #' + t.deps.join(' #') + '\x1b[0m' : '';
+        term.writeln(stColor[st] + '  #' + t.id + ' ' + (t.title || t.goal) + dep + '\x1b[0m');
+      });
+    });
+    const st = d.stats || {};
+    term.writeln('\x1b[90m统计: ' + Object.keys(st).map((k) => k + '=' + st[k]).join(' ') + '\x1b[0m');
+    term.writeln('\x1b[90m(流转: start/done/drop <id> [备注]  |  日志: note  |  依赖: dep  |  删除: rm  |  看板: board)\x1b[0m');
+  }
+
+  // /page <url> [标题] —— 动态网页读取（headless Edge/Chrome，等待 JS 渲染后取正文）
+  async function pageCmd(parts) {
+    const url = parts[0];
+    if (!url) {
+      term.writeln('\x1b[33m用法: /page <url> [标题]\x1b[0m');
+      term.writeln('\x1b[90m  动态/JS 渲染页面用本命令；纯静态页面建议 /fetch（更快）\x1b[0m');
+      return;
+    }
+    const titleArg = parts.slice(1).join(' ').trim();
+    term.writeln('\x1b[90m(动态读取 ' + url + ' … 约 5-10s)\x1b[0m');
+    let r;
+    try {
+      r = await api('/api/page?url=' + encodeURIComponent(url));
+    } catch (e) {
+      term.writeln('\x1b[31m读取失败: ' + e + '\x1b[0m');
+      return;
+    }
+    term.writeln('\x1b[1;36m' + r.title + '\x1b[0m' + (r.truncated ? ' \x1b[33m(正文已截断至 2 万字)\x1b[0m' : ''));
+    term.writeln('\x1b[90m来源: ' + url + '  [' + r.engine + ' headless]\x1b[0m');
+    term.writeln('─'.repeat(48));
+    r.text.slice(0, 4000).split('\n').forEach((l) => term.writeln(l));
+    if (r.text.length > 4000) term.writeln('\x1b[90m… 正文共 ' + r.text.length + ' 字\x1b[0m');
+    term.writeln('─'.repeat(48));
+    if (!titleArg) {
+      term.writeln('\x1b[90m(沉淀全文 → /page <url> <标题>)\x1b[0m');
+      return;
+    }
+    const safe = (titleArg.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '') || '网页摘录').slice(0, 30);
+    const content = '# ' + titleArg + '\n\n> 来源: ' + url + '\n\n' + r.text + '\n';
+    const saved = await applySave({ path: 'notes/' + safe + '.md', mode: 'new', content });
+    term.writeln('\x1b[32m✓ 已进入待审: \x1b[0m' + saved + '  （/approve 确认写入）');
+  }
+
   // 写回落盘（Phase 3 前置：待审机制）
   // pending=true（默认）：LLM 生成的新笔记 / MEMORY 条目先进 pending/，/approve 确认后落地
   // pending=false（/remember 用户主动沉淀）：直接写盘 + 刷新 INDEX/图谱
@@ -722,6 +875,21 @@
     }
   }
 
+  // /preview <待审路径>：行级预览批准后将写入的内容
+  async function previewPending(path) {
+    if (!path) {
+      term.writeln('\x1b[33m用法：/preview <待审路径>（如 pending/notes/xxx.md）\x1b[0m');
+      return;
+    }
+    const r = await api('/api/kb/pending/preview?path=' + encodeURIComponent(path));
+    term.writeln(
+      '\x1b[1;36m' + r.path + '\x1b[0m → 落地目标: \x1b[1m' + r.target + '\x1b[0m  (' +
+      (r.kind === 'memory' ? '记忆追加' : '新笔记整篇') + ')'
+    );
+    term.writeln('\x1b[32m' + r.added.split('\n').map((l) => '+' + l).join('\n') + '\x1b[0m');
+    term.writeln('\x1b[90m(/approve ' + r.path + ' 确认写入，/reject ' + r.path + ' 丢弃)\x1b[0m');
+  }
+
   // ---------- /view 面板渲染层（iframe 沙箱 + postMessage 桥） ----------
 
   const viewOverlay = document.getElementById('view-overlay');
@@ -784,10 +952,11 @@
       closeView();
       return;
     }
-    if (arg === 'graph') {
-      const r = await fetch('/views/graph.html');
+    if (arg === 'graph' || arg === 'board') {
+      const name = arg + '.html';
+      const r = await fetch('/views/' + name);
       if (!r.ok) throw new Error('内置视图加载失败: HTTP ' + r.status);
-      openView('知识图谱可视化', await r.text());
+      openView(arg === 'graph' ? '知识图谱可视化' : '任务看板', await r.text());
       return;
     }
     const r = await api('/api/file?path=' + encodeURIComponent(arg));
@@ -826,6 +995,85 @@
     if (!r.orphans.length && !r.no_out.length && !r.duplicates.length && !r.dangling.length && !r.mentions.length) {
       term.writeln('\x1b[32m✓ 知识库健康，无盲区无冲突\x1b[0m');
     }
+  }
+
+  // /conflicts：重复标题（带路径）+ 悬空链接
+  async function conflicts() {
+    const a = await api('/api/audit');
+    term.writeln('冲突与盲区检查:');
+    if (a.duplicates.length) {
+      term.writeln('\x1b[31m重复标题（' + a.duplicates.length + '）:\x1b[0m');
+      for (const [t, n, paths] of a.duplicates) {
+        term.writeln('  "' + t + '" × ' + n);
+        const ps = paths.split(' | ');
+        for (const p of ps) term.writeln('    ' + p);
+        if (ps.length === 2) term.writeln('    \x1b[90m(/diff ' + ps[0] + ' ' + ps[1] + ' 对比内容)\x1b[0m');
+      }
+    } else {
+      term.writeln('\x1b[32m✓ 无重复标题\x1b[0m');
+    }
+    if (a.dangling.length) {
+      term.writeln('\x1b[33m悬空链接（' + a.dangling.length + '）:\x1b[0m');
+      for (const [s, d] of a.dangling) term.writeln('  ' + s + ' → [[' + d + ']]');
+    } else {
+      term.writeln('\x1b[32m✓ 无悬空链接\x1b[0m');
+    }
+  }
+
+  // LCS 行级 diff（O(n*m)，小文档够用）
+  function diffLines(a, b) {
+    const n = a.length, m = b.length;
+    if (n * m > 4_000_000) {
+      // 大文档退化：逐行对比（只标差异）
+      const out = [];
+      const max = Math.max(n, m);
+      for (let i = 0; i < max; i++) {
+        if (a[i] !== b[i]) {
+          if (i < n) out.push({ t: '-', line: a[i] });
+          if (i < m) out.push({ t: '+', line: b[i] });
+        }
+      }
+      return out;
+    }
+    const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+    const out = [];
+    let i = 0, j = 0;
+    while (i < n && j < m) {
+      if (a[i] === b[j]) { out.push({ t: ' ', line: a[i] }); i++; j++; }
+      else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ t: '-', line: a[i] }); i++; }
+      else { out.push({ t: '+', line: b[j] }); j++; }
+    }
+    while (i < n) { out.push({ t: '-', line: a[i] }); i++; }
+    while (j < m) { out.push({ t: '+', line: b[j] }); j++; }
+    return out;
+  }
+
+  // /diff <A> <B>：行级对比（+ 绿 / - 红）
+  async function diffCmd(a, b) {
+    if (!a || !b) {
+      term.writeln('\x1b[33m用法：/diff <文档A> <文档B>\x1b[0m');
+      return;
+    }
+    const [ra, rb] = await Promise.all([
+      api('/api/file?path=' + encodeURIComponent(a)),
+      api('/api/file?path=' + encodeURIComponent(b)),
+    ]);
+    term.writeln('\x1b[1;36m' + ra.path + '  vs  ' + rb.path + '\x1b[0m');
+    const la = ra.content.replace(/\r\n/g, '\n').split('\n');
+    const lb = rb.content.replace(/\r\n/g, '\n').split('\n');
+    const d = diffLines(la, lb);
+    let shown = 0;
+    for (const x of d) {
+      if (x.t === ' ') continue;
+      shown++;
+      term.writeln((x.t === '+' ? '\x1b[32m+ ' : '\x1b[31m- ') + x.line + '\x1b[0m');
+    }
+    term.writeln('\x1b[90m(共 ' + shown + ' 处差异行)\x1b[0m');
   }
 
   async function linkCmd(src, dst) {
@@ -878,10 +1126,32 @@
     );
   }
 
-  // /suggest <主题>：LLM 补全知识库缺失主题的新文档 → 进待审
+  // /suggest：无参 = 盲区主题自动提议；带主题 = 补全该主题的新文档。产物均进待审
   async function suggest(topic) {
     if (!topic) {
-      term.writeln('\x1b[33m用法：/suggest <主题> —— LLM 生成知识库缺失主题的新文档（进待审）\x1b[0m');
+      // —— 盲区分析模式：审计 → LLM 提议缺失主题 → 生成盲区文档 → 待审 ——
+      term.writeln('\x1b[90m(盲区分析: 审计 → LLM 提议缺失主题 → 生成盲区文档 → 待审)\x1b[0m');
+      const a = await api('/api/audit');
+      const summary = [
+        '文档数: ' + a.docs + '，链接: ' + a.links,
+        '孤立文档: ' + (a.orphans.join('、') || '无'),
+        '无出链文档: ' + (a.no_out.join('、') || '无'),
+        '重复标题: ' + (a.duplicates.map((d) => '"' + d[0] + '"×' + d[1]).join('、') || '无'),
+        '悬空链接: ' + a.dangling.length + ' 条',
+        '建议补链接: ' + a.mentions.length + ' 条',
+      ].join('\n');
+      const system =
+        '你是知识库盲区分析师。基于审计数据指出知识库的薄弱点，并提议 2-3 个应补充的主题。' +
+        '生成一篇「知识盲区分析」文档：以 # 标题开头，包含 ## 盲区清单（列出具体薄弱点与依据）、' +
+        '## 建议新文档（每个主题给出理由与 [[相关链接]]）。直接输出文档正文，不要额外解释。';
+      const noteText = await llmText([
+        { role: 'system', content: system },
+        { role: 'user', content: '知识库审计数据：\n' + summary },
+      ]);
+      term.writeln('\x1b[1;32m──── 盲区分析（待审）────\x1b[0m');
+      term.writeln(renderMdFile(noteText));
+      const saved = await applySave({ path: 'notes/知识盲区分析-' + Date.now() + '.md', mode: 'new', content: noteText });
+      term.writeln('\x1b[32m✓ 已进入待审: \x1b[0m' + saved + '  （/approve 确认写入）');
       return;
     }
     term.writeln('\x1b[90m(补全: LLM 生成「' + topic + '」新文档 → 待审)\x1b[0m');

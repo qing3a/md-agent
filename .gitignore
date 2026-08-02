@@ -4,4 +4,5 @@
 kb/INDEX.md
 kb/.md-graph.db
 kb/.md-graph.db-*
+kb/.tasks.db
 config.json

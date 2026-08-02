@@ -26,6 +26,8 @@ chrono = "0.4"
 # 系统托盘
 tray-icon = "0.24"
 winit = "0.30"
+# /page 动态网页读取（CDP 直连本机 Chrome/Edge，headless）
+chromiumoxide = "0.8"
 
 [profile.release]
 strip = true

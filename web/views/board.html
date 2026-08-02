@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>md-agent 任务看板</title>
+<style>
+  :root {
+    --bg: #1e1e2e; --panel: #26263a; --panel2: #2f2f46;
+    --fg: #cdd6f4; --dim: #7f849c; --line: #3a3a55;
+    --blue: #89b4fa; --cyan: #94e2d5; --yellow: #f9e2af;
+    --green: #a6e3a1; --red: #f38ba8; --purple: #cba6f7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg);
+    font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; padding: 16px; }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  h1 { font-size: 18px; color: var(--cyan); }
+  .stats { display: flex; gap: 8px; }
+  .stats .chip { background: var(--panel); border: 1px solid var(--line);
+    border-radius: 999px; padding: 2px 12px; font-size: 12px; color: var(--dim); }
+  .stats .chip b { color: var(--fg); }
+  .add { display: flex; gap: 8px; margin-left: auto; }
+  input { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 12px; font-size: 13px; outline: none; width: 260px; }
+  input:focus { border-color: var(--blue); }
+  input.title { width: 180px; }
+  button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
+  button:hover { border-color: var(--blue); color: var(--blue); }
+  button.primary { background: var(--blue); color: #111; border-color: var(--blue); font-weight: 600; }
+  .board { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .col { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 10px; min-height: 200px; display: flex; flex-direction: column; gap: 8px; }
+  .col h2 { font-size: 13px; color: var(--dim); letter-spacing: 1px;
+    padding: 2px 6px 8px; border-bottom: 1px solid var(--line); }
+  .col h2 b { float: right; }
+  .col.todo h2 { color: var(--dim); } .col.todo h2 b { color: var(--dim); }
+  .col.doing h2 { color: var(--yellow); } .col.doing h2 b { color: var(--yellow); }
+  .col.done h2 { color: var(--green); } .col.done h2 b { color: var(--green); }
+  .col.dropped h2 { color: var(--red); } .col.dropped h2 b { color: var(--red); }
+  .card { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; }
+  .card .head { display: flex; gap: 8px; align-items: baseline; }
+  .card .id { color: var(--purple); font-weight: 700; font-size: 12px; }
+  .card .goal { font-size: 13px; }
+  .card .title { font-size: 12px; color: var(--dim); margin-top: 2px; }
+  .card .deps { margin-top: 6px; display: flex; gap: 4px; flex-wrap: wrap; }
+  .card .deps span { background: var(--panel); color: var(--purple);
+    border-radius: 6px; padding: 0 8px; font-size: 11px; }
+  .card .log { margin-top: 6px; font-size: 11px; color: var(--dim);
+    border-top: 1px dashed var(--line); padding-top: 6px; }
+  .card .log div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .actions { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .card .actions button { padding: 2px 10px; font-size: 12px; }
+  .card .actions .go { color: var(--yellow); } .card .actions .fin { color: var(--green); }
+  .card .actions .drop { color: var(--red); } .card .actions .del { color: var(--red); }
+  .empty { color: var(--dim); font-size: 12px; text-align: center; padding: 12px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📋 任务看板</h1>
+  <div class="stats" id="stats"></div>
+  <div class="add">
+    <input class="goal" placeholder="目标（必填）…">
+    <input class="title" placeholder="标题（可选）…">
+    <button class="primary" onclick="addTask()">＋ 新建</button>
+    <button onclick="load()">刷新</button>
+  </div>
+</header>
+<div class="board" id="board"></div>
+<script>
+const COLS = [
+  ['todo', '待办'], ['doing', '进行中'], ['done', '已完成'], ['dropped', '已放弃']
+];
+const NAME = { todo: '待办', doing: '进行中', done: '已完成', dropped: '已放弃' };
+
+async function api(path, opt) {
+  const r = await fetch(path, opt);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+
+async function load() {
+  const d = await api('/api/tasks');
+  const st = d.stats || {};
+  document.getElementById('stats').innerHTML = COLS.map(([k, n]) =>
+    '<span class="chip">' + n + ' <b>' + (st[k] || 0) + '</b></span>').join('');
+  const board = document.getElementById('board');
+  board.innerHTML = '';
+  for (const [stKey, stName] of COLS) {
+    const col = document.createElement('div');
+    col.className = 'col ' + stKey;
+    const group = (d.tasks || []).filter((t) => t.status === stKey);
+    col.innerHTML = '<h2>' + stName + '<b>' + group.length + '</b></h2>';
+    if (!group.length) {
+      const e = document.createElement('div');
+      e.className = 'empty';
+      e.textContent = '（空）';
+      col.appendChild(e);
+    }
+    group.forEach((t) => col.appendChild(card(t)));
+    board.appendChild(col);
+  }
+}
+
+function card(t) {
+  const el = document.createElement('div');
+  el.className = 'card';
+  let html = '<div class="head"><span class="id">#' + t.id + '</span>' +
+    '<span class="goal">' + esc(t.title || t.goal) + '</span></div>';
+  if (t.title) html += '<div class="title">' + esc(t.goal) + '</div>';
+  if (t.deps && t.deps.length) html += '<div class="deps">' +
+    t.deps.map((x) => '<span>依赖 #' + esc(x) + '</span>').join('') + '</div>';
+  if (t.log && t.log.length) html += '<div class="log">' +
+    t.log.slice(-3).map((l) => '<div>' + esc(l) + '</div>').join('') + '</div>';
+  let acts = '';
+  if (t.status === 'todo') acts += '<button class="go" onclick="set(' + t.id + ',\'doing\')">▶ 开始</button>';
+  if (t.status === 'todo' || t.status === 'doing') acts += '<button class="fin" onclick="set(' + t.id + ',\'done\')">✔ 完成</button>';
+  if (t.status === 'todo' || t.status === 'doing') acts += '<button class="drop" onclick="set(' + t.id + ',\'dropped\')">✕ 放弃</button>';
+  if (t.status === 'done' || t.status === 'dropped') acts += '<button class="go" onclick="set(' + t.id + ',\'todo\')">↺ 重开</button>';
+  acts += '<button class="del" onclick="del(' + t.id + ')">删除</button>';
+  html += '<div class="actions">' + acts + '</div>';
+  el.innerHTML = html;
+  return el;
+}
+
+async function set(id, status) {
+  try {
+    await api('/api/tasks/' + id, { method: 'PATCH', body: JSON.stringify({ status }) });
+    load();
+  } catch (e) { alert(e.message); }
+}
+async function del(id) {
+  if (!confirm('删除任务 #' + id + '？')) return;
+  await api('/api/tasks/' + id, { method: 'DELETE' });
+  load();
+}
+async function addTask() {
+  const goal = document.querySelector('input.goal').value.trim();
+  const title = document.querySelector('input.title').value.trim();
+  if (!goal) { alert('目标不能为空'); return; }
+  await api('/api/tasks', { method: 'POST', body: JSON.stringify({ goal, title }) });
+  document.querySelector('input.goal').value = '';
+  document.querySelector('input.title').value = '';
+  load();
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+load().catch((e) => alert(e.message));
+</script>
+</body>
+</html>

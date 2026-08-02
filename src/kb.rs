@@ -334,30 +334,68 @@ pub fn reject_pending(root: &Path, rel: &str) -> Result<usize, String> {
     Ok(1)
 }
 
+/// 计算记忆条目将追加的文本（行级 diff 预览与落盘共用）
+fn memory_added_text(old: &str, content: &str) -> String {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let entry = content.trim();
+    let strip = |s: &str| -> String { s.trim_start_matches(['-', '#', ' ']).trim().to_string() };
+    if entry.starts_with("## ") {
+        format!("\n\n{entry}\n")
+    } else if old.contains(&format!("## {today}")) {
+        format!("\n- {}\n", strip(entry))
+    } else if old.trim().is_empty() {
+        format!("# 记忆\n\n## {today}\n- {}\n", strip(entry))
+    } else {
+        format!("\n\n## {today}\n- {}\n", strip(entry))
+    }
+}
+
 /// 记忆条目合并进 MEMORY.md（按当日小节；自带 ## 标题的原样追加）
 fn append_memory_entry(root: &Path, content: &str) -> Result<(), String> {
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let mem = root.join("MEMORY.md");
     let old = fs::read_to_string(&mem).unwrap_or_default();
-    let entry = content.trim();
-    let merged = if entry.starts_with("## ") {
-        if old.trim().is_empty() {
-            format!("{entry}\n")
-        } else {
-            format!("{}\n\n{entry}\n", old.trim_end())
-        }
-    } else if old.contains(&format!("## {today}")) {
-        format!("{}\n- {}\n", old.trim_end(), entry.trim_start_matches(['-', '#', ' ']).trim())
-    } else if old.trim().is_empty() {
-        format!("# 记忆\n\n## {today}\n- {}\n", entry.trim_start_matches(['-', '#', ' ']).trim())
+    let added = memory_added_text(&old, content);
+    fs::write(mem, format!("{}{}", old.trim_end(), added)).map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Serialize)]
+pub struct PendingPreview {
+    pub path: String,
+    /// 落地目标（MEMORY.md 或 notes/xxx.md）
+    pub target: String,
+    pub kind: String,
+    /// 将新增的内容（memory=追加行；note=整篇）
+    pub added: String,
+}
+
+/// 行级预览：确认待审文件批准后"将写入什么"（不落盘）
+pub fn preview_pending(root: &Path, rel: &str) -> Result<PendingPreview, String> {
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let pending_dir = root.join("pending");
+    let src = root.join(rel);
+    let src_canon = src.canonicalize().map_err(|e| format!("待审文件不存在: {e}"))?;
+    if !src_canon.starts_with(&pending_dir) {
+        return Err("路径超出待审目录".to_string());
+    }
+    let content = fs::read_to_string(&src_canon).map_err(|e| e.to_string())?;
+    let stripped = rel.strip_prefix("pending/").unwrap_or(rel).to_string();
+    if stripped.starts_with("MEMORY.") {
+        let old = fs::read_to_string(root.join("MEMORY.md")).unwrap_or_default();
+        let added = memory_added_text(&old, &content);
+        Ok(PendingPreview {
+            path: rel.to_string(),
+            target: "MEMORY.md".to_string(),
+            kind: "memory".to_string(),
+            added,
+        })
     } else {
-        format!(
-            "{}\n\n## {today}\n- {}\n",
-            old.trim_end(),
-            entry.trim_start_matches(['-', '#', ' ']).trim()
-        )
-    };
-    fs::write(mem, merged).map_err(|e| e.to_string())
+        Ok(PendingPreview {
+            path: rel.to_string(),
+            target: stripped,
+            kind: "note".to_string(),
+            added: content,
+        })
+    }
 }
 
 /// 路径安全校验：目标（或其最近已存在祖先）必须在 KB 根内。

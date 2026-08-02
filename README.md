@@ -23,7 +23,10 @@
 | **知识图谱** | SQLite `documents`/`links` 两表：`[[双向链接]]` 解析、反向链接、孤立文档检测、标签/项目维度统计；首次调用自动建库，`/rescan` 或托盘"同步索引"重建 |
 | **伪命令行 Markdown 渲染** | 终端内 ANSI 富渲染（零依赖）：标题加粗、行内代码/加粗/链接/`[[双链]]` 着色、列表/引用/代码围栏；**表格按 markdown 行显示**（保留 `|` 结构，复制不失真）；frontmatter 变暗；流式回答按完整行渲染 |
 | **/view 面板渲染层** | iframe 沙箱 + postMessage 桥（视图经宿主调 `/api/*`，仅允许 api 前缀）：`/view graph` 内置知识图谱可视化（环形布局 SVG、按项目配色、孤立文档高亮）、`/view <html>` 渲染 kb 内本地 HTML、`/view off` 或 Esc 关闭 |
-| **记忆自组织（Phase 3-A 基础）** | `/audit` 本地规则健康审计（孤立/无出链/重复标题/悬空链接/提及未链接建议，零 LLM 快速确定）；`/link` 人工补链接（文件名双链、去重、自动重建图谱）；`/suggest` LLM 补全缺失主题新文档（进待审） |
+| **记忆自组织（Phase 3-A 基础）** | `/audit` 本地规则健康审计（孤立/无出链/重复标题/悬空链接/提及未链接建议，零 LLM 快速确定）；`/link` 人工补链接（文件名双链、去重、自动重建图谱）；`/link-all` 一键应用建议；`/suggest` 补全缺失主题（带主题名）或**无参盲区模式**（先审计后让 LLM 分析知识盲区生成新文档，进待审）；`/diff`/`/conflicts` 行级对比与冲突检查 |
+| **待审行级预览** | `/preview <待审路径>` 只读展示批准后将写入的内容（记忆条目按当日小节合并规则计算，不落盘） |
+| **网页读取** | `/fetch <url> [标题]` 静态抓取（零浏览器依赖，HTML 文本提取）；`/page <url> [标题]` 动态网页（chromiumoxide + 系统 Edge/Chrome headless，等 JS 渲染后取正文）；均支持阅读视图 + 带标题全文沉淀进待审 |
+| **任务引擎（Phase 3-B）** | `kb/.tasks.db` 独立 SQLite：目标/状态机（待办·进行中·完成·放弃）/依赖/推进日志；`/task` 终端文字看板 + `/task board`（或 `/view board`）HTML 看板 |
 | LLM 代理 | OpenAI 兼容（Ollama/DeepSeek 等），后端代理防 CORS 与密钥暴露；**SSE 流式透传** |
 | Agent 问答回路 | 启动注入 L1 → 提取关键词 → 检索 L2 → 拼 Prompt → 流式回答 → `[文件:行号]` 引用 |
 | 多轮对话记忆 | 会话内保留最近 4 轮，**localStorage 持久化**（刷新页面不丢，`/clear` 清空） |
@@ -92,13 +95,18 @@ open <路径>           查看 KB 内 MD
 /projects             项目维度统计    /tags 标签统计
 /rescan               重建知识图谱（SQLite）
 /pending              查看待审（LLM 写回/生成笔记先进这里）
+/preview <待审路径>    行级预览：批准后将写入的内容（只读）
 /approve <路径|all>    批准待审 → 写入知识库（自动重建 INDEX+图谱）
 /reject <路径|all>     丢弃待审
-/view graph|<html>|off  面板渲染层：内置图谱可视化 / 本地 HTML 视图（Esc 关闭）
+/view graph|board|<html>|off  面板渲染层：图谱可视化 / 任务看板 / 本地 HTML（Esc 关闭）
 /audit                知识库健康审计（盲区/冲突/补链接建议）
+/conflicts            冲突检查（重复标题/悬空链接）   /diff <A> <B> 行级对比
 /link <源> <目标>      补链接（在源文档追加 [[目标]]，人工确认）
 /link-all              一键应用 /audit 的全部补链接建议
-/suggest <主题>        LLM 补全缺失主题的新文档（进待审）
+/suggest [主题]        LLM 补全缺失主题（无参 = 盲区分析模式，均进待审）
+/fetch <url> [标题]    静态抓取网页：阅读视图 / 带标题则沉淀为待审笔记
+/page <url> [标题]     动态网页读取（headless Edge/Chrome，等 JS 渲染）
+/task                  任务看板：new/start/done/drop/note/dep/rm/board
 /clear                清空多轮对话记忆
 /config               查看配置（掩码）
 ```
@@ -124,6 +132,7 @@ cp config.json dist/config.json   # 可选：携带已有 LLM 配置
 | GET/POST | `/api/file` | 读/写 KB 内 MD（路径越权防护） |
 | POST | `/api/kb/sync` | 重建 INDEX.md |
 | GET | `/api/kb/pending` | 待审文件列表 |
+| GET | `/api/kb/pending/preview?path=` | 待审行级预览（记忆条目按合并规则计算，只读） |
 | POST | `/api/kb/pending/approve` | 批准待审（body: `{path}` 或 `all`）→ 落地 + 重建 INDEX/图谱 |
 | POST | `/api/kb/pending/reject` | 丢弃待审（body: `{path}` 或 `all`） |
 | POST | `/api/graph/sync` | 重建知识图谱（SQLite） |
@@ -137,6 +146,12 @@ cp config.json dist/config.json   # 可选：携带已有 LLM 配置
 | GET | `/api/graph/projects` | 项目维度统计 |
 | GET | `/api/audit` | 知识库健康审计（孤立/无出链/重复标题/悬空/提及未链接建议） |
 | POST | `/api/link` | 补链接（body: `{src, dst}`；文件名双链 + 去重 + 重建图谱） |
+| GET | `/api/fetch?url=` | 静态网页抓取（HTTP + HTML 文本提取，零浏览器依赖） |
+| GET | `/api/page?url=` | 动态网页读取（chromiumoxide + 系统 Edge/Chrome headless） |
+| GET | `/api/tasks` | 任务列表 + 看板统计（`kb/.tasks.db` 独立库） |
+| POST | `/api/tasks` | 新建任务（body: `{goal, title?}`） |
+| PATCH | `/api/tasks/{id}` | 任务更新（`{status?, note?, deps?}`，note 追加带时间戳日志） |
+| DELETE | `/api/tasks/{id}` | 删除任务 |
 | GET/POST | `/api/config` | 本地配置（GET 掩码 api_key） |
 | POST | `/api/llm` | LLM 代理（`stream=true` 走 SSE 流式，否则 JSON 透传） |
 
@@ -151,30 +166,28 @@ Phase 2  ✅ 已完成（知识图谱）
          ├─ 多项目隔离（project = 相对 kb 根的第一段目录）
          └─ /digest 升级：沿知识链路（关联簇）生成体系化文案，输出自动带 [[链接]]
 Phase 3  ▶ 自组织工作流（双主线，人审闭环贯穿）
-Phase 3-A 记忆自组织（基础版已实现 ✅，深化待做）
+Phase 3-A 记忆自组织（✅ 已完成基础 + 深化）
          ├─ ✅ /audit 本地规则审计（孤立/无出链/重复标题/悬空链接/提及未链接建议；自动生成的 INDEX.md 不参与建议）
          ├─ ✅ /link 人工补链接（文件名双链、去重、自动重建图谱）+ /link-all 一键应用建议
-         ├─ ✅ /suggest LLM 补全缺失主题新文档（进待审通道）
-         ├─ ▶ 深化：盲区主题自动提议、冲突文档对比视图
-         ├─ 知识生成走「生成 → 预览 → /approve 确认」待审通道（已实现），防 LLM 污染知识库
+         ├─ ✅ /suggest 补全缺失主题（带主题名 / 无参盲区分析两种模式，进待审通道）
+         ├─ ✅ /diff 行级对比（LCS，大文件自动降级）+ /conflicts 冲突检查（重复标题/悬空链接）
+         ├─ ✅ 知识生成走「生成 → 预览（/preview 行级）→ /approve 确认」待审通道，防 LLM 污染知识库
          └─ 延伸：Agent 可动态生成 HTML 面板 App（人审通过后安装）——自组织的应用层表现
-Phase 3-B 规划引擎（后续叠加，先验证长任务真实需求再开工）
-         ├─ 理由：现有 Agent 只有"记忆整理"动作，缺面向目标的长期任务链条
-         ├─ 任务实体持久化：目标/子任务/状态/依赖/执行日志入 SQLite，与记忆图谱关联
-         │    （注意 graph.db 是全量重建模型，任务表需独立库或 sync 只重建自身表）
-         ├─ 最小子集：目标拆解 + 状态跟踪 + 依赖管理 + 动态重规划；不做多 Agent 协作/并行调度
-         ├─ 规划可视化：HTML 任务看板（依赖面板渲染层）
-         └─ 执行约束：关键节点人工预览/确认，高危动作不自主执行（延续人审闭环）
+Phase 3-B 规划引擎（✅ 基础已实现）
+         ├─ ✅ 任务实体持久化：目标/状态机/依赖/推进日志入 SQLite（kb/.tasks.db 独立库，避开 graph 全量重建）
+         ├─ ✅ /task 终端看板：new / start / done / drop / note / dep / rm
+         ├─ ✅ 规划可视化：/task board（/view board）HTML 看板（四列泳道 + 拖按钮流转）
+         ├─ ▶ 深化：LLM 目标拆解、依赖就绪校验、动态重规划；执行约束延续人审闭环
+         └─ ▶ 延伸：任务与知识图谱/待审的关联打通
 可选前置：面板渲染层 ✅ 基础已实现（/view 命令 + iframe 沙箱 + postMessage 桥）
          ├─ /view <html/目录>：iframe 沙箱渲染本地 HTML，postMessage 桥调宿主 API（仅限 /api/*）
          ├─ 通信复用现有 HTTP/SSE，不引入 WebSocket（已遵循）
-         └─ 首个内置视图：知识图谱可视化 ✅（/view graph：环形布局 SVG、项目配色、孤立高亮）
-         └─ 延伸：更多内置视图、MCP App 双源复用留待后续
-可选前置：网页能力（不依赖自组织，可提前单独做）
-         ├─ /fetch <url>：静态抓取 + 解析 → 终端阅读视图 → 可沉淀 KB（零浏览器依赖）
-         ├─ 动态/操作：Page 引擎层（chromiumoxide + 系统 Edge/Chrome headless）
-         │    ├─ 读：extract 正文/数据 → 面板信息卡 / 阅读视图（复用面板渲染层）
-         │    ├─ 写：click / fill / 提交 → 操作面板 + 前后截图对比
+         └─ 内置视图：知识图谱可视化 ✅（/view graph）、任务看板 ✅（/view board）
+可选前置：网页能力 ✅ 读已实现（写操作待做）
+         ├─ ✅ /fetch <url> [标题]：静态抓取 + 文本提取 → 终端阅读视图 → 可沉淀 KB（零浏览器依赖）
+         ├─ ✅ /page <url> [标题]：动态网页读取（chromiumoxide + 系统 Edge/Chrome headless，等 JS 渲染）
+         │    ├─ ✅ 读：extract 正文 → 阅读视图 / 全文沉淀（进待审）
+         │    ├─ ▶ 写：click / fill / 提交 → 操作面板 + 前后截图对比（需人审确认）
          │    └─ 安全：写操作人审确认；登录态自管（profile 目录）
          └─ bsk / Browser-Use 只作外部会话的外挂工具，不内置（见设计决策）
 Phase 4  生态化（可选，与"轻量"定位有张力，个人场景可长期搁置）
@@ -196,12 +209,12 @@ Phase 4  生态化（可选，与"轻量"定位有张力，个人场景可长期
 ## 已知短板与边界
 
 - 检索无语义召回：换种说法问可能搜不到（Phase 2 图谱缓解，但语义召回仍需向量，当前定位明确不做）
-- 多轮记忆仅会话内，重启即清（如需跨会话持久化，可把历史写入 kb）
-- 写回审核粒度为文件级（/approve 整篇落地），无行级 diff 审核
-- 托盘图标为代码生成的占位方块（正式图标待换）
+- 多轮记忆仅会话内（localStorage 持久化，刷新不丢；跨重启如需持久可把历史写入 kb）
+- 写回审核为「待审目录 + 行级预览」（/preview 看追加内容、/approve 整篇落地），尚无逐行合并/驳回编辑
+- 托盘图标为代码生成的文档图案（白色圆角文档 + 知识行 + 链接点），正式设计图标待换
 - 关键词提取为启发式（无真分词），英文/数字效果好于中文长句
 - 终端表格不做对齐（避免 CJK 宽度计算与流式缓冲），需要整齐表格可 `open` 后用支持表格的编辑器查看原 markdown
-- `/view` 基础（图谱可视化 + 本地 HTML 视图）已实现；App 系统、`/fetch` 网页读取与 Page 引擎尚未实现（见路线图「可选前置」与 Phase 4，当前先聚焦 Phase 3 自组织）
+- `/page` 依赖本机 Edge/Chrome（headless CDP），个别站点（如被网络环境拦截的域名）可能读到空正文；写操作（click/fill/提交）尚未实现，见路线图「可选前置：网页能力」
 
 ## 与同类产品的定位差异
 
@@ -229,9 +242,13 @@ src/server.rs Axum 路由与接口
 src/search.rs 检索（ignore 遍历 + grep crate，多关键词/智能大小写/小节上下文）
 src/graph.rs  知识图谱（SQLite documents/links、[[链接]] 解析、反链/孤立/标签/项目查询）
 src/llm.rs    LLM 代理（非流式 JSON + 流式 SSE 透传）
-src/kb.rs     双层布局 / frontmatter 解析 / INDEX 自动生成 / 路径安全
+src/fetch.rs  /fetch 静态网页抓取（HTTP + HTML 文本提取）
+src/page.rs   /page 动态网页（chromiumoxide + 系统 Edge/Chrome headless CDP）
+src/task.rs   任务引擎（kb/.tasks.db 独立库：状态机/依赖/日志）
+src/kb.rs     双层布局 / frontmatter 解析 / INDEX 自动生成 / 路径安全 / 待审机制
 src/config.rs 本地配置
 web/          xterm.js 终端前端（Agent 回路 + 管理命令）+ config.html 配置页
+web/views/    内置面板视图（graph.html 图谱 / board.html 任务看板）
 kb/           L1 规范层 + L2 内容层（首次运行自动补齐模板）
 scripts/      mock_llm.py 开发测试工具
 dist/         release 打包产物（双击即用）

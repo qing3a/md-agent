@@ -1,9 +1,9 @@
 //! Axum HTTP 服务：托管 xterm.js 前端 + 知识库接口（同源，免 CORS）。
 
-use axum::extract::{Query, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -31,6 +31,7 @@ pub async fn serve(
         .route("/api/file", post(file_write))
         .route("/api/kb/sync", post(kb_sync))
         .route("/api/kb/pending", get(kb_pending_list))
+        .route("/api/kb/pending/preview", get(kb_pending_preview))
         .route("/api/kb/pending/approve", post(kb_pending_approve))
         .route("/api/kb/pending/reject", post(kb_pending_reject))
         .route("/api/graph/sync", post(graph_sync))
@@ -44,6 +45,13 @@ pub async fn serve(
         .route("/api/graph/projects", get(graph_projects))
         .route("/api/audit", get(audit_report))
         .route("/api/link", post(link_add))
+        .route("/api/fetch", get(fetch_page))
+        .route("/api/page", get(page_read))
+        .route("/api/tasks", get(tasks_list))
+        .route("/api/tasks", post(tasks_create))
+        .route("/api/tasks/{id}", patch(tasks_update))
+        .route("/api/tasks/{id}", delete(tasks_delete))
+        .route("/api/tasks/stats", get(tasks_stats))
         .route("/api/config", get(config_get))
         .route("/api/config", post(config_set))
         .route("/api/llm", post(llm_chat))
@@ -252,10 +260,39 @@ async fn link_add(State(st): State<AppState>, Json(body): Json<LinkBody>) -> Res
     Json(json!({ "ok": true, "src": src, "dst": dst, "link": link_line })).into_response()
 }
 
+// ---------- 网页读取（/fetch 静态抓取） ----------
+
+#[derive(Deserialize)]
+struct FetchParams {
+    url: String,
+}
+
+async fn fetch_page(Query(p): Query<FetchParams>) -> Response {
+    match crate::fetch::fetch_page(&p.url).await {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+/// /page 动态网页（headless Chrome/Edge CDP，等 JS 渲染）
+async fn page_read(Query(p): Query<FetchParams>) -> Response {
+    match crate::page::extract_page(&p.url).await {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
 // ---------- 待审机制 ----------
 
 async fn kb_pending_list(State(st): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({ "pending": crate::kb::list_pending(&st.kb_root) }))
+}
+
+async fn kb_pending_preview(State(st): State<AppState>, Query(p): Query<GraphPathParams>) -> Response {
+    match crate::kb::preview_pending(&st.kb_root, &p.path) {
+        Ok(prev) => Json(prev).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "error": e }))).into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -512,5 +549,62 @@ async fn llm_chat(Json(body): Json<serde_json::Value>) -> Response {
             Ok(v) => Json(v).into_response(),
             Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
         }
+    }
+}
+
+// ---------- 任务引擎（Phase 3-B，kb/.tasks.db 独立库） ----------
+
+#[derive(Deserialize)]
+struct TaskCreateBody {
+    goal: String,
+    #[serde(default)]
+    title: String,
+}
+
+#[derive(Deserialize)]
+struct TaskUpdateBody {
+    status: Option<String>,
+    note: Option<String>,
+    deps: Option<Vec<String>>,
+}
+
+async fn tasks_list(State(s): State<AppState>) -> Response {
+    match crate::task::list(&s.kb_root) {
+        Ok(t) => Json(json!({ "tasks": t, "stats": crate::task::stats(&s.kb_root).unwrap_or(json!({})) }))
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+async fn tasks_stats(State(s): State<AppState>) -> Response {
+    match crate::task::stats(&s.kb_root) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+async fn tasks_create(State(s): State<AppState>, Json(b): Json<TaskCreateBody>) -> Response {
+    match crate::task::create(&s.kb_root, &b.goal, &b.title) {
+        Ok(t) => (StatusCode::CREATED, Json(json!({ "task": t }))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+async fn tasks_update(
+    State(s): State<AppState>,
+    AxumPath(id): AxumPath<i64>,
+    Json(b): Json<TaskUpdateBody>,
+) -> Response {
+    match crate::task::update(&s.kb_root, id, b.status.as_deref(), b.note.as_deref(), b.deps.as_deref()) {
+        Ok(t) => Json(json!({ "task": t })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+async fn tasks_delete(State(s): State<AppState>, AxumPath(id): AxumPath<i64>) -> Response {
+    match crate::task::remove(&s.kb_root, id) {
+        Ok(true) => Json(json!({ "ok": true })).into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({ "error": format!("任务 #{id} 不存在") }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
 }

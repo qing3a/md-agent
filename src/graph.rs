@@ -471,7 +471,7 @@ pub struct AuditReport {
     pub dangling: Vec<(String, String)>,
     pub orphans: Vec<String>,
     pub no_out: Vec<String>,
-    pub duplicates: Vec<(String, usize)>,
+    pub duplicates: Vec<(String, usize, String)>,
     pub mentions: Vec<Mention>,
 }
 
@@ -544,13 +544,22 @@ pub fn audit(root: &Path) -> Result<AuditReport, String> {
         rows.filter_map(Result::ok).collect()
     };
 
-    // 重复标题
-    let duplicates: Vec<(String, usize)> = {
+    // 重复标题（含路径，供冲突对比）
+    let duplicates: Vec<(String, usize, String)> = {
         let mut stmt = conn
-            .prepare("SELECT title, COUNT(*) FROM documents WHERE title != '' GROUP BY title HAVING COUNT(*) > 1")
+            .prepare(
+                "SELECT title, COUNT(*), GROUP_CONCAT(path, ' | ') FROM documents
+                 WHERE title != '' GROUP BY title HAVING COUNT(*) > 1",
+            )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize)))
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)? as usize,
+                    r.get::<_, String>(2)?,
+                ))
+            })
             .map_err(|e| e.to_string())?;
         rows.filter_map(Result::ok).collect()
     };

@@ -4,11 +4,14 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod config;
+mod fetch;
 mod graph;
 mod kb;
 mod llm;
 mod search;
 mod server;
+mod page;
+mod task;
 
 use std::path::{Path, PathBuf};
 use tray_icon::menu::{Menu, MenuId, MenuItem, PredefinedMenuItem};
@@ -240,18 +243,40 @@ fn build_tray(menu: Menu) -> tray_icon::TrayIcon {
         .expect("创建托盘图标失败")
 }
 
-/// 32x32 RGBA 图标：白边 + 深蓝底（示意标识，打包时可换成真图标）
+/// 32x32 RGBA 图标：白色圆角文档 + 深蓝知识行 + 青色链接点（MD 知识库意象）
 fn gen_icon() -> tray_icon::Icon {
     let (w, h) = (32u32, 32u32);
     let mut rgba = vec![0u8; (w * h * 4) as usize];
+    let blue = [56u8, 90u8, 190u8, 255u8];
+    let white = [238u8, 242u8, 255u8, 255u8];
+    let gray = [148u8, 158u8, 190u8, 255u8];
+    let cyan = [64u8, 192u8, 190u8, 255u8];
     for y in 0..h {
         for x in 0..w {
             let i = ((y * w + x) * 4) as usize;
-            let border = x < 2 || y < 2 || x >= w - 2 || y >= h - 2;
-            if border {
-                rgba[i..i + 4].copy_from_slice(&[240, 240, 245, 255]);
+            // 圆角文档主体（白）
+            let page = x >= 7 && x <= 26 && y >= 4 && y <= 29;
+            let corner = (x <= 9 && y <= 6) || (x >= 24 && y <= 6) || (x <= 9 && y >= 27) || (x >= 24 && y >= 27);
+            if page && !corner {
+                rgba[i..i + 4].copy_from_slice(&white);
             } else {
-                rgba[i..i + 4].copy_from_slice(&[56, 90, 190, 255]);
+                rgba[i..i + 4].copy_from_slice(&[0, 0, 0, 0]);
+            }
+            if page && !corner {
+                // 文档折角（右上小三角）
+                if x >= 22 && y <= 9 && x + y >= 32 {
+                    rgba[i..i + 4].copy_from_slice(&gray);
+                }
+                // 知识行（深蓝）
+                if (y == 13 && x >= 10 && x <= 21) || (y == 18 && x >= 10 && x <= 23) || (y == 23 && x >= 10 && x <= 19) {
+                    rgba[i..i + 4].copy_from_slice(&blue);
+                }
+                // 链接点（青色）
+                let dx = x as i32 - 24;
+                let dy = y as i32 - 13;
+                if dx * dx + dy * dy <= 9 {
+                    rgba[i..i + 4].copy_from_slice(&cyan);
+                }
             }
         }
     }
