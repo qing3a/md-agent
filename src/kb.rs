@@ -121,6 +121,63 @@ pub struct SyncReport {
     pub files: usize,
 }
 
+/// 生成 memory_summary.md（派生产物，如 INDEX.md：自动生成、无人审、可随时重建）。
+/// 从 MEMORY.md 提取小节标题 + 关键 bullet（截断 100 字符），取最新 40 条 bullet；
+/// 源文件 MEMORY.md 不受影响——人审只守源文件变更（如巩固提案），不守派生投影。
+pub fn sync_memory_summary(root: &Path) -> std::io::Result<usize> {
+    let mem = root.join("MEMORY.md");
+    if !mem.is_file() {
+        return Ok(0);
+    }
+    let content = fs::read_to_string(&mem)?;
+    // 收集小节（heading → bullets）
+    let mut sections: Vec<(String, Vec<String>)> = Vec::new();
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with("## ") || (t.starts_with("# ") && !t.starts_with("## ")) {
+            sections.push((line.to_string(), Vec::new()));
+        } else if (t.starts_with("- ") || t.starts_with("* ")) && !sections.is_empty() {
+            let b = t.trim_start_matches(['-', '*', ' ']);
+            let b: String = if b.chars().count() > 100 {
+                b.chars().take(100).collect::<String>() + "…"
+            } else {
+                b.to_string()
+            };
+            sections.last_mut().unwrap().1.push(b);
+        }
+    }
+    // 取最新 40 条 bullet（从尾部累计）
+    let mut total = 0usize;
+    let mut keep_from = sections.len();
+    for (i, (_, bs)) in sections.iter().enumerate().rev() {
+        total += bs.len();
+        if total > 40 {
+            break;
+        }
+        keep_from = i;
+    }
+    let mut out = String::from("# 记忆摘要（自动生成，勿手改；正文以 MEMORY.md 为准）\n\n");
+    let mut bullets = 0usize;
+    for (i, (h, bs)) in sections.iter().enumerate() {
+        if i < keep_from {
+            continue;
+        }
+        out.push_str(h);
+        out.push('\n');
+        for b in bs {
+            out.push_str("  - ");
+            out.push_str(b);
+            out.push('\n');
+            bullets += 1;
+        }
+    }
+    if bullets == 0 {
+        return Ok(0); // MEMORY 为空或格式不符，不生成空摘要
+    }
+    fs::write(root.join("memory_summary.md"), out)?;
+    Ok(bullets)
+}
+
 /// 扫描 L2（notes/）→ 重建 INDEX.md（自动索引，解决索引腐化问题）
 pub fn sync_index(root: &Path) -> std::io::Result<SyncReport> {
     let root = root
@@ -184,6 +241,7 @@ pub fn sync_index(root: &Path) -> std::io::Result<SyncReport> {
     out.push_str(&format!("\n共 {} 篇\n", rows.len()));
 
     fs::write(root.join(INDEX_FILE), out)?;
+    let _ = sync_memory_summary(&root); // 派生产物随 INDEX 一起刷新（/sync、心跳、approve、link 均经此）
     Ok(SyncReport {
         index_path: INDEX_FILE.to_string(),
         files: rows.len(),
@@ -667,6 +725,38 @@ mod tests {
             "---\ntarget: ../../evil.md\n---\n正文\n");
         let r = approve_pending(&root, "pending/CONSOLIDATE.bad.md", None);
         assert!(r.is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn memory_summary_derived_no_review() {
+        let root = test_root("msum");
+        ensure_layout(&root).unwrap();
+        fs::write(root.join("MEMORY.md"), "# 记忆\n\n## 2026-08-01\n- 旧决策甲\n\n## 2026-08-03\n- 新决策丙\n").unwrap();
+        let n = sync_memory_summary(&root).unwrap();
+        assert!(n >= 2);
+        let s = fs::read_to_string(root.join("memory_summary.md")).unwrap();
+        assert!(s.contains("新决策丙") && s.contains("2026-08-03"));
+        assert!(s.contains("旧决策甲")); // ≤40 条全保留
+        // 源文件未被修改（派生产物不动源，无需人审）
+        let mem = fs::read_to_string(root.join("MEMORY.md")).unwrap();
+        assert!(mem.contains("旧决策甲"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn memory_summary_caps_at_40() {
+        let root = test_root("msum40");
+        ensure_layout(&root).unwrap();
+        let mut mem = String::from("# 记忆\n");
+        for i in 0..60 {
+            mem.push_str(&format!("## 2026-08-{:02}\n- 决策{:02}\n", (i % 28) + 1, i));
+        }
+        fs::write(root.join("MEMORY.md"), mem).unwrap();
+        let n = sync_memory_summary(&root).unwrap();
+        assert!(n <= 40); // 截断到 40 条内
+        let s = fs::read_to_string(root.join("memory_summary.md")).unwrap();
+        assert!(s.contains("决策59")); // 最新保留
         fs::remove_dir_all(&root).unwrap();
     }
 }

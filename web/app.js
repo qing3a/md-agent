@@ -356,7 +356,7 @@
         L1_TEXT = b.l1.map((f) => '【' + f.name + '】\n' + f.content).join('\n\n');
         // CE 组装器 v1：L1 分区——规范层（稳定前缀）vs 记忆/索引层（易变），供 buildGuidePrefix
         GUIDE_TEXT = b.l1.filter((f) => /^(KB|FRAMEWORK|RULES)\./i.test(f.name)).map((f) => '【' + f.name + '】\n' + f.content).join('\n\n');
-        MEMORY_TEXT = b.l1.filter((f) => !/^(KB|FRAMEWORK|RULES)\./i.test(f.name)).map((f) => '【' + f.name + '】\n' + f.content).join('\n\n');
+        MEMORY_TEXT = b.l1.filter((f) => !/^(KB|FRAMEWORK|RULES|memory_summary)\./i.test(f.name)).map((f) => '【' + f.name + '】\n' + f.content).join('\n\n');
         term.writeln(
           '\x1b[90m(L1 已注入 ' + b.l1.length + ' 个文件: ' + b.l1.map((f) => f.name).join(' ') + ')\x1b[0m'
         );
@@ -627,6 +627,17 @@
     return skillsCache;
   }
 
+  // CE 第 4 步：记忆摘要（派生产物，如 INDEX.md——自动生成、无人审、可重建；正文以 MEMORY.md 为准）
+  let memorySummaryCache = null;
+  async function getMemorySummary() {
+    if (memorySummaryCache !== null) return memorySummaryCache;
+    try {
+      const f = await api('/api/file?path=memory_summary.md');
+      memorySummaryCache = (f && f.content) ? f.content : '';
+    } catch (e) { memorySummaryCache = ''; }
+    return memorySummaryCache;
+  }
+
   // 工具名 → 端点调用（args 为 LLM 给的参数对象）
   const TOOL_API = {
     'search': (a) => api('/api/search?q=' + encodeURIComponent(a.q || '') + '&layer=' + encodeURIComponent(a.layer || 'notes') + (a.ctx ? '&ctx=1' : '')),
@@ -889,8 +900,8 @@
     // CE 组装器 v1（稳定前缀在前）：规范层 + 记忆层 + 工具清单 + 回答规则 = 稳定前缀；技能 = 易变尾部
     const system = [
       Core.buildGuidePrefix({
-        guideText: GUIDE_TEXT || L1_TEXT, // v1 不砍注入内容：规范层优先，L1 全量兜底
-        memoryText: MEMORY_TEXT,
+        guideText: GUIDE_TEXT || L1_TEXT, // 规范层优先，L1 全量兜底
+        memoryText: (await getMemorySummary()) || MEMORY_TEXT, // CE 第 4 步：注入摘要（派生产物），全文兜底
         toolsTxt,
         today: localToday(),
       }),
