@@ -23,8 +23,18 @@
   const PROMPT = '\x1b[1;34mmd-agent>\x1b[0m ';
   let line = '';
   let L1_TEXT = ''; // 启动时注入的 L1 层全文
-  let history = []; // 多轮对话记忆（不含检索片段，只存问答正文）
+  let history = loadHistory(); // 多轮对话记忆（localStorage 持久化，刷新不丢）
   const MAX_HISTORY = 8; // 最近 4 轮
+
+  function loadHistory() {
+    try {
+      const h = JSON.parse(localStorage.getItem('md-agent-history') || '[]');
+      return Array.isArray(h) ? h.slice(-MAX_HISTORY) : [];
+    } catch (e) { return []; }
+  }
+  function saveHistory() {
+    try { localStorage.setItem('md-agent-history', JSON.stringify(history.slice(-MAX_HISTORY))); } catch (e) { /* 忽略 */ }
+  }
 
   term.writeln('\x1b[1m本地双层 MD 知识库 Agent\x1b[0m');
   term.writeln('  直接输入问题 → 知识库问答（流式）；/help 查看命令；配置页 /config.html');
@@ -186,7 +196,8 @@
       case '/config': await cfg(); break;
       case '/remember': await remember(rest); break;
       case '/digest': await digest(rest.join(' ')); break;
-      case '/clear': history = []; term.writeln('多轮记忆已清空'); break;
+      case '/clear': history = []; saveHistory(); term.writeln('多轮记忆已清空'); break;
+      case '/link-all': await linkAll(); break;
       case '/graph': await graph(rest.join(' ')); break;
       case '/orphans': await orphans(); break;
       case '/projects': await projects(); break;
@@ -228,6 +239,7 @@
     term.writeln('  /view graph|<html>|off  面板渲染层：内置图谱可视化 / 本地 HTML 视图（Esc 关闭）');
     term.writeln('  /audit                知识库健康审计（盲区/冲突/补链接建议）');
     term.writeln('  /link <源> <目标>      补链接（在源文档追加 [[目标]]，人工确认）');
+    term.writeln('  /link-all              一键应用 /audit 的全部补链接建议');
     term.writeln('  /suggest <主题>        LLM 补全缺失主题的新文档（进待审）');
     term.writeln('  /clear                 清空多轮对话记忆');
     term.writeln('  /config                查看本地配置（掩码）  配置页: /config.html');
@@ -435,10 +447,11 @@
       }
     }
 
-    // 5. 多轮记忆（存问答正文，不含检索片段）
+    // 5. 多轮记忆（存问答正文，不含检索片段；localStorage 持久化）
     history.push({ role: 'user', content: question });
     if (cleanFull) history.push({ role: 'assistant', content: cleanFull });
     if (history.length > MAX_HISTORY) history = history.slice(-MAX_HISTORY);
+    saveHistory();
 
     if (top.length) {
       term.writeln('\x1b[1;32m──── 引用来源 ────\x1b[0m');
@@ -830,6 +843,39 @@
     } else {
       term.writeln('\x1b[33m' + (r.note || '未添加') + ': ' + r.src + ' → ' + r.dst + '\x1b[0m');
     }
+  }
+
+  // /link-all：一键应用 audit 的全部补链接建议（逐条调用 /api/link，自带去重）
+  async function linkAll() {
+    term.writeln('获取审计建议...');
+    const r = await api('/api/audit');
+    if (!r.mentions.length) {
+      term.writeln('\x1b[32m没有可应用的补链接建议。\x1b[0m');
+      return;
+    }
+    term.writeln('将批量应用 ' + r.mentions.length + ' 条补链接建议:');
+    for (const m of r.mentions.slice(0, 20)) term.writeln('  ' + m.src + ' → [[' + m.dst + ']]');
+    if (r.mentions.length > 20) term.writeln('  ... 共 ' + r.mentions.length + ' 条');
+    term.writeln('\x1b[90m(执行中...)\x1b[0m');
+    let ok = 0, skipped = 0, failed = 0;
+    for (const m of r.mentions) {
+      try {
+        const res = await api('/api/link', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ src: m.src, dst: m.dst_path }),
+        });
+        if (res.ok) ok++;
+        else skipped++;
+      } catch (e) {
+        failed++;
+        term.writeln('\x1b[31m失败: ' + m.src + ' → ' + m.dst + ': ' + e.message + '\x1b[0m');
+      }
+    }
+    term.writeln(
+      '\x1b[32m✓ 完成: \x1b[0m新增 ' + ok + ' 条，跳过 ' + skipped + ' 条' +
+      (failed ? '，失败 ' + failed + ' 条' : '') + '（INDEX 与图谱已重建）'
+    );
   }
 
   // /suggest <主题>：LLM 补全知识库缺失主题的新文档 → 进待审

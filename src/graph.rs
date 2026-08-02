@@ -575,6 +575,10 @@ pub fn audit(root: &Path) -> Result<AuditReport, String> {
         }
         let mut seen: HashSet<(String, String)> = HashSet::new();
         for (src, _) in &docs {
+            // 自动生成的 INDEX.md 不参与补链接建议（改动会被下次 /sync 覆盖）
+            if src == "INDEX.md" {
+                continue;
+            }
             let Ok(content) = std::fs::read_to_string(root.join(src)) else {
                 continue;
             };
