@@ -18,7 +18,12 @@
   term.loadAddon(fit);
   term.open(document.getElementById('terminal'));
   fit.fit();
-  window.addEventListener('resize', () => fit.fit());
+  // resize 防抖（150ms），避免拖动窗口时频繁重排终端
+  let fitTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(fitTimer);
+    fitTimer = setTimeout(() => fit.fit(), 150);
+  });
 
   const PROMPT = '\x1b[1;34mmd-agent>\x1b[0m ';
   let line = '';
@@ -102,9 +107,9 @@
   // ---- 启动欢迎 banner + 状态信息（异步汇总；bannerDone 保证状态行先于输入框打印）----
   let bannerDone = Promise.resolve();
   function printBanner() {
-    term.writeln('\x1b[90m' + '─'.repeat(Math.min(term.cols, 64)) + '\x1b[0m');
+    term.writeln('\x1b[90m' + '─'.repeat(Math.min(trueCols(), 64)) + '\x1b[0m');
     term.writeln('\x1b[1;36m  md-agent\x1b[0m  \x1b[90m本地双层 MD 知识库 Agent\x1b[0m');
-    term.writeln('\x1b[90m' + '─'.repeat(Math.min(term.cols, 64)) + '\x1b[0m');
+    term.writeln('\x1b[90m' + '─'.repeat(Math.min(trueCols(), 64)) + '\x1b[0m');
     term.writeln('  直接输入问题 → 知识库问答（流式）·  /help 查看命令 ·  配置页 /config.html');
     term.writeln('\x1b[90m  状态加载中…\x1b[0m');
     // 状态汇总：健康 / KB / 模型 / 待审 / 任务 / 图谱

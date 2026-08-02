@@ -5,8 +5,15 @@
 <title>md-agent</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
 <style>
-  html, body { margin: 0; height: 100%; background: #1e1e2e; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1e1e2e; }
   #terminal { height: 100%; padding: 10px; box-sizing: border-box; }
+
+  /* xterm 滚动条：细窄 + 主题色（仅终端内滚动，页面永不滚动） */
+  .xterm-viewport::-webkit-scrollbar { width: 8px; }
+  .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
+  .xterm-viewport::-webkit-scrollbar-thumb { background: #313244; border-radius: 4px; }
+  .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #45475a; }
+  .xterm-viewport { scrollbar-width: thin; scrollbar-color: #313244 transparent; }
 
   /* /view 面板渲染层：iframe 沙箱浮层（图谱可视化等 HTML 视图） */
   #view-overlay {
