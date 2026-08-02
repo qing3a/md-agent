@@ -6,7 +6,22 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
 <style>
   html, body { margin: 0; height: 100%; background: #1e1e2e; }
-  #terminal { height: 100%; padding: 10px; box-sizing: border-box; }
+  #app { height: 100%; display: flex; flex-direction: column; }
+  #terminal { flex: 1; min-height: 0; padding: 10px; box-sizing: border-box; }
+
+  /* 输入框底部状态栏（独立 DOM，不占终端流；xterm 无原生固定行，业界同款做法） */
+  #statusbar {
+    height: 26px; flex: none; display: flex; align-items: center; gap: 14px;
+    padding: 0 14px; background: #26263a; border-top: 1px solid #3a3a55;
+    font: 12px/1 "Segoe UI", "Microsoft YaHei", sans-serif; color: #a6adc8;
+    user-select: none; overflow: hidden;
+  }
+  #statusbar .dot { font-size: 11px; }
+  #statusbar .dot.ok { color: #a6e3a1; }
+  #statusbar .dot.err { color: #f38ba8; }
+  #statusbar .it { white-space: nowrap; }
+  #statusbar .dim { color: #7f849c; }
+  #statusbar .sp { flex: 1; }
 
   /* /view 面板渲染层：iframe 沙箱浮层（图谱可视化等 HTML 视图） */
   #view-overlay {
@@ -28,7 +43,10 @@
 </style>
 </head>
 <body>
-<div id="terminal"></div>
+<div id="app">
+  <div id="terminal"></div>
+  <div id="statusbar"><span class="dot">●</span><span class="it">加载中…</span></div>
+</div>
 
 <!-- /view 渲染层：iframe 沙箱（sandbox=allow-scripts，跨源桥接走 postMessage） -->
 <div id="view-overlay" class="hidden">

@@ -36,9 +36,71 @@
     try { localStorage.setItem('md-agent-history', JSON.stringify(history.slice(-MAX_HISTORY))); } catch (e) { /* 忽略 */ }
   }
 
-  term.writeln('\x1b[1m本地双层 MD 知识库 Agent\x1b[0m');
-  term.writeln('  直接输入问题 → 知识库问答（流式）；/help 查看命令；配置页 /config.html');
-  term.write(PROMPT);
+  // ---- 输入行边框：提示前一条上横线、回车后一条下横线，把输入行夹住 ----
+  function hline() { return '\x1b[90m' + '─'.repeat(term.cols) + '\x1b[0m'; }
+  function showPrompt() { term.write(hline() + '\r\n' + PROMPT); }
+
+  // ---- 启动欢迎 banner + 状态信息（异步汇总，失败不阻塞）----
+  function printBanner() {
+    term.writeln('\x1b[90m' + '─'.repeat(Math.min(term.cols, 64)) + '\x1b[0m');
+    term.writeln('\x1b[1;36m  md-agent\x1b[0m  \x1b[90m本地双层 MD 知识库 Agent\x1b[0m');
+    term.writeln('\x1b[90m' + '─'.repeat(Math.min(term.cols, 64)) + '\x1b[0m');
+    term.writeln('  直接输入问题 → 知识库问答（流式）·  /help 查看命令 ·  配置页 /config.html');
+    term.writeln('\x1b[90m  状态加载中…\x1b[0m');
+    // 状态汇总：健康 / KB / 模型 / 待审 / 任务 / 图谱
+    Promise.all([
+      fetch('/api/health').then((r) => r.json()).catch(() => null),
+      fetch('/api/config').then((r) => r.json()).catch(() => null),
+      fetch('/api/kb/pending').then((r) => r.json()).catch(() => null),
+      fetch('/api/tasks').then((r) => r.json()).catch(() => null),
+      fetch('/api/graph/stats').then((r) => r.json()).catch(() => null),
+    ]).then(([h, c, p, t, g]) => {
+      const ver = (h && h.version) || '?';
+      const kb = (c && c.kb_root) || '-';
+      const model = (c && c.llm && c.llm.model) || '未配置';
+      const pend = (p && Array.isArray(p.pending)) ? p.pending.length : '-';
+      const todo = (t && t.stats) ? (t.stats.todo || 0) + (t.stats.doing || 0) : '-';
+      const gs = (g && g.docs) ? (g.docs || 0) + ' 文档 / ' + (g.links || 0) + ' 链接' : '-';
+      term.writeln('\x1b[90m  v' + ver + ' · KB: ' + kb + ' · 图谱 ' + gs + '\x1b[0m');
+      term.writeln('\x1b[90m  模型 ' + model + ' · 待审 ' + pend + ' · 进行中任务 ' + todo + '\x1b[0m');
+    }).catch(() => {});
+  }
+  printBanner();
+
+  // ---- 输入框底部状态栏（DOM，独立于终端流；每轮命令后刷新 + 8s 轮询）----
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, (c) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+  function refreshStatus() {
+    Promise.all([
+      fetch('/api/health').then((r) => r.json()).catch(() => null),
+      fetch('/api/config').then((r) => r.json()).catch(() => null),
+      fetch('/api/kb/pending').then((r) => r.json()).catch(() => null),
+      fetch('/api/tasks').then((r) => r.json()).catch(() => null),
+      fetch('/api/graph/stats').then((r) => r.json()).catch(() => null),
+    ]).then(([h, c, p, t, g]) => {
+      const el = document.getElementById('statusbar');
+      if (!el) return;
+      const ok = !!(h && h.status === 'ok');
+      const model = (c && c.llm && c.llm.model) || '未配置 LLM';
+      const kb = (c && c.kb_root) || '-';
+      const pend = (p && Array.isArray(p.pending)) ? p.pending.length : '-';
+      const todo = (t && t.stats) ? (t.stats.todo || 0) + (t.stats.doing || 0) : '-';
+      const gs = (g && g.docs) ? (g.docs || 0) + ' 文档 / ' + (g.links || 0) + ' 链接' : '-';
+      el.innerHTML =
+        '<span class="dot ' + (ok ? 'ok' : 'err') + '">●</span>' +
+        '<span class="it">' + (ok ? '服务运行中' : '服务异常') + '</span>' +
+        '<span class="it dim">模型 ' + esc(model) + '</span>' +
+        '<span class="sp"></span>' +
+        '<span class="it dim">KB ' + esc(kb) + '</span>' +
+        '<span class="it dim">待审 ' + pend + '</span>' +
+        '<span class="it dim">任务 ' + todo + '</span>' +
+        '<span class="it dim">图谱 ' + esc(gs) + '</span>';
+    }).catch(() => {});
+  }
+  refreshStatus();
+  setInterval(refreshStatus, 8000);
 
   // 启动时注入 L1（类 CLAUDE.md：规范 / 记忆 / 索引层）
   (async function loadL1() {
@@ -56,26 +118,31 @@
     } catch (e) {
       term.writeln('\x1b[33mL1 加载失败: ' + e.message + '\x1b[0m');
     }
-    if (!line) term.write(PROMPT);
+    if (!line) showPrompt();
   })();
 
   term.onData((data) => {
     const code = data.charCodeAt(0);
     if (data === '\r') {
       const cmd = line.trim();
-      term.write('\r\n');
+      term.write('\r\n' + hline() + '\r\n'); // 输入行下边框
       line = '';
       if (cmd) {
         run(cmd)
           .catch((e) => term.writeln('\x1b[31m' + ((e && e.message) || e) + '\x1b[0m'))
-          .finally(() => term.write(PROMPT));
+          .finally(() => { showPrompt(); refreshStatus(); });
       } else {
-        term.write(PROMPT);
+        showPrompt();
       }
-    } else if (data === '\x7f') {
+    } else if (data === '\x7f' || data === '\x08') {
+      // 退格（兼容 \x7f DEL 与 \x08 BS）。整行清绘而非 \b \b 逐列擦：
+      // 中文/全角占 2 列逐列擦不干净，Array.from 按字符（代理对安全）切片不劈 emoji，
+      // 长行回绕时 \b 无法跨行，清行重画一并解决。
       if (line.length) {
-        line = line.slice(0, -1);
-        term.write('\b \b');
+        const chars = Array.from(line);
+        chars.pop();
+        line = chars.join('');
+        term.write('\x1b[2K\r' + PROMPT + line);
       }
     } else if (code >= 32) {
       line += data;
