@@ -42,6 +42,8 @@ pub async fn serve(
     let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/tools", get(tools_handler))
+        .route("/api/skills", get(skills_handler))
+        .route("/api/consolidate", post(consolidate_handler))
         .route("/api/search", get(search_handler))
         .route("/api/l1", get(l1_handler))
         .route("/api/file", get(file_read))
@@ -160,6 +162,31 @@ async fn tools_handler() -> Json<Value> {
     Json(tools_json())
 }
 
+/// 技能注册表（Phase 3-C Step 2：trigger 触发注入用）
+async fn skills_handler(State(st): State<AppState>) -> Json<Value> {
+    let items: Vec<Value> = crate::kb::list_skills(&st.kb_root)
+        .into_iter()
+        .map(|s| json!({ "name": s.name, "title": s.title, "trigger": s.trigger, "desc": s.desc }))
+        .collect();
+    Json(json!({ "skills": items }))
+}
+
+/// 巩固器：按确定性规则（MEMORY 去重 / 重复标题提示）生成巩固提案进待审
+async fn consolidate_handler(State(st): State<AppState>) -> Response {
+    let audit = match crate::graph::audit(&st.kb_root) {
+        Ok(a) => a,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    };
+    match crate::consolidate::generate_proposals(&st.kb_root, &audit) {
+        Ok(created) => Json(json!({ "ok": true, "created": created })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 async fn health() -> Json<serde_json::Value> {
     Json(json!({
         "status": "ok",
@@ -271,7 +298,10 @@ async fn file_write(State(st): State<AppState>, Json(body): Json<FileWriteBody>)
 async fn kb_sync(State(st): State<AppState>) -> Response {
     let _guard = st.sync_lock.lock().await; // 与心跳共用互斥，防并发写
     match crate::kb::sync_index(&st.kb_root) {
-        Ok(r) => Json(json!({ "ok": true, "index": r.index_path, "files": r.files })).into_response(),
+        Ok(r) => {
+            let _ = crate::kb::sync_skills(&st.kb_root); // 技能注册表顺带重建（技能提案经 approve 安装）
+            Json(json!({ "ok": true, "index": r.index_path, "files": r.files })).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -320,6 +350,7 @@ async fn heartbeat_loop(state: AppState) {
             // 锁内重建（同步 std::fs，锁内无 await 点）
             let _guard = state.sync_lock.lock().await;
             let _ = crate::kb::sync_index(&state.kb_root);
+            let _ = crate::kb::sync_skills(&state.kb_root); // 技能注册表顺带重建
             let _ = crate::graph::sync_graph(&state.kb_root);
             let audit = crate::graph::audit(&state.kb_root).ok();
             let brief = audit.map(|a| crate::heartbeat::AuditBrief {

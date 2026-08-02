@@ -37,6 +37,8 @@
   .item .k { font-size: 10px; color: var(--dim); flex: none; }
   .item .k.note { color: var(--yellow); }
   .item .k.mem { color: var(--blue); }
+  .item .k.skill { color: var(--purple); }
+  .item .k.consolidate { color: var(--green); }
 
   h2 { font-size: 12px; color: var(--dim); margin-bottom: 8px; letter-spacing: 1px; }
   pre { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px;
@@ -86,6 +88,8 @@
   }
   function kindOf(p) {
     if (p.indexOf('MEMORY.') >= 0) return ['记忆条目', 'mem'];
+    if (p.indexOf('SKILL.') >= 0) return ['技能提案', 'skill'];
+    if (p.indexOf('CONSOLIDATE.') >= 0) return ['巩固提案', 'consolidate'];
     return ['新笔记', 'note'];
   }
 
@@ -140,7 +144,8 @@
     edit.value = pr.added.replace(/^\n+/, '');
     // 目标文档上下文
     var ctxBox = $('ctx');
-    ctxBox.innerHTML = '<h2>目标: ' + esc(pr.target) + '（' + (pr.kind === 'memory' ? '记忆合并' : '新笔记') + '）</h2>';
+    var kindLabel = { memory: '记忆合并', note: '新笔记', skill: '技能安装到 skills/', consolidate: '替换目标文件' }[pr.kind] || pr.kind;
+    ctxBox.innerHTML = '<h2>目标: ' + esc(pr.target) + '（' + kindLabel + '）</h2>';
     var pre = document.createElement('pre');
     if (pr.kind === 'memory' && pr.target) {
       var f = await hostApi('/api/file?path=' + encodeURIComponent(pr.target));

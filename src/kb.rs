@@ -13,6 +13,8 @@ pub const L1_FILES: [&str; 4] = ["KB.md", "FRAMEWORK.md", "RULES.md", "MEMORY.md
 pub const INDEX_FILE: &str = "INDEX.md";
 /// L2 内容层目录
 pub const NOTES_DIR: &str = "notes";
+/// 技能目录（Phase 3-C Step 2：程序性记忆，注册表 INDEX.md 自动生成）
+pub const SKILLS_DIR: &str = "skills";
 
 /// 解析 KB 根目录：env MD_AGENT_KB > 工作目录 ./kb > 可执行文件旁 kb
 pub fn kb_root() -> PathBuf {
@@ -34,6 +36,7 @@ pub fn kb_root() -> PathBuf {
 /// 确保双层目录与 L1 文件存在；缺失时从内嵌模板写入（首次运行自举）
 pub fn ensure_layout(root: &Path) -> std::io::Result<()> {
     fs::create_dir_all(root.join(NOTES_DIR))?;
+    fs::create_dir_all(root.join(SKILLS_DIR))?;
     let templates: &[(&str, &str)] = &[
         ("KB.md", include_str!("templates/KB.md")),
         ("FRAMEWORK.md", include_str!("templates/FRAMEWORK.md")),
@@ -187,6 +190,94 @@ pub fn sync_index(root: &Path) -> std::io::Result<SyncReport> {
     })
 }
 
+/// 重建技能注册表 skills/INDEX.md（扫描 skills/ 下 .md，排除 INDEX.md；frontmatter title/trigger/desc）
+pub fn sync_skills(root: &Path) -> std::io::Result<usize> {
+    let skills = root.join(SKILLS_DIR);
+    fs::create_dir_all(&skills)?;
+    let mut items: Vec<(String, String, String)> = Vec::new(); // 标题/触发词/描述
+    if let Ok(rd) = fs::read_dir(&skills) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() || p.file_name().and_then(|n| n.to_str()) == Some("INDEX.md") {
+                continue;
+            }
+            if p.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let content = fs::read_to_string(&p).unwrap_or_default();
+            let (meta, body) = parse_frontmatter(&content);
+            let title = meta
+                .get("title")
+                .cloned()
+                .or_else(|| first_heading(body))
+                .or_else(|| p.file_stem().and_then(|s| s.to_str()).map(String::from))
+                .unwrap_or_default();
+            let trigger = meta.get("trigger").cloned().unwrap_or_default();
+            let desc = meta.get("desc").cloned().unwrap_or_default();
+            items.push((title, trigger, desc));
+        }
+    }
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let mut out = String::new();
+    out.push_str("---\ntype: index\ntitle: 技能注册表\nupdated: ");
+    out.push_str(&now.to_string());
+    out.push_str("\n---\n\n# 技能注册表（自动生成，勿手改）\n\n");
+    if items.is_empty() {
+        out.push_str("（暂无技能。Agent 生成的技能提案经 /approve 后安装于此。）\n");
+    }
+    for (title, trigger, desc) in &items {
+        out.push_str(&format!(
+            "- **{}**{}：{}\n",
+            title,
+            if trigger.is_empty() { String::new() } else { format!("（触发词 `{}`）", trigger) },
+            if desc.is_empty() { "(无描述)" } else { desc }
+        ));
+    }
+    out.push_str(&format!("\n共 {} 项\n", items.len()));
+    fs::write(skills.join("INDEX.md"), out)?;
+    Ok(items.len())
+}
+
+/// 技能条目（/api/skills 用，trigger 触发注入）
+#[derive(Serialize, Debug)]
+pub struct SkillInfo {
+    pub name: String,
+    pub title: String,
+    pub trigger: String,
+    pub desc: String,
+}
+
+/// 列出技能注册表条目（排除 INDEX.md）
+pub fn list_skills(root: &Path) -> Vec<SkillInfo> {
+    let skills = root.join(SKILLS_DIR);
+    let mut out: Vec<SkillInfo> = Vec::new();
+    if let Ok(rd) = fs::read_dir(&skills) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() || p.file_name().and_then(|n| n.to_str()) == Some("INDEX.md") {
+                continue;
+            }
+            if p.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let content = fs::read_to_string(&p).unwrap_or_default();
+            let (meta, body) = parse_frontmatter(&content);
+            out.push(SkillInfo {
+                name: p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
+                title: meta.get("title").cloned()
+                    .or_else(|| first_heading(body))
+                    .or_else(|| p.file_stem().and_then(|s| s.to_str()).map(String::from))
+                    .unwrap_or_default(),
+                trigger: meta.get("trigger").cloned().unwrap_or_default(),
+                desc: meta.get("desc").cloned().unwrap_or_default(),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.title.cmp(&b.title));
+    out
+}
+
 #[derive(Debug)]
 pub struct L1File {
     pub name: String,
@@ -257,7 +348,11 @@ pub fn list_pending(root: &Path) -> Vec<PendingItem> {
             .to_string_lossy()
             .replace('\\', "/");
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let kind = if name.starts_with("MEMORY.") { "memory" } else { "note" };
+        // 待审四型：无前缀=新笔记；MEMORY.*=记忆；SKILL.*=技能；CONSOLIDATE.*=巩固（替换目标文件）
+        let kind = if name.starts_with("MEMORY.") { "memory" }
+            else if name.starts_with("SKILL.") { "skill" }
+            else if name.starts_with("CONSOLIDATE.") { "consolidate" }
+            else { "note" };
         let content = fs::read_to_string(path).unwrap_or_default();
         let (meta, body) = parse_frontmatter(&content);
         let title = meta
@@ -302,6 +397,40 @@ pub fn approve_pending(root: &Path, rel: &str, edited: Option<&str>) -> Result<(
         append_memory_entry(&root, &content)?;
         fs::remove_file(&src_canon).map_err(|e| e.to_string())?;
         Ok(("MEMORY.md".to_string(), Some("记忆条目已按当日小节合并".to_string())))
+    } else if stripped.starts_with("SKILL.") {
+        // 技能提案 → 移入 skills/（SKILL. 前缀去掉）+ 重建技能注册表
+        let name = stripped.strip_prefix("SKILL.").unwrap_or(&stripped);
+        let dst = root.join(SKILLS_DIR).join(name);
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        if let Some(edited) = edited {
+            fs::write(&dst, edited).map_err(|e| format!("写入失败: {e}"))?;
+            fs::remove_file(&src_canon).map_err(|e| e.to_string())?;
+        } else {
+            fs::rename(&src_canon, &dst).map_err(|e| format!("移动失败: {e}"))?;
+        }
+        let count = sync_skills(&root).map_err(|e| format!("技能注册表重建失败: {e}"))?;
+        let rel = format!("{SKILLS_DIR}/{name}");
+        Ok((rel, Some(format!("技能已安装（注册表 {count} 项）"))))
+    } else if stripped.starts_with("CONSOLIDATE.") {
+        // 巩固提案 → frontmatter {target} 指向目标文件，正文=替换后全文（edited 覆盖）
+        let content = match edited {
+            Some(c) => c.to_string(),
+            None => fs::read_to_string(&src_canon).map_err(|e| e.to_string())?,
+        };
+        let (meta, body) = parse_frontmatter(&content);
+        let target = meta.get("target").ok_or("巩固提案缺 frontmatter target 字段")?;
+        if target.contains("..") || target.starts_with('/') {
+            return Err("巩固目标路径不合法".to_string());
+        }
+        let dst = root.join(target);
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(&dst, body).map_err(|e| format!("写入目标失败: {e}"))?;
+        fs::remove_file(&src_canon).map_err(|e| e.to_string())?;
+        Ok((target.to_string(), Some("巩固提案已替换目标文件".to_string())))
     } else {
         // 新笔记 → 移动到目标路径（保留 pending/ 后的相对结构）；edited 覆盖内容
         let dst = root.join(&stripped);

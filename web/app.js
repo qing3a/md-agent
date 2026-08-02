@@ -544,6 +544,8 @@
       case '/reject': await pendingAct('reject', rest[0]); break;
       case '/view': await viewCmd(rest[0]); break;
       case '/side': toggleSide(); break;
+      case '/consolidate': await consolidateCmd(); break;
+      case '/skills': await skillsCmd(); break;
       case '/audit': await auditCmd(); break;
       case '/conflicts': await conflicts(); break;
       case '/diff': await diffCmd(rest[0], rest[1]); break;
@@ -579,6 +581,8 @@
     term.writeln('  /approve <路径|all>    批准待审 → 写入知识库   /reject 丢弃');
     term.writeln('  /view graph|<html>|off  面板渲染层：内置图谱可视化 / 本地 HTML 视图（Esc 关闭）');
     term.writeln('  /side                  速览侧边栏（任务/待审/图谱/审计，Ctrl+K 或快捷按钮同样唤出）');
+    term.writeln('  /consolidate           巩固器：MEMORY 去重 / 重复标题提示，生成巩固提案进待审');
+    term.writeln('  /skills                列出技能注册表（Agent 技能提案经 /approve 安装）');
     term.writeln('  /audit                知识库健康审计（盲区/冲突/补链接建议）');
     term.writeln('  /conflicts             冲突检查（重复标题/悬空链接）   /diff <A> <B> 行级对比');
     term.writeln('  /link <源> <目标>      补链接（在源文档追加 [[目标]]，人工确认）');
@@ -640,6 +644,14 @@
     if (toolsCache) return toolsCache;
     try { toolsCache = await api('/api/tools'); } catch (e) { toolsCache = []; }
     return toolsCache;
+  }
+
+  // 技能注册表（Phase 3-C Step 2：trigger 命中注入）
+  let skillsCache = null;
+  async function getSkills() {
+    if (skillsCache) return skillsCache;
+    try { skillsCache = (await api('/api/skills')).skills || []; } catch (e) { skillsCache = []; }
+    return skillsCache;
   }
 
   // 工具名 → 端点调用（args 为 LLM 给的参数对象）
@@ -940,6 +952,15 @@
       '  - ' + t.name + '(' + t.params.map((p) => p.name + (p.required ? '' : '?')).join(', ') + '): ' + t.desc +
       (t.example ? ' | 例: ' + t.example : '')
     ).join('\n');
+    // 技能触发注入：输入命中技能 trigger → 注入技能正文（按需引导记忆）
+    const hitSkills = (await getSkills()).filter((sk) => sk.trigger && question.includes(sk.trigger));
+    let skillTxt = '';
+    for (const sk of hitSkills) {
+      try {
+        const f = await api('/api/file?path=skills/' + encodeURIComponent(sk.name));
+        if (f && f.content) skillTxt += '\n【技能:' + sk.title + '（trigger:' + sk.trigger + '）】\n' + f.content.slice(0, 1500) + '\n';
+      } catch (e) { /* 忽略 */ }
+    }
     const frag = atFrag
       .concat(
         top.map(
@@ -961,6 +982,7 @@
       toolsTxt || '(工具清单加载失败)',
       '调用后你会收到「工具返回」，基于它继续回答；不需要工具时直接回答。',
       '',
+      skillTxt ? '相关技能（命中触发词，按技能步骤执行）：' + skillTxt : '',
       '回答规则：',
       '1. 优先依据用户消息中给出的检索片段回答，引用格式 [文件:行号]；',
       '2. 片段不足时如实说明，不要编造；',
@@ -1554,7 +1576,7 @@
     term.writeln('待审文件（/approve <路径或 all> 确认 | /reject 丢弃 | open 预览）:');
     for (const p of r.pending) {
       term.writeln(
-        '  ' + (p.kind === 'memory' ? '\x1b[33m[记忆]\x1b[0m' : '\x1b[36m[笔记]\x1b[0m') +
+        '  ' + ({ memory: '\x1b[33m[记忆]\x1b[0m', skill: '\x1b[35m[技能]\x1b[0m', consolidate: '\x1b[36m[巩固]\x1b[0m' }[p.kind] || '\x1b[34m[笔记]\x1b[0m') +
         '  ' + p.path + (p.title ? '  \x1b[90m(' + p.title + ')\x1b[0m' : '')
       );
     }
@@ -1819,6 +1841,41 @@
     if (sideDrawer.contains(e.target) || (e.target.closest && e.target.closest('#quick-btns'))) return;
     closeSide();
   });
+
+  // ---------- 巩固器 + 技能（Phase 3-C Step 2） ----------
+
+  // /consolidate：运行巩固器，生成巩固提案进待审（MEMORY 去重 / 重复标题提示）
+  async function consolidateCmd() {
+    term.writeln('\x1b[90m(巩固器运行中: MEMORY 去重 + 重复标题检测)\x1b[0m');
+    const r = await api('/api/consolidate', { method: 'POST' });
+    if (r.created && r.created.length) {
+      term.writeln('\x1b[32m✓ 生成 ' + r.created.length + ' 条巩固提案:\x1b[0m');
+      for (const c of r.created) {
+        term.writeln('  ' + c + '  \x1b[90m(/preview 预览 · /approve 确认 · /reject 丢弃)\x1b[0m');
+      }
+    } else {
+      term.writeln('\x1b[90m无巩固提案（MEMORY 无重复行、无重复标题文档）\x1b[0m');
+    }
+  }
+
+  // /skills：列出技能注册表（技能 = 程序性记忆，trigger 命中自动注入）
+  async function skillsCmd() {
+    const r = await api('/api/skills');
+    const sk = r.skills || [];
+    if (!sk.length) {
+      term.writeln('\x1b[90m技能库为空（Agent 生成的技能提案经 /approve 后安装到 kb/skills/）\x1b[0m');
+      return;
+    }
+    term.writeln('技能注册表（' + sk.length + ' 项）:');
+    for (const s of sk) {
+      term.writeln(
+        '  \x1b[35m' + s.title + '\x1b[0m' +
+        (s.trigger ? '  \x1b[90mtrigger: ' + s.trigger + '\x1b[0m' : '') +
+        '  \x1b[90m' + (s.desc || '') + '\x1b[0m'
+      );
+    }
+    term.writeln('\x1b[90m(提问命中 trigger 时技能正文自动注入)\x1b[0m');
+  }
 
   // ---------- 记忆自组织（Phase 3-A：审计 / 补链接 / 补文档） ----------
 
