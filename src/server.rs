@@ -8,11 +8,17 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct AppState {
     pub kb_root: PathBuf,
     pub web_dir: PathBuf,
+    /// 同步互斥锁：心跳与手动写端点（sync/approve/link）共用，防并发写
+    pub sync_lock: Arc<tokio::sync::Mutex<()>>,
+    /// 心跳状态（跨线程共享）
+    pub hb_status: Arc<std::sync::Mutex<crate::heartbeat::HeartbeatStatus>>,
 }
 
 pub async fn serve(
@@ -21,7 +27,17 @@ pub async fn serve(
     web_dir: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     crate::kb::ensure_layout(&kb_root)?;
-    let state = AppState { kb_root, web_dir };
+    let state = AppState {
+        kb_root: kb_root.clone(),
+        web_dir,
+        sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+        hb_status: Arc::new(std::sync::Mutex::new(Default::default())),
+    };
+    // 心跳自动同步任务（默认关闭；开关走 config）
+    {
+        let state = state.clone();
+        tokio::spawn(heartbeat_loop(state));
+    }
 
     let app = Router::new()
         .route("/api/health", get(health))
@@ -44,6 +60,8 @@ pub async fn serve(
         .route("/api/graph/tags", get(graph_tags))
         .route("/api/graph/projects", get(graph_projects))
         .route("/api/audit", get(audit_report))
+        .route("/api/heartbeat", get(heartbeat_get))
+        .route("/api/heartbeat", post(heartbeat_set))
         .route("/api/link", post(link_add))
         .route("/api/fetch", get(fetch_page))
         .route("/api/page", get(page_read))
@@ -175,6 +193,7 @@ async fn file_write(State(st): State<AppState>, Json(body): Json<FileWriteBody>)
 }
 
 async fn kb_sync(State(st): State<AppState>) -> Response {
+    let _guard = st.sync_lock.lock().await; // 与心跳共用互斥，防并发写
     match crate::kb::sync_index(&st.kb_root) {
         Ok(r) => Json(json!({ "ok": true, "index": r.index_path, "files": r.files })).into_response(),
         Err(e) => (
@@ -183,6 +202,115 @@ async fn kb_sync(State(st): State<AppState>) -> Response {
         )
             .into_response(),
     }
+}
+
+// ---------- 心跳自动同步（自组织自动发现侧） ----------
+
+/// 心跳循环：每秒 tick；config 文件变化（开关/周期改动）即时重载生效；
+/// 开启时按周期累积，到点指纹比对，变化才重建 INDEX+图谱，重建后顺带跑审计摘要
+async fn heartbeat_loop(state: AppState) {
+    let mut last_key: Option<String> = None;
+    loop {
+        let cfg = crate::config::load();
+        let mut interval = cfg.heartbeat.interval_secs.max(5).min(3600);
+        let mut acc: u64 = 0;
+        let mut cfg_mtime = config_mtime();
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            acc += 1;
+            // config 文件变化 → 立即重读（开关/周期 ≤1s 生效）
+            if config_mtime() != cfg_mtime {
+                break;
+            }
+            if cfg.heartbeat.enabled && acc >= interval {
+                break;
+            }
+            if !cfg.heartbeat.enabled {
+                // 关闭时也要响应 config 变化（上面的 mtime 检查已覆盖），空闲等待即可
+                continue;
+            }
+        }
+        let cfg2 = crate::config::load();
+        interval = cfg2.heartbeat.interval_secs.max(5).min(3600);
+        if !cfg2.heartbeat.enabled {
+            last_key = None; // 关闭时重置，重开后首轮同步
+            continue;
+        }
+        // 开启：指纹比对，变化才重建
+        let fp = crate::heartbeat::fingerprint(&state.kb_root);
+        let key = crate::heartbeat::fingerprint_key(&fp);
+        let changed = last_key.as_deref() != Some(key.as_str());
+        if last_key.is_none() || changed {
+            // 锁内重建（同步 std::fs，锁内无 await 点）
+            let _guard = state.sync_lock.lock().await;
+            let _ = crate::kb::sync_index(&state.kb_root);
+            let _ = crate::graph::sync_graph(&state.kb_root);
+            let audit = crate::graph::audit(&state.kb_root).ok();
+            let brief = audit.map(|a| crate::heartbeat::AuditBrief {
+                orphans: a.orphans.len(),
+                dangling: a.dangling.len(),
+                duplicates: a.duplicates.len(),
+                mentions: a.mentions.len(),
+            });
+            if let Ok(mut st) = state.hb_status.lock() {
+                st.enabled = true;
+                st.interval_secs = interval;
+                st.last_sync = Some(chrono::Local::now().format("%H:%M:%S").to_string());
+                st.files = fp.len();
+                st.changed = changed;
+                st.audit = brief;
+            }
+            last_key = Some(key);
+        }
+    }
+}
+
+/// config.json 的修改时间（秒），用于检测配置变化即时生效
+fn config_mtime() -> Option<i64> {
+    std::fs::metadata(crate::config::config_path())
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+}
+
+async fn heartbeat_get(State(st): State<AppState>) -> Response {
+    let cfg = crate::config::load();
+    let status = st.hb_status.lock().map(|g| g.clone()).unwrap_or_default();
+    Json(json!({
+        "enabled": cfg.heartbeat.enabled,
+        "interval_secs": cfg.heartbeat.interval_secs,
+        "last_sync": status.last_sync,
+        "files": status.files,
+        "changed": status.changed,
+        "audit": status.audit,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct HeartbeatSetBody {
+    enabled: Option<bool>,
+    interval_secs: Option<u64>,
+}
+
+async fn heartbeat_set(State(st): State<AppState>, Json(b): Json<HeartbeatSetBody>) -> Response {
+    let mut cfg = crate::config::load();
+    if let Some(e) = b.enabled {
+        cfg.heartbeat.enabled = e;
+    }
+    if let Some(i) = b.interval_secs {
+        cfg.heartbeat.interval_secs = i.max(5).min(3600);
+    }
+    if let Err(e) = crate::config::save(&cfg) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+    }
+    if let Ok(mut s) = st.hb_status.lock() {
+        s.enabled = cfg.heartbeat.enabled;
+        s.interval_secs = cfg.heartbeat.interval_secs;
+    }
+    Json(json!({ "ok": true, "enabled": cfg.heartbeat.enabled, "interval_secs": cfg.heartbeat.interval_secs }))
+        .into_response()
 }
 
 // ---------- 记忆自组织（Phase 3-A：审计 / 补链接） ----------
@@ -206,6 +334,7 @@ struct LinkBody {
 /// 补链接：在 src 文档末尾追加 `- 关联：[[dst]]`，重建 INDEX + 图谱。
 /// 由用户主动调用 = 已人工确认（不进待审）。
 async fn link_add(State(st): State<AppState>, Json(body): Json<LinkBody>) -> Response {
+    let _guard = st.sync_lock.lock().await; // 与心跳共用互斥
     if let Err(e) = ensure_graph(&st.kb_root) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
     }
@@ -316,6 +445,7 @@ struct PendingBody {
 }
 
 async fn kb_pending_approve(State(st): State<AppState>, Json(body): Json<PendingBody>) -> Response {
+    let _guard = st.sync_lock.lock().await; // 与心跳共用互斥
     let paths: Vec<String> = if body.path == "all" {
         crate::kb::list_pending(&st.kb_root).into_iter().map(|p| p.path).collect()
     } else {
@@ -358,6 +488,7 @@ fn ensure_graph(root: &std::path::Path) -> Result<(), String> {
 }
 
 async fn graph_sync(State(st): State<AppState>) -> Response {
+    let _guard = st.sync_lock.lock().await; // 与心跳共用互斥
     match crate::graph::sync_graph(&st.kb_root) {
         Ok(r) => Json(json!({ "ok": true, "graph": r })).into_response(),
         Err(e) => (
@@ -491,6 +622,12 @@ async fn config_set(Json(body): Json<serde_json::Value>) -> Response {
                 l.api_key = cfg.llm.api_key.clone();
             }
             cfg.llm = l;
+        }
+    }
+    if let Some(hb) = body.get("heartbeat") {
+        if let Ok(h) = serde_json::from_value::<crate::config::HeartbeatConfig>(hb.clone()) {
+            cfg.heartbeat.enabled = h.enabled;
+            cfg.heartbeat.interval_secs = h.interval_secs.clamp(5, 3600);
         }
     }
     match crate::config::save(&cfg) {

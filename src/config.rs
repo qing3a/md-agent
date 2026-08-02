@@ -25,9 +25,28 @@ impl Default for LlmConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct HeartbeatConfig {
+    /// 心跳自动同步开关（默认关，保持手动行为）
+    pub enabled: bool,
+    /// 检查周期（秒）
+    pub interval_secs: u64,
+}
+
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub kb_root: String,
     pub llm: LlmConfig,
+    pub heartbeat: HeartbeatConfig,
 }
 
 impl Default for Config {
@@ -35,6 +54,7 @@ impl Default for Config {
         Self {
             kb_root: crate::kb::kb_root().to_string_lossy().into_owned(),
             llm: LlmConfig::default(),
+            heartbeat: HeartbeatConfig::default(),
         }
     }
 }

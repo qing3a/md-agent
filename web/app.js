@@ -140,17 +140,29 @@
       fetch('/api/kb/pending').then((r) => r.json()).catch(() => null),
       fetch('/api/tasks').then((r) => r.json()).catch(() => null),
       fetch('/api/graph/stats').then((r) => r.json()).catch(() => null),
-    ]).then(([h, c, p, t, g]) => {
+      fetch('/api/heartbeat').then((r) => r.json()).catch(() => null),
+    ]).then(([h, c, p, t, g, hb]) => {
       const ok = !!(h && h.status === 'ok');
       const model = (c && c.llm && c.llm.model) || '未配置 LLM';
       const kb = (c && c.kb_root) || '-';
       const pend = (p && Array.isArray(p.pending)) ? p.pending.length : '-';
       const todo = (t && t.stats) ? (t.stats.todo || 0) + (t.stats.doing || 0) : '-';
       const gs = (g && g.docs) ? (g.docs || 0) + ' 文档 / ' + (g.links || 0) + ' 链接' : '-';
+      const hbTxt = hb ? (hb.enabled ? '心跳开' : '心跳关') : '';
+      let auditTxt = '';
+      if (hb && hb.audit && (hb.audit.orphans || hb.audit.dangling || hb.audit.duplicates || hb.audit.mentions)) {
+        auditTxt = ' ⚠审计' +
+          (hb.audit.orphans ? '孤立' + hb.audit.orphans : '') +
+          (hb.audit.dangling ? '悬空' + hb.audit.dangling : '') +
+          (hb.audit.duplicates ? '重复' + hb.audit.duplicates : '');
+      }
       statusLine = truncateW(
         '\x1b[' + (ok ? '32' : '31') + 'm●\x1b[0m ' + (ok ? '服务运行中' : '服务异常') +
         '\x1b[90m · 模型 ' + model + ' · KB ' + kb + ' · 待审 ' + pend +
-        ' · 任务 ' + todo + ' · 图谱 ' + gs + '\x1b[0m',
+        ' · 任务 ' + todo + ' · 图谱 ' + gs +
+        (hbTxt ? ' · ' + hbTxt : '') +
+        (auditTxt ? '\x1b[33m' + auditTxt + '\x1b[0m' : '') +
+        '\x1b[0m',
         trueCols() - 1);
       drawStatusRow();
     }).catch(() => {});
@@ -358,6 +370,7 @@
       case '/link': await linkCmd(rest[0], rest[1]); break;
       case '/suggest': await suggest(rest.join(' ')); break;
       case '/health': await health(); break;
+      case '/heartbeat': await heartbeatCmd(rest); break;
       case 'clear': term.clear(); break;
       default:
         if (cmd.startsWith('/')) {
@@ -398,6 +411,7 @@
     term.writeln('    /task board           打开 HTML 看板（/view board）');
     term.writeln('  /clear                 清空多轮对话记忆');
     term.writeln('  /config                查看本地配置（掩码）  配置页: /config.html');
+    term.writeln('  /heartbeat [on|off|status]  心跳自动同步：检测知识库变化自动重建索引/图谱 + 审计提示');
     term.writeln('  /health                服务健康检查');
     term.writeln('  clear                  清屏');
   }
@@ -1475,5 +1489,35 @@
   async function health() {
     const r = await api('/api/health');
     term.writeln(JSON.stringify(r));
+  }
+
+  // /heartbeat [on|off|interval <秒>|status] —— 心跳自动同步（自组织自动发现）
+  async function heartbeatCmd(parts) {
+    const act = parts[0] || 'status';
+    try {
+      if (act === 'on' || act === 'off') {
+        const r = await api('/api/heartbeat', { method: 'POST', body: JSON.stringify({ enabled: act === 'on' }) });
+        term.writeln('\x1b[32m✓ 心跳自动同步: ' + (r.enabled ? '开' : '关') + '\x1b[0m（' + r.interval_secs + 's 周期，变化自动重建 INDEX+图谱+审计）');
+      } else if (act === 'interval') {
+        const v = parseInt(parts[1], 10);
+        if (!v || v < 5) { term.writeln('\x1b[33m用法: /heartbeat interval <秒≥5>\x1b[0m'); return; }
+        const r = await api('/api/heartbeat', { method: 'POST', body: JSON.stringify({ interval_secs: v }) });
+        term.writeln('\x1b[32m✓ 检查周期: ' + r.interval_secs + 's\x1b[0m');
+      } else {
+        const r = await api('/api/heartbeat');
+        term.writeln('心跳自动同步: ' + (r.enabled ? '\x1b[32m开\x1b[0m' : '\x1b[90m关\x1b[0m') +
+          ' · 周期 ' + r.interval_secs + 's' +
+          (r.last_sync ? ' · 上次同步 ' + r.last_sync + ' · ' + r.files + ' 篇' : ''));
+        if (r.audit && (r.audit.orphans || r.audit.dangling || r.audit.duplicates || r.audit.mentions)) {
+          term.writeln('\x1b[33m⚠ 最近审计发现: 孤立 ' + r.audit.orphans + ' · 悬空 ' + r.audit.dangling +
+            ' · 重复 ' + r.audit.duplicates + ' · 提及未链接 ' + r.audit.mentions + '（/audit 看详情，/link-all 一键修复）\x1b[0m');
+        } else if (r.audit) {
+          term.writeln('\x1b[32m✓ 最近审计无发现\x1b[0m');
+        }
+      }
+    } catch (e) {
+      term.writeln('\x1b[31m失败: ' + e + '\x1b[0m');
+    }
+    refreshStatus();
   }
 })();

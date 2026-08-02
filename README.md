@@ -23,6 +23,7 @@
 | **知识图谱** | SQLite `documents`/`links` 两表：`[[双向链接]]` 解析、反向链接、孤立文档检测、标签/项目维度统计；首次调用自动建库，`/rescan` 或托盘"同步索引"重建 |
 | **伪命令行 Markdown 渲染** | 终端内 ANSI 富渲染（零依赖）：标题加粗、行内代码/加粗/链接/`[[双链]]` 着色、列表/引用/代码围栏；**表格按 markdown 行显示**（保留 `|` 结构，复制不失真）；frontmatter 变暗；流式回答按完整行渲染 |
 | **/view 面板渲染层** | iframe 沙箱 + postMessage 桥（视图经宿主调 `/api/*`，仅允许 api 前缀）：`/view graph` 内置知识图谱可视化（环形布局 SVG、按项目配色、孤立文档高亮）、`/view <html>` 渲染 kb 内本地 HTML、`/view off` 或 Esc 关闭 |
+| **心跳自动同步（自组织自动发现）** | 默认关闭；开启后每 60s（可调）指纹比对知识库（路径+mtime+大小，排除 pending/），变化自动重建 INDEX+图谱并跑本地审计，状态栏提示「心跳开 + ⚠审计发现」；托盘勾选 / `/heartbeat` / 配置页三入口；`sync_lock` 与手动写端点防并发 |
 | **终端壳体验** | 启动欢迎横幅 + 状态汇总（版本/KB/图谱/模型/待审/进行中任务）；输入框状态机（输入中：上下边框+状态行；回车提交：边框移除、整行背景色消息块；回答后恢复新输入框）；终端内状态栏（● 服务状态/模型/KB/待审/任务/图谱，画在输入框下方，8s 轮询原地重绘）；列宽 DOM 实测防 wrap |
 | **记忆自组织（Phase 3-A 基础）** | `/audit` 本地规则健康审计（孤立/无出链/重复标题/悬空链接/提及未链接建议，零 LLM 快速确定）；`/link` 人工补链接（文件名双链、去重、自动重建图谱）；`/link-all` 一键应用建议；`/suggest` 补全缺失主题（带主题名）或**无参盲区模式**（先审计后让 LLM 分析知识盲区生成新文档，进待审）；`/diff`/`/conflicts` 行级对比与冲突检查 |
 | **待审行级预览** | `/preview <待审路径>` 只读展示批准后将写入的内容（记忆条目按当日小节合并规则计算，不落盘） |
@@ -35,7 +36,7 @@
 | **待审机制** | LLM 生成的新笔记/记忆条目先进 `pending/`（不直接污染知识库）：`/pending` 查看、`/approve` 确认落地（自动重建 INDEX+图谱）、`/reject` 丢弃；待审文件不进检索与图谱 |
 | `/digest` | 检索结果交给 LLM 整理成结构化笔记写入 `notes/` |
 | 可视化配置页 | `/config.html`：endpoint / model / api_key（掩码显示）+ 测试连接 |
-| 托盘常驻 | tray-icon + winit，右键菜单：打开终端 / 同步索引 / 退出；release 单 exe 隐藏控制台 |
+| 托盘常驻 | tray-icon + winit，右键菜单：打开终端 / **心跳同步（可勾选开关）** / 立即同步 / 退出；release 单 exe 隐藏控制台 |
 
 ## 架构（四层）
 
@@ -145,6 +146,8 @@ cp config.json dist/config.json   # 可选：携带已有 LLM 配置
 | GET | `/api/graph/orphans` | 孤立文档（无入链也无出链） |
 | GET | `/api/graph/tags` | 标签统计 |
 | GET | `/api/graph/projects` | 项目维度统计 |
+| GET | `/api/heartbeat` | 心跳状态（开关/周期/上次同步/审计摘要） |
+| POST | `/api/heartbeat` | 改心跳配置（body: `{enabled?, interval_secs?}`，落盘） |
 | GET | `/api/audit` | 知识库健康审计（孤立/无出链/重复标题/悬空/提及未链接建议） |
 | POST | `/api/link` | 补链接（body: `{src, dst}`；文件名双链 + 去重 + 重建图谱） |
 | GET | `/api/fetch?url=` | 静态网页抓取（HTTP + HTML 文本提取，零浏览器依赖） |

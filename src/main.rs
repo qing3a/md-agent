@@ -5,6 +5,7 @@
 
 mod config;
 mod fetch;
+mod heartbeat;
 mod graph;
 mod kb;
 mod llm;
@@ -14,7 +15,7 @@ mod page;
 mod task;
 
 use std::path::{Path, PathBuf};
-use tray_icon::menu::{Menu, MenuId, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
 use winit::application::ApplicationHandler;
 use winit::event::StartCause;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -141,6 +142,8 @@ struct App {
     url: String,
     kb_root: PathBuf,
     open_id: MenuId,
+    hb_id: MenuId,
+    hb_item: Option<CheckMenuItem>,
     sync_id: MenuId,
     quit_id: MenuId,
     menu: Option<Menu>,
@@ -173,6 +176,16 @@ impl ApplicationHandler<UserEvent> for App {
                 std::process::exit(0);
             } else if ev.id == self.open_id {
                 open_browser(&self.url);
+            } else if ev.id == self.hb_id {
+                // 勾选翻转：写 config，刷新勾选态（≤1 个心跳周期生效）
+                let checked = !crate::config::load().heartbeat.enabled;
+                let mut cfg = crate::config::load();
+                cfg.heartbeat.enabled = checked;
+                let _ = crate::config::save(&cfg);
+                if let Some(it) = &self.hb_item {
+                    it.set_checked(checked);
+                }
+                eprintln!("心跳自动同步: {}", if checked { "开" } else { "关" });
             } else if ev.id == self.sync_id {
                 match kb::sync_index(&self.kb_root) {
                     Ok(r) => eprintln!("INDEX 已重建: {} 篇", r.files),
@@ -208,13 +221,23 @@ fn run_tray(url: &str, kb_root: &Path) {
 
     let menu = Menu::new();
     let open_item = MenuItem::new("打开终端", true, None);
-    let sync_item = MenuItem::new("同步索引", true, None);
+    // 心跳自动同步（可勾选开关，默认关闭；立即同步保留手动重建）
+    let hb_item = CheckMenuItem::with_id(
+        "hb-sync",
+        "心跳同步",
+        crate::config::load().heartbeat.enabled,
+        true,
+        None,
+    );
+    let sync_item = MenuItem::new("立即同步", true, None);
     let quit_item = MenuItem::new("退出", true, None);
     let _ = menu.append(&open_item);
+    let _ = menu.append(&hb_item);
     let _ = menu.append(&sync_item);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&quit_item);
     let open_id = open_item.id().clone();
+    let hb_id = hb_item.id().clone();
     let sync_id = sync_item.id().clone();
     let quit_id = quit_item.id().clone();
 
@@ -222,6 +245,8 @@ fn run_tray(url: &str, kb_root: &Path) {
         url: url.to_string(),
         kb_root: kb_root.to_path_buf(),
         open_id,
+        hb_id,
+        hb_item: Some(hb_item),
         sync_id,
         quit_id,
         menu: Some(menu),

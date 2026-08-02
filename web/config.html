@@ -65,6 +65,13 @@
   <input id="kbRoot" placeholder="kb">
   <div class="mask-hint">KB 根目录改动需重启服务生效</div>
 
+  <label for="hbEnabled" style="display:flex;align-items:center;gap:8px;cursor:pointer">
+    <input id="hbEnabled" type="checkbox" style="width:auto;margin:0"> 心跳自动同步
+  </label>
+  <div class="mask-hint">检测知识库变化（每 60s 指纹比对），自动重建 INDEX + 图谱并审计提示；托盘菜单「心跳同步」可随时开关</div>
+  <label for="hbInterval" style="margin-top:8px">心跳检查周期（秒，≥5）</label>
+  <input id="hbInterval" type="number" min="5" step="5" value="60">
+
   <div class="row">
     <button id="saveBtn">保存</button>
     <button id="testBtn">测试连接</button>
@@ -92,6 +99,8 @@
       $('keyHint').textContent = masked ? '已保存（掩码）: ' + masked + '　·　输入新值可覆盖' : '未设置';
       $('apiKey').value = '';
       $('apiKey').placeholder = masked ? '当前: ' + masked : 'sk-...';
+      $('hbEnabled').checked = !!(r.heartbeat && r.heartbeat.enabled);
+      $('hbInterval').value = (r.heartbeat && r.heartbeat.interval_secs) || 60;
       setStatus('已加载当前配置');
     } catch (e) {
       setStatus('加载配置失败: ' + e.message, 'err');
@@ -106,6 +115,10 @@
         model: $('model').value.trim(),
         // 留空传掩码哨兵 → 后端保留旧 key
         api_key: $('apiKey').value.trim() || '****',
+      },
+      heartbeat: {
+        enabled: $('hbEnabled').checked,
+        interval_secs: parseInt($('hbInterval').value, 10) || 60,
       },
     };
     try {
