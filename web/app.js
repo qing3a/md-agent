@@ -37,50 +37,16 @@
   }
 
   // ---- 输入行边框：提示前一条上横线、回车后一条下横线，把输入行夹住 ----
-  // ---- 输入区（参考 oh-my-pi collab-web 形态）：内容区与输入区之间一条全宽分隔线，
-  //      输入框为宽度受限的圆角矩形（居中，右缘按 CJK 列宽对齐），状态栏（DOM）在输入框下方 ----
-  function dispW(s) {
-    let w = 0;
-    for (const ch of String(s)) {
-      w += /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/.test(ch) ? 2 : 1;
-    }
-    return w;
-  }
-  function visOnly(s) { return s.replace(/\x1b\[[0-9;]*m/g, ''); }
-  // 框宽：最多 90 列（受限、居中，窄终端退化为全宽）
-  function boxW() { return Math.max(20, Math.min(term.cols - 2, 90)); }
-  function padL() { return Math.max(0, Math.floor((term.cols - boxW()) / 2)); }
-  // 输入行内容（左竖线 + PROMPT + line + 对齐填充 + 右竖线）；超宽按字符截断
-  function inputRow() {
-    const B = boxW();
-    const innerW = B - 2 - 2; // 竖线 ×2 + 内侧空格 ×2
-    let inner = PROMPT + line;
-    let pad = innerW - dispW(visOnly(inner));
-    if (pad < 1) {
-      const chars = Array.from(line);
-      while (pad < 1 && chars.length) {
-        chars.pop();
-        const cand = PROMPT + chars.join('') + '…';
-        const p = innerW - dispW(visOnly(cand));
-        if (p >= 1) { inner = cand; pad = p; }
-        else { pad = 1; }
-      }
-      line = chars.join('');
-      if (pad < 1) pad = 1;
-    }
-    return ' '.repeat(padL()) + '\x1b[90m│\x1b[0m ' + inner + ' '.repeat(pad) + ' \x1b[90m│\x1b[0m';
-  }
+  // ---- 输入行边框：上下两条全宽横线（无左右竖线）；输入为追加式写入（光标自然跟随，IME 正常）；
+  //      状态栏（DOM）在输入行下一行——showPrompt 垫空行保证输入行恒在可视区底部 ----
+  function hline() { return '\x1b[90m' + '─'.repeat(term.cols) + '\x1b[0m'; }
   function showPrompt() {
-    const B = boxW();
-    const L = ' '.repeat(padL());
-    term.write('\x1b[90m' + '─'.repeat(term.cols) + '\x1b[0m\r\n'); // 内容/输入区分隔线
-    term.write(L + '\x1b[90m╭' + '─'.repeat(B) + '╮\x1b[0m\r\n');   // 输入框上边框
-    term.write(inputRow());
+    // 内容不满一屏时补空行，让输入行落在可视区最后一行（状态栏紧贴其下）
+    const n = term.rows - 1 - term.buffer.active.cursorY;
+    if (n > 0) term.write('\n'.repeat(n));
+    term.write(hline() + '\r\n' + PROMPT);
   }
-  function closeBox() {
-    const B = boxW();
-    term.write('\r\n' + ' '.repeat(padL()) + '\x1b[90m╰' + '─'.repeat(B) + '╯\x1b[0m\r\n');
-  }
+  function closeBox() { term.write('\r\n' + hline() + '\r\n'); }
 
   // ---- 启动欢迎 banner + 状态信息（异步汇总；bannerDone 保证状态行先于输入框打印）----
   let bannerDone = Promise.resolve();
@@ -179,16 +145,16 @@
       }
     } else if (data === '\x7f' || data === '\x08') {
       // 退格（兼容 \x7f DEL 与 \x08 BS）。整行清绘：Array.from 按字符（代理对安全）切片不劈 emoji，
-      // 长行回绕时 \b 无法跨行，清行重画一并解决
+      // 重绘后光标落在内容末尾（无多余字符，不跑偏）
       if (line.length) {
         const chars = Array.from(line);
         chars.pop();
         line = chars.join('');
-        term.write('\x1b[2K\r' + inputRow());
+        term.write('\x1b[2K\r' + PROMPT + line);
       }
     } else if (code >= 32) {
       line += data;
-      term.write('\x1b[2K\r' + inputRow()); // 输入即整行重绘（右竖线跟随内容）
+      term.write(data); // 追加式：光标自然跟随内容
     }
   });
 
