@@ -1020,7 +1020,8 @@
   const viewFrame = document.getElementById('view-frame');
   const viewTitle = document.getElementById('view-title');
 
-  // 注入视图的桥脚本：window.hostApi(path, opts) → postMessage 给宿主 → 宿主调 /api/* 后回传
+  // 注入视图的桥脚本：window.hostApi(path, opts) → postMessage 给宿主 → 宿主调 /api/* 后回传；
+  // 焦点在 sandbox iframe 内时 Esc 不冒泡出 frame，iframe 内监听并转发给宿主
   const BRIDGE = '<script>' +
     'window.hostApi=function(path,opts){return new Promise(function(res,rej){' +
     'var id=Math.random().toString(36).slice(2);' +
@@ -1028,6 +1029,7 @@
     'window.addEventListener("message",h);' +
     'window.parent.postMessage({type:"api",id:id,method:(opts&&opts.method)||"GET",path:path,body:opts&&opts.body},"*");' +
     '});};' +
+    'window.addEventListener("keydown",function(e){if(e.key==="Escape"){window.parent.postMessage({type:"escape"},"*");}});' +
     '<\/script>';
 
   function closeView() {
@@ -1039,6 +1041,8 @@
     viewTitle.textContent = title;
     viewFrame.srcdoc = BRIDGE + html;
     viewOverlay.classList.remove('hidden');
+    // 焦点移出 xterm textarea：聚焦时 xterm 拦截 Esc（stopPropagation），父页监听收不到
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   }
 
   document.getElementById('view-close').addEventListener('click', closeView);
@@ -1046,11 +1050,13 @@
     if (ev.key === 'Escape' && !viewOverlay.classList.contains('hidden')) closeView();
   });
 
-  // postMessage 桥：iframe 视图 → 宿主 API（只允许 /api/ 前缀）
+  // postMessage 桥：iframe 视图 → 宿主 API（只允许 /api/ 前缀）；escape 事件关闭视图
   window.addEventListener('message', async (ev) => {
     if (ev.source !== viewFrame.contentWindow) return;
     const msg = ev.data;
-    if (!msg || msg.type !== 'api') return;
+    if (!msg) return;
+    if (msg.type === 'escape') { closeView(); return; }
+    if (msg.type !== 'api') return;
     if (!msg.path || !msg.path.startsWith('/api/')) {
       viewFrame.contentWindow.postMessage({ id: msg.id, ok: false, error: '仅允许 /api/ 接口' }, '*');
       return;
