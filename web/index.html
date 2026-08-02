@@ -34,6 +34,24 @@
   /* 输入框上下两条全宽横线（定稿视觉：上边框 + 输入行 + 下边框） */
   /* 命令补全面板：悬浮在输入框上方（absolute 定位，不占布局） */
 
+  /* ---- 速览侧边栏（批次三：Ctrl+K | /side | 快捷按钮唤出的左侧抽屉，非常驻）---- */
+  #side-drawer {
+    position: fixed; left: 10px; top: 10px; bottom: 10px; width: 250px;
+    background: #181825; border: 1px solid #313244; border-radius: 8px;
+    z-index: 50; display: flex; flex-direction: column; overflow: hidden;
+    box-shadow: 0 6px 24px rgba(0,0,0,.45);
+  }
+  #side-drawer.hidden { display: none; }
+  #side-drawer header { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid #313244; }
+  #side-drawer header span { color: #f5e0dc; font-weight: 600; font-size: 13px; }
+  #side-drawer header button { background: #313244; color: #cdd6f4; border: none; border-radius: 5px; padding: 2px 8px; font-size: 12px; cursor: pointer; }
+  #side-body { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+  .side-sec { background: #1e1e30; border: 1px solid #313244; border-radius: 6px; padding: 8px 10px; cursor: pointer; }
+  .side-sec:hover { background: #232338; }
+  .side-title { color: #89b4fa; font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+  .side-body { color: #cdd6f4; font-size: 12px; line-height: 1.6; }
+  .side-hint { color: #7f849c; font-size: 11px; margin-top: 3px; }
+
   /* ---- DOM 状态条（原流内状态行迁出；8s 轮询刷文本，不随终端滚动）---- */
   #status-dot.bad { background: #f38ba8; }
   /* /view 面板渲染层：iframe 沙箱浮层（图谱可视化等 HTML 视图） */
@@ -80,6 +98,7 @@
       <button data-cmd="/rescan" title="重建知识图谱（SQLite）">图谱</button>
       <button data-cmd="/pending" title="查看待审（LLM 写回先进这里）">待审</button>
       <button data-cmd="/digest" title="检索知识库并整理成新笔记（进待审）">整理</button>
+      <button data-cmd="/side" title="速览侧边栏（任务/待审/图谱/审计）">速览</button>
       <button data-cmd="/clear" title="清空多轮对话记忆">清记忆</button>
       <button data-cmd="/help" title="命令列表">帮助</button>
     </div>
@@ -93,6 +112,15 @@
     <button id="view-close" title="关闭当前视图 (Esc)">× 关闭</button>
   </header>
   <div id="view-panes"></div>
+</div>
+
+<!-- 速览侧边栏（批次三：Ctrl+K / /side / 快捷按钮唤出的左侧抽屉，非常驻） -->
+<div id="side-drawer" class="hidden">
+  <header>
+    <span>速览</span>
+    <button id="side-refresh" title="刷新">↻</button>
+  </header>
+  <div id="side-body"></div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>

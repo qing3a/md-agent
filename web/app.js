@@ -185,12 +185,25 @@
       term.writeln('\x1b[90m(已发送中断)\x1b[0m');
       return false;
     }
-    // Esc = 停止（回流内后无 DOM 发送/停止按钮；attachCustomKeyEventHandler 在 xterm 处理前回调，能收到）
-    if (k === 'Escape' && currentAbort) {
+    // Ctrl+K = 速览侧边栏（若被浏览器全局快捷键占用，可用 /side 或快捷按钮）
+    if (k === 'k' && ev.ctrlKey) {
       ev.preventDefault();
-      currentAbort.abort();
-      term.writeln('\x1b[90m(已停止)\x1b[0m');
+      toggleSide();
       return false;
+    }
+    // Esc = 关闭速览抽屉（优先）或 停止回答（回流内后无 DOM 发送/停止按钮）
+    if (k === 'Escape') {
+      if (!sideDrawer.classList.contains('hidden')) {
+        ev.preventDefault();
+        closeSide();
+        return false;
+      }
+      if (currentAbort) {
+        ev.preventDefault();
+        currentAbort.abort();
+        term.writeln('\x1b[90m(已停止)\x1b[0m');
+        return false;
+      }
     }
     return true;
   });
@@ -530,6 +543,7 @@
       case '/approve': await pendingAct('approve', rest[0]); break;
       case '/reject': await pendingAct('reject', rest[0]); break;
       case '/view': await viewCmd(rest[0]); break;
+      case '/side': toggleSide(); break;
       case '/audit': await auditCmd(); break;
       case '/conflicts': await conflicts(); break;
       case '/diff': await diffCmd(rest[0], rest[1]); break;
@@ -564,6 +578,7 @@
     term.writeln('  /preview <待审路径>     行级预览：确认批准后将写入的内容');
     term.writeln('  /approve <路径|all>    批准待审 → 写入知识库   /reject 丢弃');
     term.writeln('  /view graph|<html>|off  面板渲染层：内置图谱可视化 / 本地 HTML 视图（Esc 关闭）');
+    term.writeln('  /side                  速览侧边栏（任务/待审/图谱/审计，Ctrl+K 或快捷按钮同样唤出）');
     term.writeln('  /audit                知识库健康审计（盲区/冲突/补链接建议）');
     term.writeln('  /conflicts             冲突检查（重复标题/悬空链接）   /diff <A> <B> 行级对比');
     term.writeln('  /link <源> <目标>      补链接（在源文档追加 [[目标]]，人工确认）');
@@ -1545,6 +1560,77 @@
     const r = await api('/api/file?path=' + encodeURIComponent(arg));
     openView(r.path, r.content);
   }
+
+  // ---------- 速览侧边栏（批次三：任务/待审/图谱/审计速览；Ctrl+K | /side | 快捷按钮唤出，非常驻抽屉） ----------
+
+  const sideDrawer = document.getElementById('side-drawer');
+  const sideBody = document.getElementById('side-body');
+
+  function toggleSide() {
+    if (sideDrawer.classList.contains('hidden')) { sideDrawer.classList.remove('hidden'); loadSide(); }
+    else sideDrawer.classList.add('hidden');
+  }
+  function closeSide() { sideDrawer.classList.add('hidden'); }
+
+  function sideSec(title, cmd, body, hint) {
+    return '<div class="side-sec" data-cmd="' + cmd + '">' +
+      '<div class="side-title">' + title + '</div>' +
+      '<div class="side-body">' + body + '</div>' +
+      (hint ? '<div class="side-hint">' + hint + '</div>' : '') + '</div>';
+  }
+
+  async function loadSide() {
+    sideBody.innerHTML = '<div class="side-sec"><div class="side-body" style="color:#7f849c">加载中…</div></div>';
+    const [t, p, g, o, a] = await Promise.all([
+      api('/api/tasks').catch(() => null),
+      api('/api/kb/pending').catch(() => null),
+      api('/api/graph/stats').catch(() => null),
+      api('/api/graph/orphans').catch(() => null),
+      api('/api/audit').catch(() => null),
+    ]);
+    const secs = [];
+    if (t && t.stats) {
+      const s = t.stats;
+      secs.push(sideSec('任务', '/view board',
+        (s.todo || 0) + ' 待办 · ' + (s.doing || 0) + ' 进行中 · ' + (s.done || 0) + ' 完成' + (s.dropped ? ' · ' + s.dropped + ' 放弃' : ''),
+        '点击打开看板'));
+    }
+    if (p) {
+      const n = (p.pending || []).length;
+      secs.push(sideSec('待审', '/view pending',
+        n + ' 篇待审' + (n ? '（' + (p.pending[0].kind === 'memory' ? '记忆' : '笔记') + (n > 1 ? ' 等' : '') + '）' : ''),
+        n ? '点击图形审核' : ''));
+    }
+    if (g) {
+      secs.push(sideSec('图谱', '/view graph',
+        (g.docs || 0) + ' 文档 · ' + (g.links || 0) + ' 链接' + (g.dangling ? ' · 悬空 ' + g.dangling : '') +
+        (o && o.orphans ? ' · 孤立 ' + o.orphans.length : ''),
+        '点击结构导航'));
+    }
+    if (a) {
+      const w = (a.orphans ? a.orphans.length : 0) + (a.dangling ? a.dangling.length : 0) + (a.duplicates ? a.duplicates.length : 0) + (a.mentions ? a.mentions.length : 0);
+      secs.push(sideSec('审计', '/audit',
+        w ? '⚠ 孤立 ' + (a.orphans || []).length + ' / 悬空 ' + (a.dangling || []).length + ' / 重复 ' + (a.duplicates || []).length + ' / 建议 ' + (a.mentions || []).length
+          : '✓ 知识库健康',
+        w ? '点击运行审计' : ''));
+    }
+    sideBody.innerHTML = secs.join('');
+  }
+
+  // 点击卡片 → 关抽屉 + 执行对应命令（统一提交入口）
+  sideBody.addEventListener('click', (e) => {
+    const sec = e.target.closest('.side-sec');
+    if (!sec) return;
+    closeSide();
+    submitCmd(sec.dataset.cmd);
+  });
+  document.getElementById('side-refresh').addEventListener('click', (e) => { e.stopPropagation(); loadSide(); });
+  // 点抽屉外关闭（快捷按钮区域除外，避免与按钮唤出竞态）
+  document.addEventListener('click', (e) => {
+    if (sideDrawer.classList.contains('hidden')) return;
+    if (sideDrawer.contains(e.target) || (e.target.closest && e.target.closest('#quick-btns'))) return;
+    closeSide();
+  });
 
   // ---------- 记忆自组织（Phase 3-A：审计 / 补链接 / 补文档） ----------
 
