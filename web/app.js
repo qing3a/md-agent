@@ -37,8 +37,8 @@
   }
 
   // ---- 输入行边框：提示前一条上横线、回车后一条下横线，把输入行夹住 ----
-  // ---- 输入行边框：圆角框包住输入行（上边框提示时画、下边框回车时画），
-  //      右缘按 CJK 列宽对齐（框是核心视觉，值得做一次精简宽度计算）；状态栏（DOM）紧贴框下方 ----
+  // ---- 输入区（参考 oh-my-pi collab-web 形态）：内容区与输入区之间一条全宽分隔线，
+  //      输入框为宽度受限的圆角矩形（居中，右缘按 CJK 列宽对齐），状态栏（DOM）在输入框下方 ----
   function dispW(s) {
     let w = 0;
     for (const ch of String(s)) {
@@ -47,36 +47,43 @@
     return w;
   }
   function visOnly(s) { return s.replace(/\x1b\[[0-9;]*m/g, ''); }
-  function boxW() { return Math.max(term.cols, 20); }
+  // 框宽：最多 90 列（受限、居中，窄终端退化为全宽）
+  function boxW() { return Math.max(20, Math.min(term.cols - 2, 90)); }
+  function padL() { return Math.max(0, Math.floor((term.cols - boxW()) / 2)); }
   // 输入行内容（左竖线 + PROMPT + line + 对齐填充 + 右竖线）；超宽按字符截断
   function inputRow() {
     const B = boxW();
+    const innerW = B - 2 - 2; // 竖线 ×2 + 内侧空格 ×2
     let inner = PROMPT + line;
-    let pad = B - 3 - dispW(visOnly(inner));
+    let pad = innerW - dispW(visOnly(inner));
     if (pad < 1) {
       const chars = Array.from(line);
       while (pad < 1 && chars.length) {
         chars.pop();
         const cand = PROMPT + chars.join('') + '…';
-        const p = B - 3 - dispW(visOnly(cand));
+        const p = innerW - dispW(visOnly(cand));
         if (p >= 1) { inner = cand; pad = p; }
         else { pad = 1; }
       }
       line = chars.join('');
       if (pad < 1) pad = 1;
     }
-    return '\x1b[90m│\x1b[0m ' + inner + ' '.repeat(pad) + '\x1b[90m│\x1b[0m';
+    return ' '.repeat(padL()) + '\x1b[90m│\x1b[0m ' + inner + ' '.repeat(pad) + ' \x1b[90m│\x1b[0m';
   }
   function showPrompt() {
     const B = boxW();
-    term.write('\x1b[90m╭' + '─'.repeat(B - 2) + '╮\x1b[0m\r\n' + inputRow());
+    const L = ' '.repeat(padL());
+    term.write('\x1b[90m' + '─'.repeat(term.cols) + '\x1b[0m\r\n'); // 内容/输入区分隔线
+    term.write(L + '\x1b[90m╭' + '─'.repeat(B) + '╮\x1b[0m\r\n');   // 输入框上边框
+    term.write(inputRow());
   }
   function closeBox() {
     const B = boxW();
-    term.write('\r\n' + '\x1b[90m╰' + '─'.repeat(B - 2) + '╯\x1b[0m\r\n');
+    term.write('\r\n' + ' '.repeat(padL()) + '\x1b[90m╰' + '─'.repeat(B) + '╯\x1b[0m\r\n');
   }
 
-  // ---- 启动欢迎 banner + 状态信息（异步汇总，失败不阻塞）----
+  // ---- 启动欢迎 banner + 状态信息（异步汇总；bannerDone 保证状态行先于输入框打印）----
+  let bannerDone = Promise.resolve();
   function printBanner() {
     term.writeln('\x1b[90m' + '─'.repeat(Math.min(term.cols, 64)) + '\x1b[0m');
     term.writeln('\x1b[1;36m  md-agent\x1b[0m  \x1b[90m本地双层 MD 知识库 Agent\x1b[0m');
@@ -84,7 +91,7 @@
     term.writeln('  直接输入问题 → 知识库问答（流式）·  /help 查看命令 ·  配置页 /config.html');
     term.writeln('\x1b[90m  状态加载中…\x1b[0m');
     // 状态汇总：健康 / KB / 模型 / 待审 / 任务 / 图谱
-    Promise.all([
+    bannerDone = Promise.all([
       fetch('/api/health').then((r) => r.json()).catch(() => null),
       fetch('/api/config').then((r) => r.json()).catch(() => null),
       fetch('/api/kb/pending').then((r) => r.json()).catch(() => null),
@@ -154,7 +161,7 @@
     } catch (e) {
       term.writeln('\x1b[33mL1 加载失败: ' + e.message + '\x1b[0m');
     }
-    if (!line) showPrompt();
+    if (!line) { await bannerDone; showPrompt(); }
   })();
 
   term.onData((data) => {
