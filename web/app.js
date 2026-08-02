@@ -103,7 +103,7 @@
   let busy = false;          // 命令/回答进行中（提交/按钮禁用，输入框仍可编辑）
   let cmdHistory = [];       // 命令行历史（会话内；区别于多轮对话 history）
   let histIdx = -1;
-  let currentAbort = null;   // 当前 LLM 流的 AbortController（Ctrl+C 中断回答）
+  let currentAbort = null;   // 当前 LLM 流的 AbortController（Ctrl+C / Esc 中断回答）
 
   // 终端实测列宽（消息块铺背景用；term.cols 是 fit 估算值，实测偏大 2 列）
   function trueCols() {
@@ -120,7 +120,6 @@
   // ---------- 输入与提交 ----------
 
   // 提交一条命令/问题：流内整行背景块 + 执行；回答期间（busy）忽略
-  // 提交一条命令/问题（快捷按钮/流内回车统一入口）：整行背景块 + 执行；回答期间（busy）忽略
   async function submitCmd(text) {
     const t = String(text || '').trim();
     if (!t || busy || confirmCb) return;
@@ -163,6 +162,13 @@
       ev.preventDefault();
       currentAbort.abort();
       term.writeln('\x1b[90m(已发送中断)\x1b[0m');
+      return false;
+    }
+    // Esc = 停止（回流内后无 DOM 发送/停止按钮；attachCustomKeyEventHandler 在 xterm 处理前回调，能收到）
+    if (k === 'Escape' && currentAbort) {
+      ev.preventDefault();
+      currentAbort.abort();
+      term.writeln('\x1b[90m(已停止)\x1b[0m');
       return false;
     }
     return true;
@@ -618,16 +624,21 @@
       { role: 'user', content: userMsg },
     ];
 
-    // 3. 经后端代理流式调用 LLM（Ctrl+C 可中断）
+    // 3. 经后端代理流式调用 LLM（Ctrl+C / Esc 可中断）
     term.writeln('\x1b[90m(回答中...)\x1b[0m');
     let full = '';
     let saveSeen = false;
+    // 推理折叠：reasoning_content 不展示全文，仅记时长；首个 content 到达即 reasoning 结束
+    let reasoning = '';
+    let reasoningStartAt = Date.now();
+    let firstContentAt = null;
+    let lastUsage = null; // 本次回答 token 用量（流式 include_usage 结束块 / 非流式 body.usage；缺失则跳过）
     currentAbort = new AbortController();
     try {
       const res = await fetch('/api/llm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages, stream: true }),
+        body: JSON.stringify({ messages, stream: true, stream_options: { include_usage: true } }),
         signal: currentAbort.signal,
       });
       if (!res.ok) {
@@ -638,18 +649,27 @@
       if (!ct.includes('text/event-stream')) {
         // 非流式兜底
         const body = await res.json();
-        full = (body.choices && body.choices[0] && body.choices[0].message && body.choices[0].message.content) || '';
+        const msg = body.choices && body.choices[0] && body.choices[0].message;
+        full = (msg && msg.content) || '';
+        reasoning = (msg && msg.reasoning_content) || '';
+        lastUsage = body.usage || null;
         term.writeln('\x1b[1;32m──── 回答 ────\x1b[0m');
         term.write(renderMdFile(full));
       } else {
-        term.writeln('\x1b[1;32m──── 回答 ────\x1b[0m');
         const reader = res.body.getReader();
         const dec = new TextDecoder();
         let buf = '';
+        let titlePrinted = false;   // ──── 回答 ──── 延迟到首个 content delta（reasoning 结束后）
+        let thoughtPrinted = false; // 🧠 思考中… 已打印（reasoning 开始时写一次，不跟随更新）
         // 流式 markdown：按完整行渲染（保留打字机效果，且行内样式正确）
         const md = createMdRenderer();
         let lineBuf = '';
         let held = []; // 含 <!-- 的行可能是写回块前奏，暂缓显示（避免露出一小段标记）
+        const printTitle = () => {
+          if (titlePrinted) return;
+          titlePrinted = true;
+          term.writeln('\x1b[1;32m──── 回答 ────\x1b[0m');
+        };
         const feedDelta = (d) => {
           lineBuf += d;
           let nl;
@@ -672,8 +692,23 @@
             if (data === '[DONE]') continue;
             try {
               const j = JSON.parse(data);
-              const delta = j.choices && j.choices[0] && j.choices[0].delta && j.choices[0].delta.content;
+              if (j.usage) lastUsage = j.usage; // include_usage 结束块（该块 choices 为空）
+              const d = j.choices && j.choices[0] && j.choices[0].delta;
+              const rc = d && d.reasoning_content;
+              if (rc) {
+                reasoning += rc;
+                if (!titlePrinted && !thoughtPrinted) {
+                  thoughtPrinted = true;
+                  term.writeln('\x1b[90m🧠 思考中…\x1b[0m');
+                }
+              }
+              const delta = d && d.content;
               if (!delta) continue;
+              if (firstContentAt === null) {
+                firstContentAt = Date.now(); // reasoning 结束 = 首个 content 到达
+                if (thoughtPrinted) term.write('\x1b[1A\x1b[2K\r'); // 清掉「思考中…」行
+                printTitle();
+              }
               full += delta;
               // 写回块起就不再展示（继续收集用于落盘）
               if (!saveSeen) {
@@ -719,6 +754,14 @@
       currentAbort = null;
     }
     term.writeln('');
+    // 推理折叠行 + 本次回答 token 用量（回答渲染完成后、引用来源前；无则静默跳过）
+    if (reasoning) {
+      const secs = firstContentAt ? Math.max(1, Math.round((firstContentAt - reasoningStartAt) / 1000)) : null;
+      term.writeln('\x1b[90mThought' + (secs ? ' · ' + secs + ' 秒' : '') + '\x1b[0m');
+    }
+    if (lastUsage && lastUsage.total_tokens) {
+      term.writeln('\x1b[90m本次输出 ' + lastUsage.total_tokens + ' tokens\x1b[0m');
+    }
 
     const cleanFull = full.replace(/\n?<!--\s*md-agent-save\s*-->[\s\S]*$/, '').trim();
 
