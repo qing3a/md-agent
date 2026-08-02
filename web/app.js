@@ -37,8 +37,44 @@
   }
 
   // ---- 输入行边框：提示前一条上横线、回车后一条下横线，把输入行夹住 ----
-  function hline() { return '\x1b[90m' + '─'.repeat(term.cols) + '\x1b[0m'; }
-  function showPrompt() { term.write(hline() + '\r\n' + PROMPT); }
+  // ---- 输入行边框：圆角框包住输入行（上边框提示时画、下边框回车时画），
+  //      右缘按 CJK 列宽对齐（框是核心视觉，值得做一次精简宽度计算）；状态栏（DOM）紧贴框下方 ----
+  function dispW(s) {
+    let w = 0;
+    for (const ch of String(s)) {
+      w += /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/.test(ch) ? 2 : 1;
+    }
+    return w;
+  }
+  function visOnly(s) { return s.replace(/\x1b\[[0-9;]*m/g, ''); }
+  function boxW() { return Math.max(term.cols, 20); }
+  // 输入行内容（左竖线 + PROMPT + line + 对齐填充 + 右竖线）；超宽按字符截断
+  function inputRow() {
+    const B = boxW();
+    let inner = PROMPT + line;
+    let pad = B - 3 - dispW(visOnly(inner));
+    if (pad < 1) {
+      const chars = Array.from(line);
+      while (pad < 1 && chars.length) {
+        chars.pop();
+        const cand = PROMPT + chars.join('') + '…';
+        const p = B - 3 - dispW(visOnly(cand));
+        if (p >= 1) { inner = cand; pad = p; }
+        else { pad = 1; }
+      }
+      line = chars.join('');
+      if (pad < 1) pad = 1;
+    }
+    return '\x1b[90m│\x1b[0m ' + inner + ' '.repeat(pad) + '\x1b[90m│\x1b[0m';
+  }
+  function showPrompt() {
+    const B = boxW();
+    term.write('\x1b[90m╭' + '─'.repeat(B - 2) + '╮\x1b[0m\r\n' + inputRow());
+  }
+  function closeBox() {
+    const B = boxW();
+    term.write('\r\n' + '\x1b[90m╰' + '─'.repeat(B - 2) + '╯\x1b[0m\r\n');
+  }
 
   // ---- 启动欢迎 banner + 状态信息（异步汇总，失败不阻塞）----
   function printBanner() {
@@ -125,7 +161,7 @@
     const code = data.charCodeAt(0);
     if (data === '\r') {
       const cmd = line.trim();
-      term.write('\r\n' + hline() + '\r\n'); // 输入行下边框
+      closeBox(); // 输入框下边框
       line = '';
       if (cmd) {
         run(cmd)
@@ -135,18 +171,17 @@
         showPrompt();
       }
     } else if (data === '\x7f' || data === '\x08') {
-      // 退格（兼容 \x7f DEL 与 \x08 BS）。整行清绘而非 \b \b 逐列擦：
-      // 中文/全角占 2 列逐列擦不干净，Array.from 按字符（代理对安全）切片不劈 emoji，
-      // 长行回绕时 \b 无法跨行，清行重画一并解决。
+      // 退格（兼容 \x7f DEL 与 \x08 BS）。整行清绘：Array.from 按字符（代理对安全）切片不劈 emoji，
+      // 长行回绕时 \b 无法跨行，清行重画一并解决
       if (line.length) {
         const chars = Array.from(line);
         chars.pop();
         line = chars.join('');
-        term.write('\x1b[2K\r' + PROMPT + line);
+        term.write('\x1b[2K\r' + inputRow());
       }
     } else if (code >= 32) {
       line += data;
-      term.write(data);
+      term.write('\x1b[2K\r' + inputRow()); // 输入即整行重绘（右竖线跟随内容）
     }
   });
 
