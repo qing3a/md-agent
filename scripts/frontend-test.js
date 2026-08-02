@@ -42,5 +42,17 @@ const d = Core.diffLines(['a', 'b', 'c'], ['a', 'x', 'c']);
 t('LCS 差异行', d.filter((x) => x.t === '-').length === 1 && d.filter((x) => x.t === '+').length === 1);
 t('相同行保留', d.filter((x) => x.t === ' ').length === 2);
 
+console.log('== CE 组装器 v1（稳定前缀在前） ==');
+const g = Core.buildGuidePrefix({ guideText: 'G1', memoryText: 'M1', toolsTxt: 'T1', today: '2026-08-03' });
+t('规范层在记忆层前', g.indexOf('【规范层') < g.indexOf('【记忆/索引层'));
+t('记忆层在工具清单前', g.indexOf('【记忆/索引层') < g.indexOf('可用工具'));
+t('工具清单在回答规则前', g.indexOf('可用工具') < g.indexOf('回答规则'));
+t('today 注入', g.includes('今天是 2026-08-03'));
+t('空 parts 过滤（无 memory）', !Core.buildGuidePrefix({ guideText: 'G', toolsTxt: 'T', today: 'x' }).includes('【记忆/索引层'));
+t('无技能尾部为空', Core.buildSkillTail('') === '');
+t('有技能尾部', Core.buildSkillTail('SK') === '相关技能（命中触发词，按技能步骤执行）：SK');
+const full = [Core.buildGuidePrefix({ guideText: 'G', memoryText: 'M', toolsTxt: 'T', today: 'x' }), Core.buildSkillTail('SK')].filter(Boolean).join('\n\n');
+t('技能在稳定前缀之后', full.indexOf('相关技能') > full.indexOf('回答规则'));
+
 console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败');
 process.exit(fail ? 1 : 0);

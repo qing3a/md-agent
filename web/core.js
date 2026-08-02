@@ -134,6 +134,40 @@
     return out;
   };
 
+  // ---------- Context Engineering 组装器 v1（模块化 builder，稳定前缀在前） ----------
+  // 稳定前缀（会话内不变 → DeepSeek 自动前缀缓存命中）：身份 + L1 规范/记忆 + 工具清单 + 回答规则
+  // 易变尾部（跨问题变化）：命中技能放最后，最大化共享前缀（oh-my-pi SystemPromptPlan 思想）
+  Core.buildGuidePrefix = function (parts) {
+    return [
+      '你是本地双层 MD 知识库的检索问答助手。',
+      '以下是知识库 L1 规范/记忆/索引层（权威约定，需遵循）：',
+      parts.guideText && '【规范层（KB/FRAMEWORK/RULES）】\n' + parts.guideText,
+      parts.memoryText && '【记忆/索引层（MEMORY/INDEX）】\n' + parts.memoryText,
+      '',
+      '工具调用（需要更多知识库/网页/文件信息时主动使用）：',
+      '调用工具时**第一行就输出**：{"tool":"<工具名>","args":{...}}（不要先输出解释或其它文字，不要代码块标记）；',
+      '需要多个信息时可连续输出多行工具调用。',
+      '可用工具：',
+      parts.toolsTxt || '(工具清单加载失败)',
+      '调用后你会收到「工具返回」，基于它继续回答；不需要工具时直接回答。',
+      '',
+      '回答规则：',
+      '1. 优先依据用户消息中给出的检索片段回答，引用格式 [文件:行号]；',
+      '2. 片段不足时如实说明，不要编造；',
+      '3. 用中文简洁回答；',
+      '4. 多轮对话中注意保持与上文一致（引用只需标注本轮片段来源）；',
+      '5. 今天是 ' + (parts.today || '') + '。若本次问答产生了值得沉淀的知识（新事实、已定决策、用户纠正、新规范），在回答末尾单独附写回块（不要放进代码块）：',
+      '   <!-- md-agent-save -->',
+      '   {"path":"相对KB根路径","mode":"append|new","content":"markdown正文"}',
+      '   - 新知识：path 指向 notes/ 下的 L2 文件，mode=new，正文含 # 标题；',
+      '   - 追加/决策/纠正：path=MEMORY.md，mode=append；',
+      '   - 没有可沉淀内容时不要输出该块。',
+    ].filter(Boolean).join('\n');
+  };
+  Core.buildSkillTail = function (skillTxt) {
+    return skillTxt ? '相关技能（命中触发词，按技能步骤执行）：' + skillTxt : '';
+  };
+
   root.Core = Core;
   if (typeof module !== 'undefined' && module.exports) module.exports = Core;
 })(typeof window !== 'undefined' ? window : globalThis);

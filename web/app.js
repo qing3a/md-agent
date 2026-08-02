@@ -37,6 +37,8 @@
 
   const PROMPT = '\x1b[1;34mmd-agent>\x1b[0m ';
   let L1_TEXT = ''; // 启动时注入的 L1 层全文
+  let GUIDE_TEXT = ''; // L1 规范层（KB/FRAMEWORK/RULES）——稳定前缀
+  let MEMORY_TEXT = ''; // L1 记忆/索引层（MEMORY/INDEX）——易变
   let history = loadHistory(); // 多轮对话记忆（localStorage 持久化，刷新不丢）
   const MAX_HISTORY = 8; // 最近 4 轮
 
@@ -352,6 +354,9 @@
       const b = await res.json();
       if (b.l1 && b.l1.length) {
         L1_TEXT = b.l1.map((f) => '【' + f.name + '】\n' + f.content).join('\n\n');
+        // CE 组装器 v1：L1 分区——规范层（稳定前缀）vs 记忆/索引层（易变），供 buildGuidePrefix
+        GUIDE_TEXT = b.l1.filter((f) => /^(KB|FRAMEWORK|RULES)\./i.test(f.name)).map((f) => '【' + f.name + '】\n' + f.content).join('\n\n');
+        MEMORY_TEXT = b.l1.filter((f) => !/^(KB|FRAMEWORK|RULES)\./i.test(f.name)).map((f) => '【' + f.name + '】\n' + f.content).join('\n\n');
         term.writeln(
           '\x1b[90m(L1 已注入 ' + b.l1.length + ' 个文件: ' + b.l1.map((f) => f.name).join(' ') + ')\x1b[0m'
         );
@@ -876,31 +881,16 @@
         )
       )
       .join('\n\n');
+    // CE 组装器 v1（稳定前缀在前）：规范层 + 记忆层 + 工具清单 + 回答规则 = 稳定前缀；技能 = 易变尾部
     const system = [
-      '你是本地双层 MD 知识库的检索问答助手。',
-      '以下是知识库 L1 规范/记忆/索引层（权威约定，需遵循）：',
-      L1_TEXT || '(L1 未加载)',
-      '',
-      '工具调用（需要更多知识库/网页/文件信息时主动使用）：',
-      '调用工具时**第一行就输出**：{"tool":"<工具名>","args":{...}}（不要先输出解释或其它文字，不要代码块标记）；',
-      '需要多个信息时可连续输出多行工具调用。',
-      '可用工具：',
-      toolsTxt || '(工具清单加载失败)',
-      '调用后你会收到「工具返回」，基于它继续回答；不需要工具时直接回答。',
-      '',
-      skillTxt ? '相关技能（命中触发词，按技能步骤执行）：' + skillTxt : '',
-      '回答规则：',
-      '1. 优先依据用户消息中给出的检索片段回答，引用格式 [文件:行号]；',
-      '2. 片段不足时如实说明，不要编造；',
-      '3. 用中文简洁回答；',
-      '4. 多轮对话中注意保持与上文一致（引用只需标注本轮片段来源）；',
-      '5. 今天是 ' + localToday() + '。若本次问答产生了值得沉淀的知识（新事实、已定决策、用户纠正、新规范），在回答末尾单独附写回块（不要放进代码块）：',
-      '   <!-- md-agent-save -->',
-      '   {"path":"相对KB根路径","mode":"append|new","content":"markdown正文"}',
-      '   - 新知识：path 指向 notes/ 下的 L2 文件，mode=new，正文含 # 标题；',
-      '   - 追加/决策/纠正：path=MEMORY.md，mode=append；',
-      '   - 没有可沉淀内容时不要输出该块。',
-    ].join('\n');
+      Core.buildGuidePrefix({
+        guideText: GUIDE_TEXT || L1_TEXT, // v1 不砍注入内容：规范层优先，L1 全量兜底
+        memoryText: MEMORY_TEXT,
+        toolsTxt,
+        today: localToday(),
+      }),
+      Core.buildSkillTail(skillTxt),
+    ].filter(Boolean).join('\n\n');
     const userMsg = [
       '问题：' + question,
       '',
