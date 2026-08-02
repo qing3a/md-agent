@@ -554,3 +554,119 @@ pub fn resolve_in_kb(root: &Path, rel: &str) -> Option<PathBuf> {
         cur = cur.parent()?;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// 建隔离测试 kb：返回临时根目录（测试结束自动清理）
+    fn test_root(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("md-agent-ut-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(root: &Path, rel: &str, content: &str) {
+        let p = root.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, content).unwrap();
+    }
+
+    #[test]
+    fn parse_frontmatter_ok() {
+        let (meta, body) = parse_frontmatter("---\ntitle: T\ntrigger: X\n---\n\n正文");
+        assert_eq!(meta.get("title").map(String::as_str), Some("T"));
+        assert_eq!(meta.get("trigger").map(String::as_str), Some("X"));
+        assert_eq!(body.trim(), "正文");
+    }
+
+    #[test]
+    fn ensure_layout_creates_skills() {
+        let root = test_root("layout");
+        ensure_layout(&root).unwrap();
+        assert!(root.join("notes").is_dir());
+        assert!(root.join("skills").is_dir());
+        assert!(root.join("MEMORY.md").is_file());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn kind_inference_four_types() {
+        let root = test_root("kind");
+        ensure_layout(&root).unwrap();
+        write(&root, "pending/新笔记.md", "# N\n");
+        write(&root, "pending/MEMORY.t.md", "## 2026-08-03\n- x\n");
+        write(&root, "pending/SKILL.技能.md", "---\ntitle: S\ntrigger: T\n---\n# S\n");
+        write(&root, "pending/CONSOLIDATE.c.md", "---\ntarget: MEMORY.md\n---\n正文\n");
+        let kinds: Vec<String> = list_pending(&root).into_iter().map(|p| p.kind).collect();
+        assert!(kinds.contains(&"note".to_string()));
+        assert!(kinds.contains(&"memory".to_string()));
+        assert!(kinds.contains(&"skill".to_string()));
+        assert!(kinds.contains(&"consolidate".to_string()));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn approve_skill_installs_and_indexes() {
+        let root = test_root("skill");
+        ensure_layout(&root).unwrap();
+        write(&root, "pending/SKILL.整理.md",
+            "---\ntype: skill\ntitle: 整理\ntrigger: 整理\n---\n# 整理\n步骤\n");
+        let (target, note) = approve_pending(&root, "pending/SKILL.整理.md", None).unwrap();
+        assert_eq!(target, "skills/整理.md");
+        assert!(root.join("skills/整理.md").is_file());
+        let idx = fs::read_to_string(root.join("skills/INDEX.md")).unwrap();
+        assert!(idx.contains("整理"));
+        assert!(note.unwrap().contains("注册表"));
+        // list_skills 应列出（trigger 命中）
+        let sk = list_skills(&root);
+        assert_eq!(sk.len(), 1);
+        assert_eq!(sk[0].trigger, "整理");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn approve_consolidate_replaces_target() {
+        let root = test_root("consol");
+        ensure_layout(&root).unwrap();
+        fs::write(root.join("MEMORY.md"), "# M\n- 旧内容\n").unwrap();
+        write(&root, "pending/CONSOLIDATE.c.md",
+            "---\ntype: consolidate\ntarget: MEMORY.md\n---\n# M\n- 新内容\n");
+        let (target, _) = approve_pending(&root, "pending/CONSOLIDATE.c.md", None).unwrap();
+        assert_eq!(target, "MEMORY.md");
+        let mem = fs::read_to_string(root.join("MEMORY.md")).unwrap();
+        assert!(mem.contains("新内容") && !mem.contains("旧内容"));
+        assert!(!root.join("pending/CONSOLIDATE.c.md").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn approve_note_memory_regression() {
+        let root = test_root("regr");
+        ensure_layout(&root).unwrap();
+        // note
+        write(&root, "pending/notes/新.md", "# 新\n正文\n");
+        let (t1, _) = approve_pending(&root, "pending/notes/新.md", None).unwrap();
+        assert_eq!(t1, "notes/新.md");
+        assert!(root.join("notes/新.md").is_file());
+        // memory
+        write(&root, "pending/MEMORY.t.md", "## 2026-08-03\n- 条目\n");
+        let (t2, _) = approve_pending(&root, "pending/MEMORY.t.md", None).unwrap();
+        assert_eq!(t2, "MEMORY.md");
+        assert!(fs::read_to_string(root.join("MEMORY.md")).unwrap().contains("条目"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn consolidate_target_path_guard() {
+        let root = test_root("guard");
+        ensure_layout(&root).unwrap();
+        write(&root, "pending/CONSOLIDATE.bad.md",
+            "---\ntarget: ../../evil.md\n---\n正文\n");
+        let r = approve_pending(&root, "pending/CONSOLIDATE.bad.md", None);
+        assert!(r.is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+}

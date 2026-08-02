@@ -172,19 +172,35 @@ async fn skills_handler(State(st): State<AppState>) -> Json<Value> {
 }
 
 /// 巩固器：按确定性规则（MEMORY 去重 / 重复标题提示）生成巩固提案进待审
-async fn consolidate_handler(State(st): State<AppState>) -> Response {
+#[derive(Deserialize)]
+struct ConsolidateParams {
+    /// 1/true/on 时启用 v2：LLM 生成重复标题文档的整合版（需配置 LLM）
+    #[serde(default)]
+    llm: String,
+}
+
+async fn consolidate_handler(State(st): State<AppState>, Query(q): Query<ConsolidateParams>) -> Response {
     let audit = match crate::graph::audit(&st.kb_root) {
         Ok(a) => a,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     };
-    match crate::consolidate::generate_proposals(&st.kb_root, &audit) {
-        Ok(created) => Json(json!({ "ok": true, "created": created })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+    let mut created = match crate::consolidate::generate_proposals(&st.kb_root, &audit) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    if matches!(q.llm.as_str(), "1" | "true" | "on" | "yes") {
+        match crate::consolidate::generate_llm_proposals(&st.kb_root, &audit).await {
+            Ok(mut llm_created) => created.append(&mut llm_created),
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+        }
     }
+    Json(json!({ "ok": true, "created": created })).into_response()
 }
 
 async fn health() -> Json<serde_json::Value> {

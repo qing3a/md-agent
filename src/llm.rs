@@ -113,3 +113,16 @@ pub async fn chat_stream(
 fn truncate(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::completions_url;
+
+    #[test]
+    fn url_normalization() {
+        assert_eq!(completions_url("http://127.0.0.1:11434"), "http://127.0.0.1:11434/v1/chat/completions");
+        assert_eq!(completions_url("https://api.deepseek.com/v1"), "https://api.deepseek.com/v1/chat/completions");
+        assert_eq!(completions_url("http://x/chat/completions"), "http://x/chat/completions");
+        assert_eq!(completions_url("  http://x/  "), "http://x/v1/chat/completions");
+    }
+}

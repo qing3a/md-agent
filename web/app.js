@@ -544,7 +544,7 @@
       case '/reject': await pendingAct('reject', rest[0]); break;
       case '/view': await viewCmd(rest[0]); break;
       case '/side': toggleSide(); break;
-      case '/consolidate': await consolidateCmd(); break;
+      case '/consolidate': await consolidateCmd(rest[0]); break;
       case '/skills': await skillsCmd(); break;
       case '/audit': await auditCmd(); break;
       case '/conflicts': await conflicts(); break;
@@ -581,7 +581,7 @@
     term.writeln('  /approve <路径|all>    批准待审 → 写入知识库   /reject 丢弃');
     term.writeln('  /view graph|<html>|off  面板渲染层：内置图谱可视化 / 本地 HTML 视图（Esc 关闭）');
     term.writeln('  /side                  速览侧边栏（任务/待审/图谱/审计，Ctrl+K 或快捷按钮同样唤出）');
-    term.writeln('  /consolidate           巩固器：MEMORY 去重 / 重复标题提示，生成巩固提案进待审');
+    term.writeln('  /consolidate [llm]     巩固器：v1 规则（MEMORY 去重/重复标题提示）；llm 参数用 LLM 生成整合版');
     term.writeln('  /skills                列出技能注册表（Agent 技能提案经 /approve 安装）');
     term.writeln('  /audit                知识库健康审计（盲区/冲突/补链接建议）');
     term.writeln('  /conflicts             冲突检查（重复标题/悬空链接）   /diff <A> <B> 行级对比');
@@ -603,38 +603,6 @@
 
   // ---------- Agent 问答回路 ----------
 
-  // 关键词提取：ASCII 单词直接提取；中文按多字功能词 + 语气助词切分，
-  // 切出的 CJK 片段(≥2)取「整段 + 滑动双字」，避免单字停用字切断实体词（如 向量/配置）。
-  const FW = [
-    '为什么','怎么样','怎么能','是不是','会不会','有没有','能不能','需要','帮忙',
-    '什么','怎么','如何','请问','怎样','为啥','咋','一下','这个','那个','这些','那些',
-    '因为','所以','如果','但是','然后','可以','就是','不是','一个','我们','你们','他们',
-  ].sort((a, b) => b.length - a.length); // 长的先切，如 为什么 先于 什么
-  const PARTICLES = new Set('吗呢啊呀吧么的得地了着是吗哦嘛嗯');
-  function extractKeywords(q) {
-    const kw = new Set();
-    for (const m of q.matchAll(/[A-Za-z0-9][A-Za-z0-9_-]*/g)) kw.add(m[0].toLowerCase());
-    let cjk = q.replace(/[A-Za-z0-9_-]+/g, ' ');
-    for (const w of FW) cjk = cjk.split(w).join(' ');
-    let buf = '';
-    const flush = () => {
-      const t = buf.trim();
-      if (t.length >= 2) {
-        kw.add(t);
-        if (t.length >= 3) {
-          for (let i = 0; i + 2 <= t.length; i++) kw.add(t.slice(i, i + 2));
-        }
-      }
-      buf = '';
-    };
-    for (const ch of cjk) {
-      if (/\s/.test(ch)) { flush(); continue; }
-      if (PARTICLES.has(ch)) { flush(); continue; }
-      buf += ch;
-    }
-    flush();
-    return [...kw];
-  }
 
   // ---------- 工具注册表 + Agent Loop（Phase 3-C Step 1） ----------
   // 工具全部映射到现有端点；LLM 显式决策（软工具调用：输出一行 JSON），宿主执行回填
@@ -690,68 +658,6 @@
     return JSON.stringify(r).slice(0, 3000);
   }
 
-  // 栈扫描提取顶层 JSON 对象（正确处理嵌套 args 与字符串内大括号）
-  function extractJsonObjects(text) {
-    const out = [];
-    let i = 0;
-    while (i < text.length) {
-      if (text[i] !== '{') { i++; continue; }
-      let depth = 0, j = i, inStr = false;
-      for (; j < text.length; j++) {
-        const ch = text[j];
-        if (inStr) {
-          if (ch === '\\') j++;
-          else if (ch === '"') inStr = false;
-          continue;
-        }
-        if (ch === '"') inStr = true;
-        else if (ch === '{') depth++;
-        else if (ch === '}') { depth--; if (depth === 0) break; }
-      }
-      if (depth !== 0) break; // 未闭合，放弃
-      out.push(text.slice(i, j + 1));
-      i = j + 1;
-    }
-    return out;
-  }
-
-  // 解析工具调用 JSON：必须以 { 开头；支持一次输出多个工具 JSON（DeepSeek 会用空格分隔），取第一个合法；
-  // 兼容平铺参数（{"tool":"x","q":..}）与 args 包裹（{"tool":"x","args":{..}}）
-  function tryParseTool(text) {
-    const t = String(text || '').trim();
-    if (!t.startsWith('{')) return null;
-    for (const raw of extractJsonObjects(t)) {
-      try {
-        const j = JSON.parse(raw);
-        if (j && typeof j.tool === 'string' && TOOL_API[j.tool]) {
-          const args = (j.args && typeof j.args === 'object' && !Array.isArray(j.args)) ? j.args : j;
-          return { tool: j.tool, args };
-        }
-      } catch (e) { /* 跳过非工具 JSON 对象 */ }
-    }
-    return null;
-  }
-
-  // 流结束后全文检测工具调用：DeepSeek 可能先输出简短说明再输出工具 JSON（前缀 <200 字视为工具意图）
-  function detectToolInFull(text) {
-    const t = String(text || '').trim();
-    if (t.startsWith('{')) return tryParseTool(t);
-    const ti = t.indexOf('{"tool"');
-    if (ti === -1) return null;
-    const lead = t.slice(0, ti).trim();
-    if (lead.length > 200) return null; // 前缀是长正文，非工具调用
-    for (const raw of extractJsonObjects(t.slice(ti))) {
-      try {
-        const j = JSON.parse(raw);
-        if (j && typeof j.tool === 'string' && TOOL_API[j.tool]) {
-          const args = (j.args && typeof j.args === 'object' && !Array.isArray(j.args)) ? j.args : j;
-          return { tool: j.tool, args };
-        }
-      } catch (e) { /* 跳过 */ }
-    }
-    return null;
-  }
-
   // 单次 LLM 流式调用（Agent Loop 一轮）：正常回答流式渲染；首个 content 以 { 开头 → 工具模式只收集不渲染
   // 返回 { full, reasoning, reasoningStartAt, firstContentAt, lastUsage, toolJson }；中断/失败返回 null
   async function llmStreamOnce(messages) {
@@ -786,7 +692,7 @@
         full = (msg && msg.content) || '';
         reasoning = (msg && msg.reasoning_content) || '';
         lastUsage = body.usage || null;
-        toolJson = tryParseTool(full);
+        toolJson = Core.tryParseTool(full, TOOL_API);
         if (!toolJson) { term.writeln(TITLE); term.write(renderMdFile(full)); }
         return { full, reasoning, reasoningStartAt, firstContentAt, lastUsage, toolJson };
       }
@@ -891,20 +797,20 @@
     }
     // 工具识别：纯 JSON 开头（toolMode）→ 解析；否则全文检测（DeepSeek 可能先简短说明再调工具）
     if (toolMode) {
-      toolJson = tryParseTool(full);
+      toolJson = Core.tryParseTool(full, TOOL_API);
       if (!toolJson) {
         term.writeln(TITLE);
         term.write(renderMdFile(full));
       }
     } else {
-      toolJson = detectToolInFull(full);
+      toolJson = Core.detectToolInFull(full, TOOL_API);
     }
     return { full, reasoning, reasoningStartAt, firstContentAt, lastUsage, toolJson };
   }
 
   async function ask(question) {
     term.writeln('\x1b[90m(Agent: 提取关键词 → 检索 L2 → 调用 LLM)\x1b[0m');
-    const kws = extractKeywords(question);
+    const kws = Core.extractKeywords(question);
 
     // 1a. @ 文件提及：@路径 直接注入检索目标（全文进上下文；失败仅提示不阻塞）
     const atRefs = [...question.matchAll(/(?:^|\s)@([^\s]+)/g)]
@@ -918,7 +824,7 @@
           atFrag.push('[来源 @' + p + '（指定文档）]\n' + f.content.slice(0, 2000));
           // 路径关键词并入检索 query（文件名去掉扩展名/目录）
           const name = p.split('/').pop().replace(/\.md$/i, '').replace(/[-_]/g, ' ');
-          for (const w of extractKeywords(name)) kws.push(w);
+          for (const w of Core.extractKeywords(name)) kws.push(w);
         }
       } catch (e) {
         term.writeln('\x1b[33m@ 文件未找到: ' + p + '\x1b[0m');
@@ -1436,7 +1342,7 @@
       return;
     }
     term.writeln('\x1b[90m(整理: 检索「' + topic + '」→ LLM 生成笔记 → 写入 L2)\x1b[0m');
-    const kws = extractKeywords(topic);
+    const kws = Core.extractKeywords(topic);
     const query = kws.length ? kws.join(' ') : topic;
     const sr = await api('/api/search?q=' + encodeURIComponent(query) + '&layer=notes&ctx=1');
     const top = sr.hits.slice(0, 15);
@@ -1845,9 +1751,10 @@
   // ---------- 巩固器 + 技能（Phase 3-C Step 2） ----------
 
   // /consolidate：运行巩固器，生成巩固提案进待审（MEMORY 去重 / 重复标题提示）
-  async function consolidateCmd() {
-    term.writeln('\x1b[90m(巩固器运行中: MEMORY 去重 + 重复标题检测)\x1b[0m');
-    const r = await api('/api/consolidate', { method: 'POST' });
+  async function consolidateCmd(opt) {
+    const llm = opt === 'llm' || opt === '--llm';
+    term.writeln('\x1b[90m(巩固器' + (llm ? ' v2 LLM' : ' v1 规则') + ': ' + (llm ? '重复标题 LLM 整合' : 'MEMORY 去重 + 重复标题检测') + ')\x1b[0m');
+    const r = await api('/api/consolidate' + (llm ? '?llm=1' : ''), { method: 'POST' });
     if (r.created && r.created.length) {
       term.writeln('\x1b[32m✓ 生成 ' + r.created.length + ' 条巩固提案:\x1b[0m');
       for (const c of r.created) {
@@ -1934,39 +1841,6 @@
     }
   }
 
-  // LCS 行级 diff（O(n*m)，小文档够用）
-  function diffLines(a, b) {
-    const n = a.length, m = b.length;
-    if (n * m > 4_000_000) {
-      // 大文档退化：逐行对比（只标差异）
-      const out = [];
-      const max = Math.max(n, m);
-      for (let i = 0; i < max; i++) {
-        if (a[i] !== b[i]) {
-          if (i < n) out.push({ t: '-', line: a[i] });
-          if (i < m) out.push({ t: '+', line: b[i] });
-        }
-      }
-      return out;
-    }
-    const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
-    for (let i = n - 1; i >= 0; i--) {
-      for (let j = m - 1; j >= 0; j--) {
-        dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-      }
-    }
-    const out = [];
-    let i = 0, j = 0;
-    while (i < n && j < m) {
-      if (a[i] === b[j]) { out.push({ t: ' ', line: a[i] }); i++; j++; }
-      else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ t: '-', line: a[i] }); i++; }
-      else { out.push({ t: '+', line: b[j] }); j++; }
-    }
-    while (i < n) { out.push({ t: '-', line: a[i] }); i++; }
-    while (j < m) { out.push({ t: '+', line: b[j] }); j++; }
-    return out;
-  }
-
   // /diff <A> <B>：行级对比（+ 绿 / - 红）
   async function diffCmd(a, b) {
     if (!a || !b) {
@@ -1980,7 +1854,7 @@
     term.writeln('\x1b[1;36m' + ra.path + '  vs  ' + rb.path + '\x1b[0m');
     const la = ra.content.replace(/\r\n/g, '\n').split('\n');
     const lb = rb.content.replace(/\r\n/g, '\n').split('\n');
-    const d = diffLines(la, lb);
+    const d = Core.diffLines(la, lb);
     let shown = 0;
     for (const x of d) {
       if (x.t === ' ') continue;
@@ -2069,7 +1943,7 @@
       return;
     }
     term.writeln('\x1b[90m(补全: LLM 生成「' + topic + '」新文档 → 待审)\x1b[0m');
-    const kws = extractKeywords(topic);
+    const kws = Core.extractKeywords(topic);
     const query = kws.length ? kws.join(' ') : topic;
     let sr;
     try {
