@@ -26,7 +26,6 @@
   });
 
   const PROMPT = '\x1b[1;34mmd-agent>\x1b[0m ';
-  let line = '';
   let L1_TEXT = ''; // 启动时注入的 L1 层全文
   let history = loadHistory(); // 多轮对话记忆（localStorage 持久化，刷新不丢）
   const MAX_HISTORY = 8; // 最近 4 轮
@@ -41,10 +40,22 @@
     try { localStorage.setItem('md-agent-history', JSON.stringify(history.slice(-MAX_HISTORY))); } catch (e) { /* 忽略 */ }
   }
 
-  // ---- 输入框（input box）边框 + 终端内状态栏（状态栏画在终端流内、紧跟输入框下方）----
-  // 输入框：上下两条全宽横线（无左右竖线），追加式输入（光标自然跟随，IME 正常）
-  // 状态栏：随输入框流动的一行；刷新时重绘该行并把光标送回输入框（回答输出期间不重绘）
-  // 列宽用容器实测（term.cols 是 fit 估算值，实测偏大 2 列会导致全宽横线 wrap 错位）
+  // ---- DOM chrome（输入条 / 状态条 / 补全面板）----
+  // UI 迁出终端流：输入框、边框、状态栏全部为 DOM 元素（业界标准——resize 由 CSS 自动适配，不再有字符边框变形）
+  const cmdInput = document.getElementById('cmd-input');
+  const sendBtn = document.getElementById('send-btn');
+  const autoPanel = document.getElementById('autocomplete');
+  const statusDot = document.getElementById('status-dot');
+  const statusText = document.getElementById('status-text');
+  const statusWarn = document.getElementById('status-warn');
+  const quickBtns = [...document.querySelectorAll('#quick-btns button')];
+
+  let busy = false;          // 命令/回答进行中（提交/按钮禁用，输入框仍可编辑）
+  let cmdHistory = [];       // 命令行历史（会话内；区别于多轮对话 history）
+  let histIdx = -1;
+  let currentAbort = null;   // 当前 LLM 流的 AbortController（Ctrl+C 中断回答）
+
+  // 终端实测列宽（消息块铺背景用；term.cols 是 fit 估算值，实测偏大 2 列）
   function trueCols() {
     try {
       const cw = term._core.dimensions.css.cell.width; // xterm 内部 cell 宽（像素）
@@ -55,54 +66,164 @@
     } catch (e) { /* fallthrough */ }
     return term.cols - 2; // 兜底：留 2 列余量防 wrap
   }
-  function hline() { return '\x1b[90m' + '─'.repeat(trueCols()) + '\x1b[0m'; }
 
-  // 精简 CJK 列宽（状态行截断 / 输入超长保护用）
-  function dispW(s) {
-    let w = 0;
-    for (const ch of String(s)) {
-      w += /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/.test(ch) ? 2 : 1;
-    }
-    return w;
-  }
-  function visOnly(s) { return s.replace(/\x1b\[[0-9;]*m/g, ''); }
-  function truncateW(s, maxW) {
-    const plain = visOnly(s);
-    if (dispW(plain) <= maxW) return s;
-    let out = ''; let w = 0;
-    for (const ch of Array.from(plain)) {
-      const cw = dispW(ch);
-      if (w + cw > maxW - 1) break;
-      out += ch; w += cw;
-    }
-    return out + '…';
-  }
+  // ---------- 输入与提交 ----------
 
-  let statusLine = '';   // 状态栏最新文本（可含 ANSI）
-  let atPrompt = false;  // 光标是否停在输入框（决定状态栏能否原地重绘）
-
-  // 重绘状态行（要求光标在输入框）：下移两行（越过下边框）到状态行，重绘后回输入框
-  function drawStatusRow() {
-    if (!atPrompt || !statusLine) return;
-    if (term.buffer.active.cursorY + 2 >= term.rows) return; // 状态行在可视区外，等 showPrompt 重画
-    term.write('\x1b[2B\x1b[2K\r' + statusLine + '\x1b[2A\x1b[2K\r' + PROMPT + line);
-  }
-  // 输入框（输入中）：上边框 + 输入行 + 下边框 + 状态行；光标回输入行
-  function showPrompt() {
-    term.write(hline() + '\r\n' + PROMPT + line + '\r\n' + hline() + '\r\n' + (statusLine || ''));
-    term.write('\x1b[2A\x1b[2K\r' + PROMPT + line); // 光标回输入行重画（\r 回行首，列位安全）
-    atPrompt = true;
-  }
-  // 回车提交：输入框边框与状态行移除、输入行变整行背景色块（已提交消息），回答从下方开始
-  function submitMsg() {
-    atPrompt = false;
+  // 提交一条命令/问题：流内整行背景块 + 执行；回答期间（busy）忽略
+  async function submitCmd(text) {
+    const t = String(text || '').trim();
+    if (!t || busy || confirmCb) return;
     const bg = '\x1b[48;2;49;50;68m'; // #313244 深蓝灰背景（提交消息块）
-    term.write('\x1b[1A\x1b[2K\r');                              // 清上边框
-    term.write('\x1b[1B\x1b[2K\r' + bg + ' '.repeat(trueCols()) + '\r' + PROMPT + line + '\x1b[0m'); // 整行背景块
-    term.write('\x1b[1B\x1b[2K\r');                              // 清下边框
-    term.write('\x1b[1B\x1b[2K\r');                              // 清状态行
-    term.write('\r\n');                                          // 回答从下一行开始
+    for (const seg of t.split('\n')) {
+      term.write(bg + ' '.repeat(trueCols()) + '\r' + PROMPT + seg + '\x1b[0m\r\n');
+    }
+    cmdInput.value = '';
+    autoSize();
+    pushHistory(t);
+    closeAuto();
+    busy = true;
+    setBusyUI();
+    try {
+      await run(t);
+    } catch (e) {
+      term.writeln('\x1b[31m' + ((e && e.message) || e) + '\x1b[0m');
+    } finally {
+      busy = false;
+      setBusyUI();
+      refreshStatus();
+      cmdInput.focus();
+    }
   }
+
+  function setBusyUI() {
+    sendBtn.disabled = busy;
+    quickBtns.forEach((b) => (b.disabled = busy));
+  }
+
+  // textarea 自适应高度（1~3 行）
+  function autoSize() {
+    cmdInput.rows = Math.min(1 + (cmdInput.value.match(/\n/g) || []).length, 3);
+  }
+
+  cmdInput.addEventListener('input', () => { autoSize(); renderAutoComplete(); });
+  cmdInput.addEventListener('focus', () => { if (!cmdInput.value) openAuto(true); });
+  cmdInput.addEventListener('keydown', (ev) => {
+    const k = ev.key;
+    if (k === 'Enter' && !ev.shiftKey) {
+      ev.preventDefault();
+      if (autoOpen() && acSel >= 0) { acceptAuto(); return; }
+      submitCmd(cmdInput.value);
+    } else if (k === 'ArrowDown' || k === 'ArrowUp') {
+      if (autoOpen()) { ev.preventDefault(); moveAc(k === 'ArrowDown' ? 1 : -1); return; }
+      if (!cmdInput.value) { ev.preventDefault(); navHistory(k === 'ArrowUp' ? 1 : -1); }
+    } else if (k === 'Tab') {
+      if (autoOpen()) { ev.preventDefault(); acceptAuto(); }
+      else { ev.preventDefault(); openAuto(true); }
+    } else if (k === 'Escape') {
+      if (autoOpen()) { ev.preventDefault(); closeAuto(); }
+    } else if (k === 'c' && ev.ctrlKey && !cmdInput.value && currentAbort) {
+      ev.preventDefault();
+      currentAbort.abort();
+      term.writeln('\x1b[90m(已发送中断)\x1b[0m');
+    }
+  });
+  sendBtn.addEventListener('click', () => submitCmd(cmdInput.value));
+  quickBtns.forEach((btn) => btn.addEventListener('click', () => submitCmd(btn.dataset.cmd)));
+  // 点击输入区外部关闭补全
+  document.addEventListener('click', (ev) => {
+    if (!cmdInput.contains(ev.target) && !autoPanel.contains(ev.target)) closeAuto();
+  });
+
+  // ---------- 输入历史（会话内，空输入时 ArrowUp/Down 翻动） ----------
+  function pushHistory(t) {
+    if (cmdHistory[cmdHistory.length - 1] === t) return;
+    cmdHistory.push(t);
+    if (cmdHistory.length > 100) cmdHistory.shift();
+    histIdx = -1;
+  }
+  function navHistory(dir) {
+    if (!cmdHistory.length) return;
+    if (dir > 0) { // 上（更早）
+      if (histIdx === -1) histIdx = cmdHistory.length - 1;
+      else if (histIdx > 0) histIdx--;
+    } else {       // 下（更新）
+      if (histIdx === -1) return;
+      histIdx++;
+      if (histIdx >= cmdHistory.length) { histIdx = -1; cmdInput.value = ''; autoSize(); return; }
+    }
+    cmdInput.value = cmdHistory[histIdx] || '';
+    autoSize();
+    const len = cmdInput.value.length;
+    cmdInput.setSelectionRange(len, len);
+  }
+
+  // ---------- 命令补全面板 ----------
+  const COMMANDS = [
+    ['/help', '命令列表'], ['/search', '检索双层库'], ['open', '查看 KB 内 MD 文件'],
+    ['/l1', '查看 L1 规范/索引/记忆层'], ['/sync', '重建 INDEX.md'], ['/digest', '整理新笔记'],
+    ['/remember', '手动沉淀到记忆'], ['/graph', '知识图谱/关联簇'], ['/orphans', '孤立文档'],
+    ['/projects', '项目统计'], ['/tags', '标签统计'], ['/rescan', '重建知识图谱'],
+    ['/pending', '查看待审'], ['/preview', '行级预览'], ['/approve', '批准待审'],
+    ['/reject', '拒绝待审'], ['/view', '面板渲染层'], ['/audit', '知识库健康审计'],
+    ['/conflicts', '冲突检查'], ['/diff', '行级对比'], ['/link', '补链接'],
+    ['/link-all', '批量补链接'], ['/suggest', '补全缺失文档'], ['/fetch', '抓取网页'],
+    ['/page', '动态网页读取'], ['/task', '任务引擎'], ['/clear', '清空多轮记忆'],
+    ['/config', '查看配置'], ['/heartbeat', '心跳自动同步'], ['/health', '健康检查'],
+    ['clear', '清屏'],
+  ];
+  let acItems = [];
+  let acSel = -1;
+  function autoOpen() { return !autoPanel.classList.contains('hidden'); }
+  function closeAuto() { autoPanel.classList.add('hidden'); acItems = []; acSel = -1; }
+  function escHtml(s) {
+    return String(s).replace(/[&<>"']/g, (m) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+  }
+  function renderAutoComplete() {
+    const v = cmdInput.value;
+    const head = (v.match(/^\s*(\/[^\s]*)?/) || [])[1] || '';
+    const list = head
+      ? COMMANDS.filter(([c]) => c.startsWith(head)).slice(0, 8)
+      : COMMANDS.slice(0, 8); // 空输入 → 常用命令
+    if (!list.length || (head && list[0][0] === head)) { closeAuto(); return; }
+    acItems = list;
+    acSel = Math.max(0, list.findIndex(([c]) => c === head));
+    autoPanel.innerHTML = acItems.map(([c, d], i) =>
+      '<div class="ac-item' + (i === acSel ? ' sel' : '') + '" data-i="' + i + '">' +
+      escHtml(c) + '<span class="ac-desc">' + escHtml(d) + '</span></div>'
+    ).join('');
+    autoPanel.classList.remove('hidden');
+  }
+  function updateSelUI() {
+    autoPanel.querySelectorAll('.ac-item').forEach((el, i) => el.classList.toggle('sel', i === acSel));
+  }
+  function moveAc(d) {
+    if (!acItems.length) return;
+    acSel = (acSel + d + acItems.length) % acItems.length;
+    updateSelUI();
+    const sel = autoPanel.querySelector('.ac-item.sel');
+    if (sel) sel.scrollIntoView({ block: 'nearest' });
+  }
+  function acceptAuto() {
+    if (acSel < 0 || !acItems.length) return;
+    const cmd = acItems[acSel][0];
+    cmdInput.value = cmd + cmdInput.value.replace(/^\s*\/?[^\s]*/, '');
+    autoSize();
+    closeAuto();
+    const len = cmdInput.value.length;
+    cmdInput.setSelectionRange(len, len);
+    cmdInput.focus();
+  }
+  function openAuto(selectFirst) {
+    renderAutoComplete();
+    if (selectFirst && acItems.length) { acSel = 0; updateSelUI(); }
+  }
+  autoPanel.addEventListener('click', (ev) => {
+    const el = ev.target.closest('.ac-item');
+    if (!el) return;
+    acSel = parseInt(el.dataset.i, 10);
+    acceptAuto();
+  });
 
   // ---- 启动欢迎 banner + 状态信息（异步汇总；bannerDone 保证状态行先于输入框打印）----
   let bannerDone = Promise.resolve();
@@ -132,7 +253,7 @@
   }
   printBanner();
 
-  // ---- 终端内状态栏（在输入框下方；每轮命令后刷新 + 8s 轮询）----
+  // ---- DOM 状态条（输入框下方固定行；命令后刷新 + 8s 轮询，不随终端滚动）----
   function refreshStatus() {
     Promise.all([
       fetch('/api/health').then((r) => r.json()).catch(() => null),
@@ -149,22 +270,23 @@
       const todo = (t && t.stats) ? (t.stats.todo || 0) + (t.stats.doing || 0) : '-';
       const gs = (g && g.docs) ? (g.docs || 0) + ' 文档 / ' + (g.links || 0) + ' 链接' : '-';
       const hbTxt = hb ? (hb.enabled ? '心跳开' : '心跳关') : '';
-      let auditTxt = '';
+      statusDot.className = ok ? 'ok' : 'bad';
+      statusDot.title = ok ? '服务运行中' : '服务异常';
+      const parts = [
+        ok ? '服务运行中' : '服务异常',
+        '模型 ' + model, 'KB ' + kb, '待审 ' + pend, '任务 ' + todo, '图谱 ' + gs,
+      ];
+      if (hbTxt) parts.push(hbTxt);
+      statusText.textContent = parts.join(' · ');
+      let warn = '';
       if (hb && hb.audit && (hb.audit.orphans || hb.audit.dangling || hb.audit.duplicates || hb.audit.mentions)) {
-        auditTxt = ' ⚠审计' +
+        warn = '⚠ 审计' +
           (hb.audit.orphans ? '孤立' + hb.audit.orphans : '') +
           (hb.audit.dangling ? '悬空' + hb.audit.dangling : '') +
           (hb.audit.duplicates ? '重复' + hb.audit.duplicates : '');
       }
-      statusLine = truncateW(
-        '\x1b[' + (ok ? '32' : '31') + 'm●\x1b[0m ' + (ok ? '服务运行中' : '服务异常') +
-        '\x1b[90m · 模型 ' + model + ' · KB ' + kb + ' · 待审 ' + pend +
-        ' · 任务 ' + todo + ' · 图谱 ' + gs +
-        (hbTxt ? ' · ' + hbTxt : '') +
-        (auditTxt ? '\x1b[33m' + auditTxt + '\x1b[0m' : '') +
-        '\x1b[0m',
-        trueCols() - 1);
-      drawStatusRow();
+      statusWarn.textContent = warn;
+      statusWarn.style.display = warn ? '' : 'none';
     }).catch(() => {});
   }
   refreshStatus();
@@ -186,54 +308,30 @@
     } catch (e) {
       term.writeln('\x1b[33mL1 加载失败: ' + e.message + '\x1b[0m');
     }
-    if (!line) { await bannerDone; showPrompt(); }
+    await bannerDone;
+    cmdInput.focus();
   })();
 
   // 终端确认机制：confirm(msg) 挂起等待 y/n 按键（写操作人审闭环的基础设施）
+  // 焦点从输入框转到终端收 y/n，结束后回输入框
   let confirmCb = null;
   function confirm(msg) {
     return new Promise((resolve) => {
       confirmCb = (ok) => resolve(ok);
       term.writeln('\x1b[33m' + msg + ' \x1b[1m(y/N)\x1b[0m');
+      term.focus();
     });
   }
 
+  // 终端键盘只处理 confirm（y/n）；普通输入走 DOM 输入框（cmdInput）
   term.onData((data) => {
+    if (!confirmCb) return;
     const code = data.charCodeAt(0);
-    if (confirmCb) {
-      const c = data.trim().toLowerCase();
-      const cb = confirmCb;
-      if (c === 'y') { confirmCb = null; term.writeln('\x1b[32m✓ 已确认\x1b[0m'); cb(true); }
-      else if (c === 'n' || data === '\r' || code === 27) { confirmCb = null; term.writeln('\x1b[90m已取消\x1b[0m'); cb(false); }
-      else { term.write('\b \b'); } // 忽略其他键
-      return;
-    }
-    if (data === '\r') {
-      const cmd = line.trim();
-      submitMsg(); // 回车提交：边框移除 + 整行背景色块
-      line = '';
-      if (cmd) {
-        run(cmd)
-          .catch((e) => term.writeln('\x1b[31m' + ((e && e.message) || e) + '\x1b[0m'))
-          .finally(() => { showPrompt(); refreshStatus(); });
-      } else {
-        showPrompt();
-      }
-    } else if (data === '\x7f' || data === '\x08') {
-      // 退格（兼容 \x7f DEL 与 \x08 BS）。整行清绘：Array.from 按字符（代理对安全）切片不劈 emoji，
-      // 重绘后光标落在内容末尾（无多余字符，不跑偏）
-      if (line.length) {
-        const chars = Array.from(line);
-        chars.pop();
-        line = chars.join('');
-        term.write('\x1b[2K\r' + PROMPT + line);
-      }
-    } else if (code >= 32) {
-      // 超长保护：输入框 wrap 会让下方状态行错位，接近行宽时静默忽略新字符
-      if (dispW(visOnly(PROMPT + line + data)) >= trueCols() - 2) return;
-      line += data;
-      term.write(data); // 追加式：光标自然跟随内容
-    }
+    const c = data.trim().toLowerCase();
+    const cb = confirmCb;
+    if (c === 'y') { confirmCb = null; term.writeln('\x1b[32m✓ 已确认\x1b[0m'); cb(true); cmdInput.focus(); }
+    else if (c === 'n' || data === '\r' || code === 27) { confirmCb = null; term.writeln('\x1b[90m已取消\x1b[0m'); cb(false); cmdInput.focus(); }
+    else { term.write('\b \b'); } // 忽略其他键
   });
 
   // 本地日期（YYYY-MM-DD），避免 toISOString 的 UTC 偏移把凌晨算成前一天
@@ -509,15 +607,17 @@
       { role: 'user', content: userMsg },
     ];
 
-    // 3. 经后端代理流式调用 LLM
+    // 3. 经后端代理流式调用 LLM（Ctrl+C 可中断）
     term.writeln('\x1b[90m(回答中...)\x1b[0m');
     let full = '';
     let saveSeen = false;
+    currentAbort = new AbortController();
     try {
       const res = await fetch('/api/llm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages, stream: true }),
+        signal: currentAbort.signal,
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -597,9 +697,15 @@
         }
       }
     } catch (e) {
-      term.writeln('\x1b[31mLLM 调用失败: ' + e.message + '\x1b[0m');
-      term.writeln('\x1b[33m提示: 配置页 http://127.0.0.1:8756/config.html（endpoint/model/api_key）\x1b[0m');
+      if (e && e.name === 'AbortError') {
+        term.writeln('\x1b[33m(回答已中断)\x1b[0m');
+      } else {
+        term.writeln('\x1b[31mLLM 调用失败: ' + e.message + '\x1b[0m');
+        term.writeln('\x1b[33m提示: 配置页 http://127.0.0.1:8756/config.html（endpoint/model/api_key）\x1b[0m');
+      }
       return;
+    } finally {
+      currentAbort = null;
     }
     term.writeln('');
 
@@ -610,7 +716,7 @@
     if (save) {
       try {
         const savedPath = await applySave(save);
-        term.writeln('\x1b[32m✓ 已进入待审: \x1b[0m' + savedPath + '  （/approve 确认生效，/reject 丢弃）');
+        term.writeln('\x1b[33m💾 已进入待审: \x1b[0m' + savedPath + '  （/view pending 图形审核 · /approve 确认 · /reject 丢弃）');
       } catch (e) {
         term.writeln('\x1b[31m写回失败: ' + e.message + '\x1b[0m');
       }
@@ -689,7 +795,7 @@
     const safe = (titleArg.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '') || '网页摘录').slice(0, 30);
     const content = '# ' + titleArg + '\n\n> 来源: ' + url + '\n\n' + r.text + '\n';
     const saved = await applySave({ path: 'notes/' + safe + '.md', mode: 'new', content });
-    term.writeln('\x1b[32m✓ 已进入待审: \x1b[0m' + saved + '  （/approve 确认写入）');
+    term.writeln('\x1b[33m💾 已进入待审: \x1b[0m' + saved + '  （/view pending 图形审核 · /approve 确认 · /reject 丢弃）');
   }
 
   // /task —— Phase 3-B 任务引擎：文字看板 + 流转/依赖/日志（HTML 看板: /task board）
@@ -873,7 +979,7 @@
     const safe = (titleArg.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '') || '网页摘录').slice(0, 30);
     const content = '# ' + titleArg + '\n\n> 来源: ' + url + '\n\n' + r.text + '\n';
     const saved = await applySave({ path: 'notes/' + safe + '.md', mode: 'new', content });
-    term.writeln('\x1b[32m✓ 已进入待审: \x1b[0m' + saved + '  （/approve 确认写入）');
+    term.writeln('\x1b[33m💾 已进入待审: \x1b[0m' + saved + '  （/view pending 图形审核 · /approve 确认 · /reject 丢弃）');
   }
 
   // 写回落盘（Phase 3 前置：待审机制）
@@ -1015,7 +1121,7 @@
     term.writeln(renderMdFile(noteText));
     const safe = (topic.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '') || '整理笔记').slice(0, 30);
     const saved = await applySave({ path: 'notes/' + safe + '.md', mode: 'new', content: noteText });
-    term.writeln('\x1b[32m✓ 笔记已进入待审: \x1b[0m' + saved + '  （/approve 确认写入）');
+    term.writeln('\x1b[32m✓ 笔记已进入待审: \x1b[0m' + saved + '  （/view pending 图形审核 · /approve 确认 · /reject 丢弃）');
   }
 
   // ---------- 知识图谱命令 ----------
@@ -1229,11 +1335,12 @@
       closeView();
       return;
     }
-    if (arg === 'graph' || arg === 'board') {
+    if (arg === 'graph' || arg === 'board' || arg === 'pending' || arg === 'audit') {
       const name = arg + '.html';
       const r = await fetch('/views/' + name);
       if (!r.ok) throw new Error('内置视图加载失败: HTTP ' + r.status);
-      openView(arg === 'graph' ? '知识库结构导航' : '任务看板', await r.text());
+      const titles = { graph: '知识库结构导航', board: '任务看板', pending: '待审审核', audit: '知识库健康审计' };
+      openView(titles[arg], await r.text());
       return;
     }
     const r = await api('/api/file?path=' + encodeURIComponent(arg));
@@ -1428,7 +1535,7 @@
       term.writeln('\x1b[1;32m──── 盲区分析（待审）────\x1b[0m');
       term.writeln(renderMdFile(noteText));
       const saved = await applySave({ path: 'notes/知识盲区分析-' + Date.now() + '.md', mode: 'new', content: noteText });
-      term.writeln('\x1b[32m✓ 已进入待审: \x1b[0m' + saved + '  （/approve 确认写入）');
+      term.writeln('\x1b[33m💾 已进入待审: \x1b[0m' + saved + '  （/view pending 图形审核 · /approve 确认 · /reject 丢弃）');
       return;
     }
     term.writeln('\x1b[90m(补全: LLM 生成「' + topic + '」新文档 → 待审)\x1b[0m');
@@ -1459,7 +1566,7 @@
     term.writeln(renderMdFile(noteText));
     const safe = (topic.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '') || '新文档').slice(0, 30);
     const saved = await applySave({ path: 'notes/' + safe + '.md', mode: 'new', content: noteText });
-    term.writeln('\x1b[32m✓ 已进入待审: \x1b[0m' + saved + '  （/approve 确认写入）');
+    term.writeln('\x1b[33m💾 已进入待审: \x1b[0m' + saved + '  （/view pending 图形审核 · /approve 确认 · /reject 丢弃）');
   }
 
   // ---------- 管理命令 ----------

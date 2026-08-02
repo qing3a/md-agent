@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>待审审核</title>
+<style>
+  :root { --bg:#1e1e2e; --panel:#26263a; --panel2:#2f2f46; --line:#3a3a55;
+          --fg:#cdd6f4; --dim:#7f849c; --green:#a6e3a1; --red:#f38ba8;
+          --yellow:#f9e2af; --blue:#89b4fa; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg);
+    font: 13px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+    border-bottom: 1px solid var(--line); }
+  h1 { font-size: 15px; color: var(--yellow); }
+  .sp { flex: 1; }
+  button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 7px; padding: 5px 14px; font-size: 12px; cursor: pointer; }
+  button:hover { border-color: var(--blue); color: var(--blue); }
+  button.primary { background: var(--green); color: #111; border-color: var(--green); font-weight: 600; }
+  button.danger { background: var(--red); color: #111; border-color: var(--red); font-weight: 600; }
+  button:disabled { opacity: 0.4; cursor: default; }
+
+  #main { flex: 1; display: flex; min-height: 0; }
+  .col { overflow: auto; padding: 10px; }
+  #list-col { width: 260px; border-right: 1px solid var(--line); background: var(--panel); }
+  #ctx-col { flex: 1; border-right: 1px solid var(--line); }
+  #edit-col { width: 380px; display: flex; flex-direction: column; }
+
+  .item { padding: 7px 10px; border-radius: 7px; cursor: pointer; margin-bottom: 4px;
+    display: flex; gap: 8px; align-items: baseline; }
+  .item:hover { background: var(--panel2); }
+  .item.sel { background: var(--panel2); border: 1px solid var(--blue); }
+  .item input { width: 13px; height: 13px; flex: none; margin-top: 3px; }
+  .item .p { word-break: break-all; font-size: 12px; }
+  .item .k { font-size: 10px; color: var(--dim); flex: none; }
+  .item .k.note { color: var(--yellow); }
+  .item .k.mem { color: var(--blue); }
+
+  h2 { font-size: 12px; color: var(--dim); margin-bottom: 8px; letter-spacing: 1px; }
+  pre { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px;
+    white-space: pre-wrap; word-break: break-all; line-height: 1.55; }
+  pre .add { background: rgba(166, 227, 161, 0.12); color: var(--green); display: block; }
+  pre .ctx { color: var(--fg); display: block; }
+  #empty { color: var(--dim); padding: 30px; text-align: center; }
+  textarea { flex: 1; width: 100%; background: #11111b; color: var(--fg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px;
+    font: 12px/1.6 Consolas, "Cascadia Mono", monospace; resize: none; outline: none; }
+  textarea:focus { border-color: var(--blue); }
+  #bar { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line);
+    align-items: center; background: var(--panel); }
+  #msg { font-size: 12px; color: var(--dim); }
+  #msg.ok { color: var(--green); } #msg.err { color: var(--red); }
+</style>
+</head>
+<body>
+<header>
+  <h1>📥 待审审核</h1>
+  <span id="count" style="color:var(--dim);font-size:12px"></span>
+  <span class="sp"></span>
+  <button onclick="refresh()">刷新</button>
+</header>
+<div id="main">
+  <div class="col" id="list-col"><h2>待审清单（点击查看 / 勾选批量）</h2><div id="list"></div></div>
+  <div class="col" id="ctx-col"><h2>目标文档上下文（绿色 = 将写入）</h2><div id="ctx"><div id="empty">选择左侧待审项查看写入位置</div></div></div>
+  <div class="col" id="edit-col">
+    <h2>待审内容（可编辑后批准）</h2>
+    <textarea id="edit" placeholder="选择待审项…" disabled></textarea>
+  </div>
+</div>
+<div id="bar">
+  <button class="primary" id="btnApprove" onclick="act('approve')" disabled>✓ 批准</button>
+  <button class="danger" id="btnReject" onclick="act('reject')" disabled>✕ 拒绝</button>
+  <button id="btnEditApprove" onclick="act('approve', true)" disabled>✎ 按编辑内容批准</button>
+  <span id="msg"></span>
+</div>
+<script>
+  var state = { items: [], sel: null, preview: null };
+
+  function $(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]);
+    });
+  }
+  function kindOf(p) {
+    if (p.indexOf('MEMORY.') >= 0) return ['记忆条目', 'mem'];
+    return ['新笔记', 'note'];
+  }
+
+  async function refresh() {
+    var r = await hostApi('/api/kb/pending');
+    state.items = r.pending || [];
+    $('count').textContent = '共 ' + state.items.length + ' 条';
+    var list = $('list');
+    list.innerHTML = '';
+    if (!state.items.length) {
+      list.innerHTML = '<div style="color:var(--dim);padding:10px">待审区为空 ✓</div>';
+      $('btnApprove').disabled = $('btnReject').disabled = $('btnEditApprove').disabled = true;
+      $('edit').disabled = true;
+      return;
+    }
+    state.items.forEach(function (it) {
+      var row = document.createElement('div');
+      row.className = 'item';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.addEventListener('click', function (e) { e.stopPropagation(); });
+      var k = kindOf(it.path);
+      var p = document.createElement('span');
+      p.className = 'p';
+      p.textContent = it.path.replace(/^pending\//, '');
+      var kk = document.createElement('span');
+      kk.className = 'k ' + k[1];
+      kk.textContent = k[0];
+      row.appendChild(cb); row.appendChild(kk); row.appendChild(p);
+      row.addEventListener('click', function () { selectItem(it.path); });
+      list.appendChild(row);
+    });
+    if (state.sel) selectItem(state.sel);
+  }
+
+  async function selectItem(rel) {
+    state.sel = rel;
+    var rows = document.querySelectorAll('#list .item');
+    rows.forEach(function (r) { r.classList.remove('sel'); });
+    var list = $('list');
+    var items = list.querySelectorAll('.item');
+    items.forEach(function (it) {
+      var p = it.querySelector('.p');
+      if (p && p.textContent === rel.replace(/^pending\//, '')) it.classList.add('sel');
+    });
+    $('btnApprove').disabled = $('btnReject').disabled = $('btnEditApprove').disabled = false;
+    var edit = $('edit');
+    edit.disabled = false;
+    // 预览（目标/类型/将写入内容）
+    var pr = await hostApi('/api/kb/pending/preview?path=' + encodeURIComponent(rel));
+    state.preview = pr;
+    edit.value = pr.added.replace(/^\n+/, '');
+    // 目标文档上下文
+    var ctxBox = $('ctx');
+    ctxBox.innerHTML = '<h2>目标: ' + esc(pr.target) + '（' + (pr.kind === 'memory' ? '记忆合并' : '新笔记') + '）</h2>';
+    var pre = document.createElement('pre');
+    if (pr.kind === 'memory' && pr.target) {
+      var f = await hostApi('/api/file?path=' + encodeURIComponent(pr.target));
+      var cur = (f && f.content) || '';
+      // 目标现有内容逐行 + 新增行绿色
+      var lines = cur.replace(/\n+$/, '').split('\n');
+      lines.forEach(function (l) {
+        var d = document.createElement('span');
+        d.className = 'ctx';
+        d.textContent = l || ' ';
+        pre.appendChild(d);
+      });
+      pr.added.split('\n').forEach(function (l) {
+        if (!l.trim()) return;
+        var d = document.createElement('span');
+        d.className = 'add';
+        d.textContent = '+' + l;
+        pre.appendChild(d);
+      });
+    } else {
+      // 新笔记：直接展示将写入的全文（绿色）
+      pr.added.split('\n').forEach(function (l) {
+        var d = document.createElement('span');
+        d.className = 'add';
+        d.textContent = (l.trim() ? '+ ' : '') + l;
+        pre.appendChild(d);
+      });
+    }
+    ctxBox.appendChild(pre);
+  }
+
+  async function act(kind, edited) {
+    var sel = state.sel;
+    if (!sel) return;
+    // 批量：收集勾选项（若勾选了则批量，否则单条）
+    var checks = document.querySelectorAll('#list .item input:checked');
+    var paths = [];
+    if (checks.length) {
+      var list = $('list');
+      var items = list.querySelectorAll('.item');
+      items.forEach(function (it) {
+        var cb = it.querySelector('input');
+        if (cb.checked) paths.push('pending/' + it.querySelector('.p').textContent);
+      });
+    } else {
+      paths = [sel];
+    }
+    $('msg').className = '';
+    $('msg').textContent = '处理中…';
+    var ok = 0, errs = [];
+    for (var i = 0; i < paths.length; i++) {
+      try {
+        if (kind === 'approve') {
+          var body = { path: paths[i] };
+          if (edited) body.content = $('edit').value;
+          await hostApi('/api/kb/pending/approve', { method: 'POST', body: body });
+        } else {
+          await hostApi('/api/kb/pending/reject', { method: 'POST', body: { path: paths[i] } });
+        }
+        ok++;
+      } catch (e) { errs.push(paths[i] + ': ' + e.message); }
+    }
+    var m = $('msg');
+    m.className = errs.length ? 'err' : 'ok';
+    m.textContent = '✓ 已' + (kind === 'approve' ? '批准' : '拒绝') + ' ' + ok + ' 条' +
+      (errs.length ? '；失败: ' + errs.join('; ') : '');
+    state.sel = null;
+    $('edit').value = '';
+    $('edit').disabled = true;
+    $('btnApprove').disabled = $('btnReject').disabled = $('btnEditApprove').disabled = true;
+    await refresh();
+  }
+
+  refresh().catch(function (e) {
+    $('msg').className = 'err';
+    $('msg').textContent = '加载失败: ' + e.message;
+  });
+</script>
+</body>
+</html>

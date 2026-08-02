@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>知识库健康审计</title>
+<style>
+  :root { --bg:#1e1e2e; --panel:#26263a; --panel2:#2f2f46; --line:#3a3a55;
+          --fg:#cdd6f4; --dim:#7f849c; --green:#a6e3a1; --red:#f38ba8;
+          --yellow:#f9e2af; --blue:#89b4fa; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg);
+    font: 13px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+    border-bottom: 1px solid var(--line); }
+  h1 { font-size: 15px; color: var(--yellow); }
+  .sp { flex: 1; }
+  button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 7px; padding: 4px 12px; font-size: 12px; cursor: pointer; }
+  button:hover { border-color: var(--blue); }
+  button.ok { background: var(--green); color: #111; border-color: var(--green); font-weight: 600; }
+  #main { flex: 1; overflow: auto; padding: 12px 16px; }
+  #stats { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .chip { background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+    padding: 3px 12px; font-size: 12px; color: var(--dim); }
+  .chip b { color: var(--fg); }
+  .chip.warn b { color: var(--yellow); } .chip.bad b { color: var(--red); }
+  .sec { margin-bottom: 14px; }
+  .sec h2 { font-size: 13px; margin-bottom: 6px; }
+  .sec h2 .n { color: var(--dim); font-weight: normal; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 12px; margin-bottom: 6px; display: flex; gap: 10px; align-items: center; }
+  .card .txt { flex: 1; min-width: 0; word-break: break-all; font-size: 12px; }
+  .card .txt .src { color: var(--blue); }
+  .card.done { opacity: 0.45; }
+  .card.done .txt::after { content: ' ✓ 已应用'; color: var(--green); }
+  .empty { color: var(--dim); font-size: 12px; padding: 4px 2px; }
+  #msg { font-size: 12px; color: var(--dim); }
+  #msg.ok { color: var(--green); } #msg.err { color: var(--red); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔍 知识库健康审计</h1>
+  <span class="sp"></span>
+  <button onclick="refresh()">重新审计</button>
+</header>
+<div id="main">
+  <div id="stats"></div>
+  <div id="content">加载中…</div>
+</div>
+<script>
+  function $(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]);
+    });
+  }
+  function card(html) {
+    var d = document.createElement('div');
+    d.className = 'card';
+    d.innerHTML = html;
+    return d;
+  }
+
+  async function refresh() {
+    var r = await hostApi('/api/audit');
+    var stats = $('stats');
+    stats.innerHTML =
+      '<span class="chip">文档 <b>' + r.docs + '</b></span>' +
+      '<span class="chip">链接 <b>' + r.links + '</b></span>' +
+      '<span class="chip' + (r.dangling.length ? ' warn' : '') + '">悬空 <b>' + r.dangling.length + '</b></span>' +
+      '<span class="chip' + (r.orphans.length ? ' bad' : '') + '">孤立 <b>' + r.orphans.length + '</b></span>' +
+      '<span class="chip' + (r.no_out.length ? ' warn' : '') + '">无出链 <b>' + r.no_out.length + '</b></span>' +
+      '<span class="chip' + (r.duplicates.length ? ' warn' : '') + '">重复标题 <b>' + r.duplicates.length + '</b></span>' +
+      '<span class="chip' + (r.mentions.length ? ' warn' : '') + '">补链建议 <b>' + r.mentions.length + '</b></span>';
+    var c = $('content');
+    c.innerHTML = '';
+
+    // 补链接建议（可一键应用）
+    var s1 = document.createElement('div');
+    s1.className = 'sec';
+    s1.innerHTML = '<h2>💡 建议补链接 <span class="n">(' + r.mentions.length + ') — 正文提到但未链接</span></h2>';
+    if (!r.mentions.length) {
+      var e = document.createElement('div'); e.className = 'empty'; e.textContent = '无建议 ✓';
+      s1.appendChild(e);
+    }
+    r.mentions.forEach(function (m) {
+      var d = card(
+        '<span class="txt"><span class="src">' + esc(m.src) + '</span> → [[<b>' + esc(m.dst) + '</b>]]</span>' +
+        '<button class="ok" onclick="applyLink(this, \'' + esc(m.src).replace(/'/g, "\\'") + '\', \'' + esc(m.dst_path || m.dst).replace(/'/g, "\\'") + '\')">应用</button>'
+      );
+      s1.appendChild(d);
+    });
+    c.appendChild(s1);
+
+    // 悬空链接
+    var s2 = document.createElement('div');
+    s2.className = 'sec';
+    s2.innerHTML = '<h2>⚠ 悬空链接 <span class="n">(' + r.dangling.length + ') — [[链接]] 指向不存在的文档</span></h2>';
+    if (!r.dangling.length) {
+      var e2 = document.createElement('div'); e2.className = 'empty'; e2.textContent = '无 ✓';
+      s2.appendChild(e2);
+    }
+    r.dangling.forEach(function (d) {
+      s2.appendChild(card('<span class="txt">' + esc(d[0]) + ' → <b style="color:var(--yellow)">[[' + esc(d[1]) + ']]</b>（需在源文档中修正或创建目标）</span>'));
+    });
+    c.appendChild(s2);
+
+    // 孤立文档
+    var s3 = document.createElement('div');
+    s3.className = 'sec';
+    s3.innerHTML = '<h2>🚫 孤立文档 <span class="n">(' + r.orphans.length + ') — 无入链也无出链</span></h2>';
+    if (!r.orphans.length) {
+      var e3 = document.createElement('div'); e3.className = 'empty'; e3.textContent = '无 ✓';
+      s3.appendChild(e3);
+    }
+    r.orphans.forEach(function (p) {
+      s3.appendChild(card('<span class="txt" style="color:var(--red)">' + esc(p) + '</span>'));
+    });
+    c.appendChild(s3);
+
+    // 无出链
+    var s4 = document.createElement('div');
+    s4.className = 'sec';
+    s4.innerHTML = '<h2>📄 无出链 <span class="n">(' + r.no_out.length + ')</span></h2>';
+    if (!r.no_out.length) {
+      var e4 = document.createElement('div'); e4.className = 'empty'; e4.textContent = '无 ✓';
+      s4.appendChild(e4);
+    }
+    r.no_out.forEach(function (p) {
+      s4.appendChild(card('<span class="txt">' + esc(p) + '</span>'));
+    });
+    c.appendChild(s4);
+
+    // 重复标题
+    var s5 = document.createElement('div');
+    s5.className = 'sec';
+    s5.innerHTML = '<h2>🔁 重复标题 <span class="n">(' + r.duplicates.length + ')</span></h2>';
+    if (!r.duplicates.length) {
+      var e5 = document.createElement('div'); e5.className = 'empty'; e5.textContent = '无 ✓';
+      s5.appendChild(e5);
+    }
+    r.duplicates.forEach(function (d) {
+      s5.appendChild(card('<span class="txt"><b>' + esc(d[0]) + '</b> ×' + d[1] + '<br><span style="color:var(--dim)">' + esc(d[2] || '') + '</span></span>'));
+    });
+    c.appendChild(s5);
+  }
+
+  async function applyLink(btn, src, dst) {
+    btn.disabled = true;
+    try {
+      await hostApi('/api/link', { method: 'POST', body: { src: src, dst: dst } });
+      var card = btn.closest('.card');
+      card.classList.add('done');
+      btn.remove();
+    } catch (e) {
+      btn.textContent = '失败';
+      btn.disabled = false;
+      alert('应用失败: ' + e.message);
+    }
+  }
+
+  refresh().catch(function (e) {
+    $('content').innerHTML = '<div style="color:var(--red)">加载失败: ' + e.message + '</div>';
+  });
+</script>
+</body>
+</html>

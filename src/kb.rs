@@ -277,7 +277,7 @@ pub fn list_pending(root: &Path) -> Vec<PendingItem> {
 
 /// 批准待审：新笔记移动到目标路径；记忆条目合并进 MEMORY.md。
 /// 返回 (落地路径, 备注)。成功后由调用方重建 INDEX 与图谱。
-pub fn approve_pending(root: &Path, rel: &str) -> Result<(String, Option<String>), String> {
+pub fn approve_pending(root: &Path, rel: &str, edited: Option<&str>) -> Result<(String, Option<String>), String> {
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     let pending_dir = root.join("pending");
     let src = root.join(rel);
@@ -294,18 +294,26 @@ pub fn approve_pending(root: &Path, rel: &str) -> Result<(String, Option<String>
         .unwrap_or(rel)
         .to_string();
     if stripped.starts_with("MEMORY.") {
-        // 记忆条目 → 合并进 MEMORY.md
-        let content = fs::read_to_string(&src_canon).map_err(|e| e.to_string())?;
+        // 记忆条目 → 合并进 MEMORY.md（edited 覆盖原内容，支持「编辑后批准」）
+        let content = match edited {
+            Some(c) => c.to_string(),
+            None => fs::read_to_string(&src_canon).map_err(|e| e.to_string())?,
+        };
         append_memory_entry(&root, &content)?;
         fs::remove_file(&src_canon).map_err(|e| e.to_string())?;
         Ok(("MEMORY.md".to_string(), Some("记忆条目已按当日小节合并".to_string())))
     } else {
-        // 新笔记 → 移动到目标路径（保留 pending/ 后的相对结构）
+        // 新笔记 → 移动到目标路径（保留 pending/ 后的相对结构）；edited 覆盖内容
         let dst = root.join(&stripped);
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        if let Some(edited) = edited {
+            fs::write(&dst, edited).map_err(|e| format!("写入失败: {e}"))?;
+            fs::remove_file(&src_canon).map_err(|e| e.to_string())?;
+        } else {
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            fs::rename(&src_canon, &dst).map_err(|e| format!("移动失败: {e}"))?;
         }
-        fs::rename(&src_canon, &dst).map_err(|e| format!("移动失败: {e}"))?;
         Ok((stripped, None))
     }
 }

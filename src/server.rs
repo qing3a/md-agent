@@ -442,6 +442,8 @@ async fn kb_pending_preview(State(st): State<AppState>, Query(p): Query<GraphPat
 #[derive(Deserialize)]
 struct PendingBody {
     path: String,
+    #[serde(default)]
+    content: Option<String>,
 }
 
 async fn kb_pending_approve(State(st): State<AppState>, Json(body): Json<PendingBody>) -> Response {
@@ -457,7 +459,7 @@ async fn kb_pending_approve(State(st): State<AppState>, Json(body): Json<Pending
     let mut ok: Vec<serde_json::Value> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     for p in paths {
-        match crate::kb::approve_pending(&st.kb_root, &p) {
+        match crate::kb::approve_pending(&st.kb_root, &p, body.content.as_deref()) {
             Ok((target, note)) => ok.push(json!({ "path": p, "target": target, "note": note })),
             Err(e) => errors.push(format!("{p}: {e}")),
         }
