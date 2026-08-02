@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="description" content="md-agent：本地双层 MD 知识库 Agent —— 以 Markdown 为原生知识载体，无向量库、纯文本检索、本地常驻、网页终端。">
-    <title>md-agent · 本地双层 MD 知识库 Agent</title>
+    <meta name="description" content="md-agent：本地 Agent Harness —— 以 Markdown 为持久记忆载体，无向量库、纯文本检索、托盘常驻、网页终端；记忆 + 工具链 + 人审闭环。">
+    <title>md-agent · 本地 Agent Harness：MD 持久记忆 + 工具链 + 人审闭环</title>
     <style>
         :root {
             --bg: #12121a;
@@ -192,7 +192,7 @@
     </nav>
 
     <header class="hero">
-        <span class="eyebrow">本地双层 MD 知识库 Agent</span>
+        <span class="eyebrow">本地 Agent Harness · MD 持久记忆</span>
         <h1>md-<span>agent</span></h1>
         <p class="tagline">知识人写人读，AI 只负责整理、关联、推演、生成。</p>
         <p class="tagline-sub">以 Markdown 为原生知识载体 · 无向量库 · 纯文本检索 · 本地常驻托盘 · 网页终端交互</p>
@@ -230,13 +230,13 @@
             <div class="sec-head">
                 <span class="sec-index">FEATURES</span>
                 <h2>核心特性</h2>
-                <p>Phase 1（托盘+检索+Agent）+ Phase 2（知识图谱）已完成</p>
+                <p>Phase 1–3 已完成（托盘 + 检索 + Agent + 图谱 + 自组织）</p>
             </div>
             <div class="feat-grid">
                 <div class="feat">
-                    <div class="icon">📚</div>
-                    <h3>双层知识库</h3>
-                    <p>L1 规范/记忆/索引层（CLAUDE.md 模式，启动注入）+ L2 内容层（按需检索）。<code>INDEX.md</code> 自动生成。</p>
+                    <div class="icon">🧠</div>
+                    <h3>MD 持久记忆</h3>
+                    <p>记忆子系统：L1 规范/记忆/索引层（CLAUDE.md 模式，启动注入）+ L2 内容层（按需检索）；写回一律走待审，人工审核固化。<code>INDEX.md</code> 自动生成。</p>
                 </div>
                 <div class="feat">
                     <div class="icon">🔍</div>
@@ -292,22 +292,22 @@
                 <div class="layer">
                     <div class="num">02</div>
                     <div>
-                        <h3>知识内核层</h3>
-                        <p>双层 MD 布局 / frontmatter 解析 / INDEX 自动生成 / 路径安全</p>
+                        <h3>记忆内核层</h3>
+                        <p>双层 MD 记忆布局（L1 规范/记忆/索引 + L2 内容）/ frontmatter 解析 / INDEX 自动生成 / 待审机制</p>
                     </div>
                 </div>
                 <div class="layer">
                     <div class="num">03</div>
                     <div>
-                        <h3>检索引擎层</h3>
-                        <p>ignore 遍历 + grep crate（内嵌 ripgrep），行级小节切分</p>
+                        <h3>工具链层</h3>
+                        <p>检索（ripgrep）/ 图谱（SQLite 双链）/ 网页（/fetch /page act）/ 任务（tasks.db）——宿主 API 统一鉴权</p>
                     </div>
                 </div>
                 <div class="layer">
                     <div class="num">04</div>
                     <div>
                         <h3>交互层</h3>
-                        <p>xterm.js 网页终端（Agent 回路 + 管理命令 + 配置页）</p>
+                        <p>xterm.js 网页终端（Agent 回路 + 管理命令 + 配置页）+ /view iframe 面板渲染层</p>
                     </div>
                 </div>
             </div>
