@@ -243,7 +243,7 @@
     ['/reject', '拒绝待审'], ['/view', '面板渲染层'], ['/audit', '知识库健康审计'],
     ['/conflicts', '冲突检查'], ['/diff', '行级对比'], ['/link', '补链接'],
     ['/link-all', '批量补链接'], ['/suggest', '补全缺失文档'], ['/fetch', '抓取网页'],
-    ['/page', '动态网页读取'], ['/task', '任务引擎'], ['/clear', '清空多轮记忆'],
+    ['/page', '动态网页读取'], ['/task', '任务引擎'], ['/market', '应用市场'], ['/clear', '清空多轮记忆'],
     ['/config', '查看配置'], ['/heartbeat', '心跳自动同步'], ['/health', '健康检查'],
     ['clear', '清屏'],
   ];
@@ -548,6 +548,7 @@
       case '/approve': await pendingAct('approve', rest[0]); break;
       case '/reject': await pendingAct('reject', rest[0]); break;
       case '/view': await viewCmd(rest[0]); break;
+      case '/market': await marketCmd(rest); break;
       case '/side': toggleSide(); break;
       case '/consolidate': await consolidateCmd(rest[0]); break;
       case '/skills': await skillsCmd(); break;
@@ -1752,6 +1753,68 @@
     }
     const r = await api('/api/file?path=' + encodeURIComponent(arg));
     openView(r.path, r.content);
+  }
+
+  // ---------- 应用市场（阶段 2）：/market list | import <路径> | uninstall <id> | update <id> <路径> ----------
+  async function marketCmd(args) {
+    const sub = (args && args[0]) || 'list';
+    if (sub === 'list') {
+      const a = await api('/api/apps').catch(() => null);
+      term.writeln('已安装应用（/view <id> 打开）：');
+      for (const app of (a && a.apps) || []) {
+        term.writeln('  \x1b[36m' + app.id + '\x1b[0m v' + app.version + ' · 权限 [' + (app.permissions.join(', ') || '无') + ']  ' + app.name);
+      }
+      if (!a || !a.apps || !a.apps.length) term.writeln('  (无 —— /market import <本地应用目录路径> 安装)');
+      return;
+    }
+    if (sub === 'import') {
+      const path = args.slice(1).join(' ');
+      if (!path) { term.writeln('\x1b[33m用法：/market import <本地应用目录路径>\x1b[0m'); return; }
+      // 1) dry_run 校验并展示 manifest → 2) 人审确认 → 3) 落盘
+      const probe = await api('/api/market/install', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'local', path, dry_run: true }),
+      }).catch((e) => { term.writeln('\x1b[31m导入校验失败: ' + e.message + '\x1b[0m'); return null; });
+      if (!probe) return;
+      const m = probe.app;
+      term.writeln('应用: \x1b[36m' + m.name + '\x1b[0m v' + m.version + ' (id: ' + m.id + ')');
+      term.writeln('权限: [' + (m.permissions.join(', ') || '无') + ']');
+      if (m.description) term.writeln('描述: ' + m.description);
+      const ok = await confirm('确认安装该应用？');
+      if (!ok) { term.writeln('已取消'); return; }
+      const r = await api('/api/market/install', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'local', path }),
+      }).catch((e) => { term.writeln('\x1b[31m安装失败: ' + e.message + '\x1b[0m'); return null; });
+      if (r) term.writeln('\x1b[32m✓ 已安装: \x1b[0m' + r.app.id + '（/view ' + r.app.id + ' 打开）');
+      return;
+    }
+    if (sub === 'uninstall') {
+      const id = (args[1] || '').trim();
+      if (!id) { term.writeln('\x1b[33m用法：/market uninstall <id>\x1b[0m'); return; }
+      const ok = await confirm('确认卸载 ' + id + '？');
+      if (!ok) { term.writeln('已取消'); return; }
+      const r = await api('/api/market/uninstall', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      }).catch((e) => { term.writeln('\x1b[31m卸载失败: ' + e.message + '\x1b[0m'); return null; });
+      if (r) term.writeln('\x1b[32m✓ 已卸载: \x1b[0m' + id);
+      return;
+    }
+    if (sub === 'update') {
+      const id = (args[1] || '').trim();
+      const path = args.slice(2).join(' ');
+      if (!id || !path) { term.writeln('\x1b[33m用法：/market update <id> <本地新版本目录路径>\x1b[0m'); return; }
+      const ok = await confirm('确认更新 ' + id + '？');
+      if (!ok) { term.writeln('已取消'); return; }
+      const r = await api('/api/market/update', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, path }),
+      }).catch((e) => { term.writeln('\x1b[31m更新失败: ' + e.message + '\x1b[0m'); return null; });
+      if (r) term.writeln('\x1b[32m✓ 已更新: \x1b[0m' + r.app.id + ' v' + r.app.version);
+      return;
+    }
+    term.writeln('/market 子命令：\n  list                    已安装应用\n  import <路径>            从本地目录安装（人审确认）\n  uninstall <id>          卸载\n  update <id> <路径>       更新（本地新版本目录）');
   }
 
   // ---------- 速览侧边栏（批次三：任务/待审/图谱/审计速览；Ctrl+K | /side | 快捷按钮唤出，非常驻抽屉） ----------

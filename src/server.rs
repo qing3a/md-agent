@@ -80,6 +80,9 @@ pub async fn serve(
         .route("/api/context/log", post(context_log))
         .route("/api/context/stats", get(context_stats))
         .route("/api/apps", get(apps_list))
+        .route("/api/market/install", post(market_install))
+        .route("/api/market/uninstall", post(market_uninstall))
+        .route("/api/market/update", post(market_update))
         // 应用市场（阶段 0）：kb/apps/ 静态挂载到 /apps/*——沙箱 iframe 加载 app 的 HTML+assets（脚本子资源不受 CORS 限制）；/api/* 仍只走桥（沙箱 opaque origin 直连被拦，权限白名单在桥层）
         .nest_service("/apps", tower_http::services::ServeDir::new(state.kb_root.join("apps")))
         .fallback_service(tower_http::services::ServeDir::new(state.web_dir.clone()))
@@ -894,6 +897,53 @@ async fn tasks_delete(State(s): State<AppState>, AxumPath(id): AxumPath<i64>) ->
 // ---------- 应用市场（阶段 1：已安装 app 列表，manifest 在 kb/apps/<id>/app.json） ----------
 async fn apps_list(State(s): State<AppState>) -> Response {
     Json(json!({ "apps": crate::kb::list_apps(&s.kb_root) })).into_response()
+}
+
+// ---------- 应用市场（阶段 2：安装/卸载/更新，本地路径导入通道） ----------
+#[derive(Deserialize)]
+struct MarketInstallBody {
+    source: Option<String>,
+    path: Option<String>,
+    id: Option<String>,
+    /// dry_run=true 只校验并返回 manifest（前端人审确认用），不落盘
+    dry_run: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct MarketUninstallBody {
+    id: String,
+}
+
+async fn market_install(State(s): State<AppState>, Json(b): Json<MarketInstallBody>) -> Response {
+    let path = b.path.unwrap_or_default();
+    if b.dry_run.unwrap_or(false) {
+        let src = std::path::PathBuf::from(&path);
+        match crate::market::read_manifest(&src) {
+            Ok(m) => Json(json!({ "ok": true, "dry_run": true, "app": m })).into_response(),
+            Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+        }
+    } else {
+        match crate::market::install_local(&s.kb_root, &path) {
+            Ok(m) => (StatusCode::CREATED, Json(json!({ "ok": true, "app": m }))).into_response(),
+            Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+        }
+    }
+}
+
+async fn market_uninstall(State(s): State<AppState>, Json(b): Json<MarketUninstallBody>) -> Response {
+    match crate::market::uninstall(&s.kb_root, &b.id) {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+async fn market_update(State(s): State<AppState>, Json(b): Json<MarketInstallBody>) -> Response {
+    let id = b.id.unwrap_or_default();
+    let path = b.path.unwrap_or_default();
+    match crate::market::update_local(&s.kb_root, &id, &path) {
+        Ok(m) => Json(json!({ "ok": true, "app": m })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
 }
 
 // ---------- Context Engineering 记账（CE 第 1 步：记账先行，零侵入） ----------

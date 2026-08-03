@@ -10,6 +10,7 @@ mod heartbeat;
 mod graph;
 mod kb;
 mod llm;
+mod market;
 mod search;
 mod server;
 mod page;
