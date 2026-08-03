@@ -1690,6 +1690,11 @@
     const msg = ev.data;
     if (!msg) return;
     if (msg.type === 'escape') { closeView(tab.id); return; }
+    if (msg.type === 'cmd') {
+      // 面板 → 宿主命令（应用市场「运行」等）；仅信任的内置面板（非 app 视图）可发
+      if (!tab.appId && msg.cmd) run(msg.cmd);
+      return;
+    }
     if (msg.type === 'view-error') {
       // 视图脚本错误/未处理拒绝：首次写终端 + tab 标红（让沙箱内崩溃可见）
       if (!tab.err) {
@@ -1735,11 +1740,11 @@
       closeView();
       return;
     }
-    if (arg === 'graph' || arg === 'board' || arg === 'pending' || arg === 'audit') {
+    if (arg === 'graph' || arg === 'board' || arg === 'pending' || arg === 'audit' || arg === 'market') {
       const name = arg + '.html';
       const r = await fetch('/views/' + name);
       if (!r.ok) throw new Error('内置视图加载失败: HTTP ' + r.status);
-      const titles = { graph: '知识库结构导航', board: '任务看板', pending: '待审审核', audit: '知识库健康审计' };
+      const titles = { graph: '知识库结构导航', board: '任务看板', pending: '待审审核', audit: '知识库健康审计', market: '应用市场' };
       openView(titles[arg], await r.text());
       return;
     }
@@ -1754,6 +1759,12 @@
     const r = await api('/api/file?path=' + encodeURIComponent(arg));
     openView(r.path, r.content);
   }
+
+  // 应用市场（阶段 3）：URL ?view=<id> 自动打开面板/应用（托盘「应用市场/已安装应用」入口用）
+  (async function autoView() {
+    const v = new URLSearchParams(location.search).get('view');
+    if (v) { try { await viewCmd(v); } catch (e) { term.writeln('\x1b[31m自动打开失败: ' + e.message + '\x1b[0m'); } }
+  })();
 
   // ---------- 应用市场（阶段 2）：/market list | import <路径> | uninstall <id> | update <id> <路径> ----------
   async function marketCmd(args) {

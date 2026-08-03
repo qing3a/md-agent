@@ -17,7 +17,7 @@ mod page;
 mod task;
 
 use std::path::{Path, PathBuf};
-use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use winit::application::ApplicationHandler;
 use winit::event::StartCause;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -138,16 +138,23 @@ enum UserEvent {
     // 托盘图标事件暂不消费（后续可做单击打开终端）
     Tray,
     Menu(tray_icon::menu::MenuEvent),
+    /// 30s 定时：重建动态托盘菜单（应用安装/卸载后自动反映）
+    RefreshTray,
+}
+
+/// 托盘固定菜单项 id（动态子菜单「已安装应用」用 "app:<id>" 前缀区分）
+struct TrayIds {
+    open: MenuId,
+    market: MenuId,
+    hb: MenuId,
+    sync: MenuId,
+    quit: MenuId,
 }
 
 struct App {
     url: String,
     kb_root: PathBuf,
-    open_id: MenuId,
-    hb_id: MenuId,
-    hb_item: Option<CheckMenuItem>,
-    sync_id: MenuId,
-    quit_id: MenuId,
+    ids: TrayIds,
     menu: Option<Menu>,
     tray: Option<tray_icon::TrayIcon>,
 }
@@ -173,31 +180,49 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, _el: &ActiveEventLoop, event: UserEvent) {
-        if let UserEvent::Menu(ev) = event {
-            if ev.id == self.quit_id {
-                std::process::exit(0);
-            } else if ev.id == self.open_id {
-                open_browser(&self.url);
-            } else if ev.id == self.hb_id {
-                // 勾选翻转：写 config，刷新勾选态（≤1 个心跳周期生效）
-                let checked = !crate::config::load().heartbeat.enabled;
-                let mut cfg = crate::config::load();
-                cfg.heartbeat.enabled = checked;
-                let _ = crate::config::save(&cfg);
-                if let Some(it) = &self.hb_item {
-                    it.set_checked(checked);
-                }
-                eprintln!("心跳自动同步: {}", if checked { "开" } else { "关" });
-            } else if ev.id == self.sync_id {
-                match kb::sync_index(&self.kb_root) {
-                    Ok(r) => eprintln!("INDEX 已重建: {} 篇", r.files),
-                    Err(e) => eprintln!("INDEX 重建失败: {e}"),
-                }
-                match graph::sync_graph(&self.kb_root) {
-                    Ok(g) => eprintln!("图谱已重建: {} 文档 / {} 链接 / {} 悬空", g.docs, g.links, g.dangling),
-                    Err(e) => eprintln!("图谱重建失败: {e}"),
+        match event {
+            UserEvent::Menu(ev) => {
+                if ev.id == self.ids.quit {
+                    std::process::exit(0);
+                } else if ev.id == self.ids.open {
+                    open_browser(&self.url);
+                } else if ev.id == self.ids.market {
+                    open_browser(&format!("{}?view=market", self.url));
+                } else if ev.id == self.ids.hb {
+                    // 勾选翻转：写 config（≤1 个心跳周期生效）；重建菜单反映新勾选态
+                    let mut cfg = crate::config::load();
+                    cfg.heartbeat.enabled = !cfg.heartbeat.enabled;
+                    let _ = crate::config::save(&cfg);
+                    eprintln!("心跳自动同步: {}", if cfg.heartbeat.enabled { "开" } else { "关" });
+                    self.rebuild_tray();
+                } else if ev.id == self.ids.sync {
+                    match kb::sync_index(&self.kb_root) {
+                        Ok(r) => eprintln!("INDEX 已重建: {} 篇", r.files),
+                        Err(e) => eprintln!("INDEX 重建失败: {e}"),
+                    }
+                    match graph::sync_graph(&self.kb_root) {
+                        Ok(g) => eprintln!("图谱已重建: {} 文档 / {} 链接 / {} 悬空", g.docs, g.links, g.dangling),
+                        Err(e) => eprintln!("图谱重建失败: {e}"),
+                    }
+                } else if ev.id.0.starts_with("app:") {
+                    // 已安装应用子菜单 → 打开应用视图
+                    let id = ev.id.0.trim_start_matches("app:");
+                    open_browser(&format!("{}?view={}", self.url, id));
                 }
             }
+            UserEvent::RefreshTray => self.rebuild_tray(),
+            UserEvent::Tray => {}
+        }
+    }
+}
+
+impl App {
+    /// 重建动态托盘菜单（30s 定时 + 心跳切换 + 应用安装/卸载后）
+    fn rebuild_tray(&mut self) {
+        if let Some(tray) = &self.tray {
+            let (menu, ids) = build_menu(&self.url, &self.kb_root);
+            let _ = tray.set_menu(Some(Box::new(menu)));
+            self.ids = ids;
         }
     }
 }
@@ -221,9 +246,34 @@ fn run_tray(url: &str, kb_root: &Path) {
         let _ = proxy.send_event(UserEvent::Menu(e));
     }));
 
+    let (menu, ids) = build_menu(url, kb_root);
+    let mut app = App {
+        url: url.to_string(),
+        kb_root: kb_root.to_path_buf(),
+        ids,
+        menu: Some(menu),
+        tray: None,
+    };
+
+    // 托盘动态菜单（应用市场阶段 3）：30s 定时重建——应用安装/卸载后自动反映
+    {
+        let proxy = event_loop.create_proxy();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            let _ = proxy.send_event(UserEvent::RefreshTray);
+        });
+    }
+
+    if let Err(e) = event_loop.run_app(&mut app) {
+        eprintln!("托盘事件循环错误: {e}");
+    }
+}
+
+/// 构建动态托盘菜单：固定项（打开终端 / 应用市场 / 心跳 / 立即同步 / 退出）+ 已安装应用子菜单（动态）
+fn build_menu(url: &str, kb_root: &Path) -> (Menu, TrayIds) {
     let menu = Menu::new();
     let open_item = MenuItem::new("打开终端", true, None);
-    // 心跳自动同步（可勾选开关，默认关闭；立即同步保留手动重建）
+    let market_item = MenuItem::new("应用市场", true, None);
     let hb_item = CheckMenuItem::with_id(
         "hb-sync",
         "心跳同步",
@@ -234,30 +284,30 @@ fn run_tray(url: &str, kb_root: &Path) {
     let sync_item = MenuItem::new("立即同步", true, None);
     let quit_item = MenuItem::new("退出", true, None);
     let _ = menu.append(&open_item);
+    let _ = menu.append(&market_item);
+    let _ = menu.append(&PredefinedMenuItem::separator());
+    // 已安装应用子菜单（动态：kb/apps/*/app.json）
+    let apps = crate::kb::list_apps(kb_root);
+    if !apps.is_empty() {
+        let sub = Submenu::new("已安装应用", true);
+        for a in &apps {
+            let it = MenuItem::with_id(format!("app:{}", a.id), format!("{} v{}", a.name, a.version), true, None);
+            let _ = sub.append(&it);
+        }
+        let _ = menu.append(&sub);
+    }
     let _ = menu.append(&hb_item);
     let _ = menu.append(&sync_item);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&quit_item);
-    let open_id = open_item.id().clone();
-    let hb_id = hb_item.id().clone();
-    let sync_id = sync_item.id().clone();
-    let quit_id = quit_item.id().clone();
-
-    let mut app = App {
-        url: url.to_string(),
-        kb_root: kb_root.to_path_buf(),
-        open_id,
-        hb_id,
-        hb_item: Some(hb_item),
-        sync_id,
-        quit_id,
-        menu: Some(menu),
-        tray: None,
+    let ids = TrayIds {
+        open: open_item.id().clone(),
+        market: market_item.id().clone(),
+        hb: hb_item.id().clone(),
+        sync: sync_item.id().clone(),
+        quit: quit_item.id().clone(),
     };
-
-    if let Err(e) = event_loop.run_app(&mut app) {
-        eprintln!("托盘事件循环错误: {e}");
-    }
+    (menu, ids)
 }
 
 fn build_tray(menu: Menu) -> tray_icon::TrayIcon {

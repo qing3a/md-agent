@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>应用市场</title>
+<style>
+  :root { --bg:#1e1e2e; --panel:#26263a; --panel2:#2f2f46; --line:#3a3a55;
+          --fg:#cdd6f4; --dim:#7f849c; --green:#a6e3a1; --red:#f38ba8;
+          --yellow:#f9e2af; --blue:#89b4fa; --purple:#cba6f7; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg);
+    font: 13px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+    border-bottom: 1px solid var(--line); }
+  h1 { font-size: 15px; color: var(--yellow); }
+  .sp { flex: 1; }
+  button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 7px; padding: 5px 14px; font-size: 12px; cursor: pointer; }
+  button:hover { border-color: var(--blue); color: var(--blue); }
+  button.primary { background: var(--green); color: #111; border-color: var(--green); font-weight: 600; }
+  button.danger { background: var(--red); color: #111; border-color: var(--red); font-weight: 600; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.small { padding: 2px 8px; font-size: 11px; }
+
+  #main { flex: 1; display: flex; min-height: 0; }
+  .col { overflow: auto; padding: 10px; }
+  #list-col { width: 240px; border-right: 1px solid var(--line); background: var(--panel); }
+  #detail-col { flex: 1; }
+
+  .item { padding: 8px 10px; border-radius: 7px; cursor: pointer; margin-bottom: 4px; }
+  .item:hover { background: var(--panel2); }
+  .item.sel { background: var(--panel2); border: 1px solid var(--blue); }
+  .item .n { font-weight: 600; }
+  .item .v { font-size: 10px; color: var(--dim); margin-left: 6px; }
+  .item .p { font-size: 11px; color: var(--dim); word-break: break-all; }
+
+  #detail { padding: 14px; display: none; }
+  #detail h2 { font-size: 16px; margin-bottom: 4px; }
+  .meta { color: var(--dim); font-size: 12px; margin-bottom: 10px; }
+  .perms { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+  .perm { background: var(--panel2); border: 1px solid var(--line); color: var(--blue);
+    border-radius: 10px; padding: 1px 10px; font-size: 11px; }
+  .desc { color: var(--fg); font-size: 12px; margin-bottom: 14px; }
+  .actions { display: flex; gap: 10px; }
+  .empty { color: var(--dim); text-align: center; padding: 40px 10px; }
+  #hint { padding: 8px 14px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px; }
+  #hint code { color: var(--yellow); }
+  .toast { position: fixed; bottom: 44px; left: 50%; transform: translateX(-50%);
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 6px 14px; font-size: 12px; display: none; z-index: 9; }
+  .toast.ok { border-color: var(--green); color: var(--green); }
+  .toast.err { border-color: var(--red); color: var(--red); }
+</style>
+</head>
+<body>
+<header>
+  <h1>应用市场</h1>
+  <span id="count" class="meta"></span>
+  <div class="sp"></div>
+  <button id="refresh">刷新</button>
+</header>
+<div id="main">
+  <div id="list-col" class="col"></div>
+  <div id="detail-col" class="col">
+    <div id="detail">
+      <h2 id="d-name"></h2>
+      <div class="meta" id="d-meta"></div>
+      <div class="perms" id="d-perms"></div>
+      <div class="desc" id="d-desc"></div>
+      <div class="actions">
+        <button id="run" class="primary">运行</button>
+        <button id="uninstall" class="danger">卸载</button>
+      </div>
+    </div>
+    <div class="empty" id="empty">无已安装应用<br><br>终端安装：<code>/market import &lt;本地应用目录路径&gt;</code></div>
+  </div>
+</div>
+<div id="hint">安装 / 更新走终端命令 <code>/market import &lt;路径&gt;</code>（人审确认）· 运行在宿主新标签打开</div>
+<div id="toast" class="toast"></div>
+
+<script>
+var apps = [];
+var sel = null;
+
+function $(id) { return document.getElementById(id); }
+function toast(msg, ok) {
+  var t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + (ok ? 'ok' : 'err');
+  t.style.display = 'block';
+  setTimeout(function () { t.style.display = 'none'; }, 2200);
+}
+
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+
+function render() {
+  $('count').textContent = apps.length ? apps.length + ' 个已安装' : '';
+  var list = $('list-col');
+  list.innerHTML = apps.map(function (a) {
+    return '<div class="item' + (sel && sel.id === a.id ? ' sel' : '') + '" data-id="' + esc(a.id) + '">' +
+      '<div class="n">' + esc(a.name) + '<span class="v">v' + esc(a.version) + '</span></div>' +
+      '<div class="p">' + esc(a.id) + ' · [' + esc((a.permissions || []).join(',')) + ']</div></div>';
+  }).join('');
+  var empty = $('empty');
+  empty.style.display = apps.length ? 'none' : 'block';
+  if (sel) showDetail(sel); else $('detail').style.display = 'none';
+}
+
+function showDetail(a) {
+  sel = a;
+  $('detail').style.display = 'block';
+  $('d-name').textContent = a.name + '  v' + a.version;
+  $('d-meta').textContent = 'id: ' + a.id + ' · entry: ' + (a.entry || 'index.html');
+  $('d-perms').innerHTML = (a.permissions && a.permissions.length)
+    ? a.permissions.map(function (p) { return '<span class="perm">' + esc(p) + '</span>'; }).join('')
+    : '<span class="perm" style="color:var(--dim)">无权限</span>';
+  $('d-desc').textContent = a.description || '(无描述)';
+  renderListSel();
+}
+
+function renderListSel() {
+  Array.prototype.forEach.call(document.querySelectorAll('#list-col .item'), function (el) {
+    el.classList.toggle('sel', sel && el.dataset.id === sel.id);
+  });
+}
+
+$('list-col').addEventListener('click', function (e) {
+  var el = e.target.closest('.item');
+  if (!el) return;
+  var a = apps.find(function (x) { return x.id === el.dataset.id; });
+  if (a) showDetail(a);
+});
+
+$('run').addEventListener('click', function () {
+  if (!sel) return;
+  // 通知宿主打开应用视图（新标签）
+  window.parent.postMessage({ type: 'cmd', cmd: '/view ' + sel.id }, '*');
+});
+
+$('uninstall').addEventListener('click', async function () {
+  if (!sel) return;
+  if (!confirm('确认卸载 ' + sel.name + '（' + sel.id + '）？')) return;
+  try {
+    await hostApi('/api/market/uninstall', { method: 'POST', body: { id: sel.id } });
+    toast('✓ 已卸载 ' + sel.id, true);
+    sel = null;
+    await load();
+  } catch (e) { toast('卸载失败: ' + e.message, false); }
+});
+
+$('refresh').addEventListener('click', load);
+
+async function load() {
+  try {
+    var r = await hostApi('/api/apps');
+    apps = r.apps || [];
+    render();
+  } catch (e) {
+    $('list-col').innerHTML = '<div class="empty">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+load();
+</script>
+</body>
+</html>
