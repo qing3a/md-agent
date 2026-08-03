@@ -638,6 +638,14 @@
     return memorySummaryCache;
   }
 
+  // 应用市场（阶段 1）：已安装应用列表（manifest 在 kb/apps/<id>/app.json）
+  let appsCache = null;
+  async function getApps() {
+    if (appsCache) return appsCache;
+    try { appsCache = (await api('/api/apps')).apps || []; } catch (e) { appsCache = []; }
+    return appsCache;
+  }
+
   // 工具名 → 端点调用（args 为 LLM 给的参数对象）
   const TOOL_API = {
     'search': (a) => api('/api/search?q=' + encodeURIComponent(a.q || '') + '&layer=' + encodeURIComponent(a.layer || 'notes') + (a.ctx ? '&ctx=1' : '')),
@@ -1586,6 +1594,11 @@
     'window.addEventListener("message",h);' +
     'window.parent.postMessage({type:"api",id:id,method:(opts&&opts.method)||"GET",path:path,body:opts&&opts.body},"*");' +
     '});};' +
+    // 应用市场（阶段 1）：沙箱内直连 /api/* 的 fetch 自动改走桥（宿主按 app.json 权限白名单放行）
+    'var _nf=window.fetch;window.fetch=function(u,o){var s=String(u),i=s.indexOf("/api/");' +
+    'if(i!==-1){var p=s.slice(i),bd;try{bd=o&&o.body?JSON.parse(o.body):undefined}catch(e){bd=undefined}' +
+    'return window.hostApi(p,{method:(o&&o.method)||"GET",body:bd}).then(function(d){return{ok:true,status:200,json:function(){return Promise.resolve(d)},text:function(){return Promise.resolve(JSON.stringify(d))}}});}' +
+    'return _nf.apply(this,arguments);};' +
     'window.addEventListener("keydown",function(e){if(e.key==="Escape"){window.parent.postMessage({type:"escape"},"*");}});' +
     'window.addEventListener("error",function(e){window.parent.postMessage({type:"view-error",msg:(e&&e.message)||"视图脚本错误"},"*");});' +
     'window.addEventListener("unhandledrejection",function(e){var r=e&&e.reason;window.parent.postMessage({type:"view-error",msg:(r&&r.message)||String(r)},"*");});' +
@@ -1628,8 +1641,15 @@
     }
   }
 
-  function openView(title, html) {
+  function openView(title, html, app) {
     const id = 'v' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+    // 应用市场（阶段 1）：app 视图注入 <base href="/apps/<id>/">（相对 vendor/ 等资源正确解析）
+    if (app) {
+      const baseHref = '<base href="/apps/' + app.id + '/">';
+      if (/<base[^>]*>/i.test(html)) html = html.replace(/<base[^>]*>/i, baseHref);
+      else if (/<head[^>]*>/i.test(html)) html = html.replace(/<head[^>]*>/i, (m) => m + '\n  ' + baseHref);
+      else html = baseHref + '\n' + html;
+    }
     const iframe = document.createElement('iframe');
     iframe.sandbox = 'allow-scripts';
     const tabEl = document.createElement('button');
@@ -1644,7 +1664,7 @@
     tabEl.appendChild(x);
     tabEl.addEventListener('click', () => activateView(id));
     x.addEventListener('click', (e) => { e.stopPropagation(); closeView(id); });
-    const tab = { id, title, iframe, tabEl, loaded: false, busy: false, err: null };
+    const tab = { id, title, iframe, tabEl, loaded: false, busy: false, err: null, appId: app ? app.id : null, perms: app ? app.permissions : null };
     // 加载状态跟踪：iframe load 确认加载完成；10s 未加载且无桥请求 → 标黄提示（后台节流加载慢可见）
     iframe.addEventListener('load', () => { tab.loaded = true; tabEl.classList.remove('warn'); });
     setTimeout(() => {
@@ -1685,6 +1705,14 @@
       tab.iframe.contentWindow.postMessage({ id: msg.id, ok: false, error: '仅允许 /api/ 接口' }, '*');
       return;
     }
+    // 应用市场（阶段 1）权限白名单：app 视图只放行 app.json 声明的权限
+    if (tab.appId && tab.perms) {
+      const perm = Core.permForPath(msg.path);
+      if (!Core.appCan(msg.path, msg.method || 'GET', tab.perms)) {
+        tab.iframe.contentWindow.postMessage({ id: msg.id, ok: false, error: '权限不足：应用未声明「' + (perm || '该') + '」权限' }, '*');
+        return;
+      }
+    }
     try {
       const res = await fetch(msg.path, {
         method: msg.method || 'GET',
@@ -1712,6 +1740,14 @@
       if (!r.ok) throw new Error('内置视图加载失败: HTTP ' + r.status);
       const titles = { graph: '知识库结构导航', board: '任务看板', pending: '待审审核', audit: '知识库健康审计' };
       openView(titles[arg], await r.text());
+      return;
+    }
+    // 应用市场（阶段 1）：/view <app-id> 打开已安装应用（manifest 权限白名单）
+    const apps = await getApps();
+    const app = apps.find((a) => a.id === arg);
+    if (app) {
+      const r = await api('/api/file?path=apps/' + app.id + '/' + encodeURIComponent(app.entry));
+      openView(app.name, r.content, { id: app.id, permissions: app.permissions });
       return;
     }
     const r = await api('/api/file?path=' + encodeURIComponent(arg));

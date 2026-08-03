@@ -79,6 +79,7 @@ pub async fn serve(
         .route("/api/llm", post(llm_chat))
         .route("/api/context/log", post(context_log))
         .route("/api/context/stats", get(context_stats))
+        .route("/api/apps", get(apps_list))
         // 应用市场（阶段 0）：kb/apps/ 静态挂载到 /apps/*——沙箱 iframe 加载 app 的 HTML+assets（脚本子资源不受 CORS 限制）；/api/* 仍只走桥（沙箱 opaque origin 直连被拦，权限白名单在桥层）
         .nest_service("/apps", tower_http::services::ServeDir::new(state.kb_root.join("apps")))
         .fallback_service(tower_http::services::ServeDir::new(state.web_dir.clone()))
@@ -888,6 +889,11 @@ async fn tasks_delete(State(s): State<AppState>, AxumPath(id): AxumPath<i64>) ->
         Ok(false) => (StatusCode::NOT_FOUND, Json(json!({ "error": format!("任务 #{id} 不存在") }))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
+}
+
+// ---------- 应用市场（阶段 1：已安装 app 列表，manifest 在 kb/apps/<id>/app.json） ----------
+async fn apps_list(State(s): State<AppState>) -> Response {
+    Json(json!({ "apps": crate::kb::list_apps(&s.kb_root) })).into_response()
 }
 
 // ---------- Context Engineering 记账（CE 第 1 步：记账先行，零侵入） ----------

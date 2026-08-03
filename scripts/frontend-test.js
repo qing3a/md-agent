@@ -60,5 +60,17 @@ t('token 超限命中', Core.isOverflowError('reduce the length of the messages 
 t('未配置不误判', !Core.isOverflowError('未配置 LLM'));
 t('404 不误判', !Core.isOverflowError('HTTP 404'));
 
+console.log('== 应用市场权限映射（阶段 1） ==');
+t('llm 映射', Core.permForPath('/api/llm') === 'llm');
+t('search 映射（含 query）', Core.permForPath('/api/search?q=x') === 'search');
+t('graph 映射', Core.permForPath('/api/graph/stats') === 'graph');
+t('file 映射', Core.permForPath('/api/file') === 'file');
+t('管理端点默认拒绝', Core.permForPath('/api/config') === null && Core.permForPath('/api/heartbeat') === null);
+t('llm 权限放行', Core.appCan('/api/llm', 'POST', ['llm']));
+t('无权限拒绝', !Core.appCan('/api/llm', 'POST', ['search']));
+t('file GET=read', Core.appCan('/api/file', 'GET', ['read']) && !Core.appCan('/api/file', 'POST', ['read']));
+t('file POST=write', Core.appCan('/api/file', 'POST', ['write']));
+t('未映射端点拒绝', !Core.appCan('/api/config', 'GET', ['llm', 'search', 'graph']));
+
 console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败');
 process.exit(fail ? 1 : 0);

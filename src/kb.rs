@@ -3,6 +3,7 @@
 //! - L2（kb/notes/）：内容层（按需检索）
 
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,48 @@ pub const INDEX_FILE: &str = "INDEX.md";
 pub const NOTES_DIR: &str = "notes";
 /// 技能目录（Phase 3-C Step 2：程序性记忆，注册表 INDEX.md 自动生成）
 pub const SKILLS_DIR: &str = "skills";
+/// 应用目录（应用市场阶段 1：kb/apps/<id>/app.json = 每个应用的 manifest）
+pub const APPS_DIR: &str = "apps";
+
+/// 已安装应用（应用市场阶段 1）：来自 kb/apps/<id>/app.json
+#[derive(Debug, Serialize)]
+pub struct AppInfo {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub entry: String,
+    pub permissions: Vec<String>,
+    pub description: String,
+}
+
+/// 列出已安装应用：扫描 kb/apps/*/app.json（每个子目录 = 一个 app）
+pub fn list_apps(root: &Path) -> Vec<AppInfo> {
+    let apps_dir = root.join(APPS_DIR);
+    let mut out = Vec::new();
+    let Ok(rd) = fs::read_dir(&apps_dir) else { return out };
+    for e in rd.flatten() {
+        if !e.path().is_dir() {
+            continue;
+        }
+        let dir_name = e.file_name().to_string_lossy().to_string();
+        let mf = e.path().join("app.json");
+        let Ok(content) = fs::read_to_string(&mf) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&content) else { continue };
+        let id = v.get("id").and_then(|x| x.as_str()).unwrap_or(&dir_name).to_string();
+        let name = v.get("name").and_then(|x| x.as_str()).unwrap_or(&dir_name).to_string();
+        let version = v.get("version").and_then(|x| x.as_str()).unwrap_or("0.0.0").to_string();
+        let entry = v.get("entry").and_then(|x| x.as_str()).unwrap_or("index.html").to_string();
+        let description = v.get("description").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let permissions = v
+            .get("permissions")
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|p| p.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        out.push(AppInfo { id, name, version, entry, permissions, description });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
 
 /// 解析 KB 根目录：env MD_AGENT_KB > 工作目录 ./kb > 可执行文件旁 kb
 pub fn kb_root() -> PathBuf {
@@ -757,6 +800,20 @@ mod tests {
         assert!(n <= 40); // 截断到 40 条内
         let s = fs::read_to_string(root.join("memory_summary.md")).unwrap();
         assert!(s.contains("决策59")); // 最新保留
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn list_apps_parses_manifest() {
+        let root = test_root("apps");
+        ensure_layout(&root).unwrap();
+        write(&root, "apps/match/app.json",
+            r#"{"id":"match","name":"相亲评估工作台","version":"0.2.0","entry":"index.html","permissions":["llm"],"description":"d"}"#);
+        let apps = list_apps(&root);
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].id, "match");
+        assert_eq!(apps[0].permissions, vec!["llm".to_string()]);
+        assert_eq!(apps[0].entry, "index.html");
         fs::remove_dir_all(&root).unwrap();
     }
 }

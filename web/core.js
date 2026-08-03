@@ -174,6 +174,28 @@
     return /context|token|length|长度|超限|上限|too long|maximum/i.test(m) && !/未配置|api_key|apikey|401|403|404/i.test(m);
   };
 
+  // ---------- 应用市场权限映射（阶段 1）：API 路径 → 粗粒度权限 ----------
+  // app 只被放行 app.json 声明的权限；未映射的管理端点（config/heartbeat/health 等）对 app 默认拒绝
+  Core.permForPath = function (path) {
+    const p = path || '';
+    if (/^\/api\/llm/.test(p)) return 'llm';
+    if (/^\/api\/(search|l1)/.test(p)) return 'search';
+    if (/^\/api\/graph\//.test(p)) return 'graph';
+    if (/^\/api\/file/.test(p)) return 'file';
+    if (/^\/api\/tasks/.test(p)) return 'tasks';
+    if (/^\/api\/fetch/.test(p)) return 'fetch';
+    if (/^\/api\/page/.test(p)) return 'page';
+    if (/^\/api\/(audit|consolidate)/.test(p)) return 'audit';
+    if (/^\/api\/kb\/(sync|pending\/approve|pending\/reject|pending\/preview)/.test(p) || /^\/api\/link/.test(p)) return 'write';
+    return null;
+  };
+  Core.appCan = function (path, method, perms) {
+    const perm = Core.permForPath(path);
+    if (!perm) return false;
+    if (perm === 'file') return (perms || []).includes(method === 'POST' ? 'write' : 'read');
+    return (perms || []).includes(perm);
+  };
+
   root.Core = Core;
   if (typeof module !== 'undefined' && module.exports) module.exports = Core;
 })(typeof window !== 'undefined' ? window : globalThis);
