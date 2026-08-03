@@ -15,6 +15,8 @@
     border-bottom: 1px solid var(--line); }
   h1 { font-size: 15px; color: var(--yellow); }
   .sp { flex: 1; }
+  .meta { font-size: 11px; color: var(--dim); }
+  #hubcount { color: var(--purple); }
   button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
     border-radius: 7px; padding: 5px 14px; font-size: 12px; cursor: pointer; }
   button:hover { border-color: var(--blue); color: var(--blue); }
@@ -24,15 +26,22 @@
   button.small { padding: 2px 8px; font-size: 11px; }
 
   #main { flex: 1; display: flex; min-height: 0; }
-  .col { overflow: auto; padding: 10px; }
-  #list-col { width: 240px; border-right: 1px solid var(--line); background: var(--panel); }
-  #detail-col { flex: 1; }
+  .col { min-height: 0; }
+  #list-col { width: 260px; border-right: 1px solid var(--line); background: var(--panel);
+    display: flex; flex-direction: column; }
+  #tabs { display: flex; gap: 4px; padding: 8px 10px; }
+  .tab { flex: 1; background: transparent; border: 1px solid var(--line); border-radius: 6px;
+    padding: 4px 0; font-size: 12px; cursor: pointer; color: var(--dim); }
+  .tab.sel { background: var(--panel2); border-color: var(--blue); color: var(--blue); font-weight: 600; }
+  #items { flex: 1; overflow: auto; padding: 0 10px 10px; }
+  #detail-col { flex: 1; overflow: auto; padding: 10px; }
 
   .item { padding: 8px 10px; border-radius: 7px; cursor: pointer; margin-bottom: 4px; }
   .item:hover { background: var(--panel2); }
   .item.sel { background: var(--panel2); border: 1px solid var(--blue); }
   .item .n { font-weight: 600; }
   .item .v { font-size: 10px; color: var(--dim); margin-left: 6px; }
+  .item .src { font-size: 10px; color: var(--purple); margin-left: 6px; }
   .item .p { font-size: 11px; color: var(--dim); word-break: break-all; }
 
   #detail { padding: 14px; display: none; }
@@ -42,46 +51,73 @@
   .perm { background: var(--panel2); border: 1px solid var(--line); color: var(--blue);
     border-radius: 10px; padding: 1px 10px; font-size: 11px; }
   .desc { color: var(--fg); font-size: 12px; margin-bottom: 14px; }
-  .actions { display: flex; gap: 10px; }
+  .actions { display: flex; gap: 10px; align-items: center; }
+  .upd-hint { font-size: 11px; color: var(--dim); }
   .empty { color: var(--dim); text-align: center; padding: 40px 10px; }
   #hint { padding: 8px 14px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px; }
   #hint code { color: var(--yellow); }
   .toast { position: fixed; bottom: 44px; left: 50%; transform: translateX(-50%);
     background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
-    padding: 6px 14px; font-size: 12px; display: none; z-index: 9; }
+    padding: 6px 14px; font-size: 12px; display: none; z-index: 12; }
   .toast.ok { border-color: var(--green); color: var(--green); }
   .toast.err { border-color: var(--red); color: var(--red); }
+  #overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 11;
+    display: flex; align-items: center; justify-content: center; }
+  #overlay.hidden { display: none; }
+  .ov-box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 18px; width: 440px; max-width: 92vw; max-height: 80vh; overflow: auto; }
+  .ov-box h3 { color: var(--yellow); font-size: 14px; margin-bottom: 10px; }
+  .ov-row { font-size: 12px; color: var(--dim); margin-bottom: 6px; word-break: break-all; }
+  .ov-row b { color: var(--fg); }
+  .ov-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
+  .ov-note { font-size: 11px; color: var(--dim); margin-top: 10px; }
 </style>
 </head>
 <body>
 <header>
   <h1>应用市场</h1>
   <span id="count" class="meta"></span>
+  <span id="hubcount" class="meta" title="已连接 SkillHub"></span>
   <div class="sp"></div>
+  <button id="connect">连接 hub</button>
   <button id="refresh">刷新</button>
 </header>
 <div id="main">
-  <div id="list-col" class="col"></div>
+  <div id="list-col" class="col">
+    <div id="tabs">
+      <button id="tab-catalog" class="tab">目录</button>
+      <button id="tab-installed" class="tab">已安装</button>
+    </div>
+    <div id="items"></div>
+  </div>
   <div id="detail-col" class="col">
     <div id="detail">
       <h2 id="d-name"></h2>
       <div class="meta" id="d-meta"></div>
       <div class="perms" id="d-perms"></div>
       <div class="desc" id="d-desc"></div>
-      <div class="actions">
-        <button id="run" class="primary">运行</button>
-        <button id="uninstall" class="danger">卸载</button>
-      </div>
+      <div class="actions" id="d-actions"></div>
     </div>
-    <div class="empty" id="empty">无已安装应用<br><br>终端安装：<code>/market import &lt;本地应用目录路径&gt;</code></div>
+    <div class="empty" id="empty"></div>
   </div>
 </div>
-<div id="hint">安装 / 更新走终端命令 <code>/market import &lt;路径&gt;</code>（人审确认）· 运行在宿主新标签打开</div>
+<div id="hint">连接 SkillHub：<code>连接 hub</code> 或终端 <code>/market connect &lt;url&gt;</code> · 目录安装走人审确认 · 更新走终端 <code>/market update &lt;id&gt; &lt;路径&gt;</code> · 运行在宿主新标签打开</div>
 <div id="toast" class="toast"></div>
+<div id="overlay" class="hidden">
+  <div class="ov-box">
+    <h3 id="ov-title">预览</h3>
+    <div id="ov-body"></div>
+    <div class="ov-actions">
+      <button id="ov-cancel">取消</button>
+      <button id="ov-ok" class="primary">确认</button>
+    </div>
+  </div>
+</div>
 
 <script>
-var apps = [];
-var sel = null;
+var hubs = [], catalog = [], apps = [];
+var tab = 'catalog'; // 'catalog' | 'installed'
+var sel = null; // { kind: 'cat' | 'inst', ...条目字段 }
 
 function $(id) { return document.getElementById(id); }
 function toast(msg, ok) {
@@ -89,75 +125,186 @@ function toast(msg, ok) {
   t.textContent = msg;
   t.className = 'toast ' + (ok ? 'ok' : 'err');
   t.style.display = 'block';
-  setTimeout(function () { t.style.display = 'none'; }, 2200);
+  setTimeout(function () { t.style.display = 'none'; }, 2400);
 }
-
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
 
-function render() {
-  $('count').textContent = apps.length ? apps.length + ' 个已安装' : '';
-  var list = $('list-col');
-  list.innerHTML = apps.map(function (a) {
-    return '<div class="item' + (sel && sel.id === a.id ? ' sel' : '') + '" data-id="' + esc(a.id) + '">' +
-      '<div class="n">' + esc(a.name) + '<span class="v">v' + esc(a.version) + '</span></div>' +
-      '<div class="p">' + esc(a.id) + ' · [' + esc((a.permissions || []).join(',')) + ']</div></div>';
-  }).join('');
-  var empty = $('empty');
-  empty.style.display = apps.length ? 'none' : 'block';
-  if (sel) showDetail(sel); else $('detail').style.display = 'none';
+function permHtml(perms) {
+  return (perms && perms.length)
+    ? perms.map(function (p) { return '<span class="perm">' + esc(p) + '</span>'; }).join('')
+    : '<span class="perm" style="color:var(--dim)">无权限</span>';
 }
 
-function showDetail(a) {
-  sel = a;
+function render() {
+  $('hubcount').textContent = hubs.length ? '⚡ ' + hubs.length + ' hub' : '';
+  $('count').textContent = (tab === 'catalog' ? catalog.length + ' 个可用' : apps.length + ' 个已安装');
+  $('tab-catalog').classList.toggle('sel', tab === 'catalog');
+  $('tab-installed').classList.toggle('sel', tab === 'installed');
+
+  var items = $('items');
+  if (tab === 'catalog') {
+    items.innerHTML = catalog.map(function (a, i) {
+      return '<div class="item' + (sel && sel.kind === 'cat' && sel.id === a.id ? ' sel' : '') + '" data-i="' + i + '">' +
+        '<div class="n">' + esc(a.name) + '<span class="v">v' + esc(a.version) + '</span><span class="src">[' + esc(a.hub) + ']</span></div>' +
+        '<div class="p">' + esc(a.id) + ' · [' + esc((a.permissions || []).join(',')) + ']</div></div>';
+    }).join('');
+  } else {
+    items.innerHTML = apps.map(function (a, i) {
+      return '<div class="item' + (sel && sel.kind === 'inst' && sel.id === a.id ? ' sel' : '') + '" data-i="' + i + '">' +
+        '<div class="n">' + esc(a.name) + '<span class="v">v' + esc(a.version) + '</span>' +
+        (a.source_hub ? '<span class="src">[' + esc(a.source_hub) + ']</span>' : '') + '</div>' +
+        '<div class="p">' + esc(a.id) + ' · [' + esc((a.permissions || []).join(',')) + ']</div></div>';
+    }).join('');
+  }
+
+  var empty = $('empty');
+  var has = tab === 'catalog' ? catalog.length : apps.length;
+  if (!has) {
+    empty.style.display = 'block';
+    empty.innerHTML = tab === 'catalog'
+      ? '未连接 SkillHub<br><br>点右上角 <code>连接 hub</code> 或终端 <code>/market connect &lt;url&gt;</code>'
+      : '无已安装应用<br><br>从「目录」Tab 安装，或终端 <code>/market import &lt;路径&gt;</code>';
+    $('detail').style.display = 'none';
+  } else {
+    empty.style.display = 'none';
+    if (sel) showDetail(sel); else $('detail').style.display = 'none';
+  }
+}
+
+function showDetail(s) {
+  sel = s;
   $('detail').style.display = 'block';
-  $('d-name').textContent = a.name + '  v' + a.version;
-  $('d-meta').textContent = 'id: ' + a.id + ' · entry: ' + (a.entry || 'index.html');
-  $('d-perms').innerHTML = (a.permissions && a.permissions.length)
-    ? a.permissions.map(function (p) { return '<span class="perm">' + esc(p) + '</span>'; }).join('')
-    : '<span class="perm" style="color:var(--dim)">无权限</span>';
-  $('d-desc').textContent = a.description || '(无描述)';
+  $('d-name').textContent = s.name + '  v' + s.version;
+  var meta = 'id: ' + s.id + ' · entry: ' + (s.entry || 'index.html');
+  if (s.hub) meta += ' · 来源 ' + s.hub;
+  else if (s.source_hub) meta += ' · 来源 ' + s.source_hub;
+  else if (s.kind === 'inst') meta += ' · 来源 本地导入';
+  $('d-meta').textContent = meta;
+  $('d-perms').innerHTML = permHtml(s.permissions);
+  $('d-desc').textContent = s.description || '(无描述)';
+
+  var acts = $('d-actions');
+  if (s.kind === 'cat') {
+    acts.innerHTML = '<button id="act-preview">预览 manifest</button>' +
+      '<button id="act-install" class="primary">安装</button>';
+    $('act-preview').addEventListener('click', function () { previewEntry(s); });
+    $('act-install').addEventListener('click', function () { installEntry(s); });
+  } else {
+    acts.innerHTML = '<button id="act-run" class="primary">运行</button>' +
+      '<button id="act-uninstall" class="danger">卸载</button>' +
+      '<span class="upd-hint">更新：/market update ' + esc(s.id) + ' &lt;路径&gt;</span>';
+    $('act-run').addEventListener('click', function () { runApp(s.id); });
+    $('act-uninstall').addEventListener('click', function () { uninstallApp(s.id, s.name); });
+  }
   renderListSel();
 }
 
 function renderListSel() {
-  Array.prototype.forEach.call(document.querySelectorAll('#list-col .item'), function (el) {
-    el.classList.toggle('sel', sel && el.dataset.id === sel.id);
+  Array.prototype.forEach.call(document.querySelectorAll('#items .item'), function (el) {
+    el.classList.toggle('sel', sel && el.dataset.i && currentList()[+el.dataset.i] && currentList()[+el.dataset.i].id === sel.id);
   });
 }
+function currentList() { return tab === 'catalog' ? catalog : apps; }
 
-$('list-col').addEventListener('click', function (e) {
+$('items').addEventListener('click', function (e) {
   var el = e.target.closest('.item');
   if (!el) return;
-  var a = apps.find(function (x) { return x.id === el.dataset.id; });
-  if (a) showDetail(a);
+  var i = +el.dataset.i;
+  var list = currentList();
+  if (!list[i]) return;
+  var a = list[i];
+  showDetail({ kind: tab === 'catalog' ? 'cat' : 'inst', id: a.id, name: a.name, version: a.version,
+    entry: a.entry, permissions: a.permissions, description: a.description, hub: a.hub, source_hub: a.source_hub });
 });
 
-$('run').addEventListener('click', function () {
-  if (!sel) return;
-  // 通知宿主打开应用视图（新标签）
-  window.parent.postMessage({ type: 'cmd', cmd: '/view ' + sel.id }, '*');
-});
-
-$('uninstall').addEventListener('click', async function () {
-  if (!sel) return;
-  if (!confirm('确认卸载 ' + sel.name + '（' + sel.id + '）？')) return;
-  try {
-    await hostApi('/api/market/uninstall', { method: 'POST', body: { id: sel.id } });
-    toast('✓ 已卸载 ' + sel.id, true);
-    sel = null;
-    await load();
-  } catch (e) { toast('卸载失败: ' + e.message, false); }
-});
-
+$('tab-catalog').addEventListener('click', function () { tab = 'catalog'; sel = null; render(); });
+$('tab-installed').addEventListener('click', function () { tab = 'installed'; sel = null; render(); });
 $('refresh').addEventListener('click', load);
+
+// ---------- 人审确认 overlay ----------
+function showOverlay(title, html, okText, onOk) {
+  $('ov-title').textContent = title;
+  $('ov-body').innerHTML = html;
+  var ok = $('ov-ok');
+  ok.style.display = onOk ? '' : 'none';
+  ok.textContent = okText || '确认';
+  $('ov-ok').onclick = onOk || hideOverlay;
+  $('overlay').classList.remove('hidden');
+}
+function hideOverlay() { $('overlay').classList.add('hidden'); }
+$('ov-cancel').addEventListener('click', hideOverlay);
+$('overlay').addEventListener('click', function (e) { if (e.target === $('overlay')) hideOverlay(); });
+
+function manifestHtml(app, hub) {
+  return '<div class="ov-row">应用: <b>' + esc(app.name) + '</b> v' + esc(app.version) + '（id: ' + esc(app.id) + '）</div>' +
+    (hub ? '<div class="ov-row">来源 hub: <b>' + esc(hub) + '</b></div>' : '') +
+    '<div class="ov-row">权限:</div>' + permHtml(app.permissions) +
+    (app.description ? '<div class="ov-row" style="margin-top:8px">描述: ' + esc(app.description) + '</div>' : '');
+}
+
+async function dryRun(entry) {
+  return hostApi('/api/market/install', { method: 'POST', body: { source: entry.source, dry_run: true } });
+}
+
+function previewEntry(entry) {
+  dryRun(entry).then(function (probe) {
+    showOverlay('预览 manifest', manifestHtml(probe.app, entry.hub), '', null);
+  }).catch(function (e) { toast('校验失败: ' + e.message, false); });
+}
+
+function installEntry(entry) {
+  dryRun(entry).then(function (probe) {
+    showOverlay('确认安装（人审）', manifestHtml(probe.app, entry.hub) +
+      '<div class="ov-note">确认后将从 ' + esc(entry.hub) + ' 下载并安装到本地（沙箱运行，仅放行已声明权限）</div>',
+      '确认安装', async function () {
+        hideOverlay();
+        try {
+          var r = await hostApi('/api/market/install', { method: 'POST', body: { source: entry.source, hub: entry.hub } });
+          toast('✓ 已安装 ' + r.app.id, true);
+          tab = 'installed'; sel = null;
+          await load();
+        } catch (e) { toast('安装失败: ' + e.message, false); }
+      });
+  }).catch(function (e) { toast('校验失败: ' + e.message, false); });
+}
+
+// ---------- 运行 / 卸载 ----------
+function runApp(id) {
+  window.parent.postMessage({ type: 'cmd', cmd: '/view ' + id }, '*');
+}
+function uninstallApp(id, name) {
+  if (!confirm('确认卸载 ' + name + '（' + id + '）？')) return;
+  hostApi('/api/market/uninstall', { method: 'POST', body: { id: id } }).then(function () {
+    toast('✓ 已卸载 ' + id, true);
+    sel = null;
+    return load();
+  }).catch(function (e) { toast('卸载失败: ' + e.message, false); });
+}
+
+// ---------- 连接 hub ----------
+$('connect').addEventListener('click', function () {
+  var url = prompt('输入 SkillHub 索引 URL：', 'https://skillhub.cn/install/skillhub.md');
+  if (!url) return;
+  hostApi('/api/hubs/connect', { method: 'POST', body: { url: url.trim() } }).then(function (r) {
+    toast('✓ 已连接 ' + r.hub.name + '（' + r.hub.apps.length + ' 个应用）', true);
+    tab = 'catalog'; sel = null;
+    return load();
+  }).catch(function (e) { toast('连接失败: ' + e.message, false); });
+});
 
 async function load() {
   try {
-    var r = await hostApi('/api/apps');
-    apps = r.apps || [];
+    var rs = await Promise.all([
+      hostApi('/api/hubs').catch(function () { return { hubs: [] }; }),
+      hostApi('/api/market/catalog').catch(function () { return { apps: [] }; }),
+      hostApi('/api/apps').catch(function () { return { apps: [] }; }),
+    ]);
+    hubs = rs[0].hubs || [];
+    catalog = rs[1].apps || [];
+    apps = rs[2].apps || [];
     render();
   } catch (e) {
-    $('list-col').innerHTML = '<div class="empty">加载失败: ' + esc(e.message) + '</div>';
+    $('items').innerHTML = '<div class="empty">加载失败: ' + esc(e.message) + '</div>';
   }
 }
 

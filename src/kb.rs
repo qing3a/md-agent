@@ -28,6 +28,8 @@ pub struct AppInfo {
     pub entry: String,
     pub permissions: Vec<String>,
     pub description: String,
+    /// 来源 hub 名（SkillHub 目录安装时记录；本地导入为 None）
+    pub source_hub: Option<String>,
 }
 
 /// 列出已安装应用：扫描 kb/apps/*/app.json（每个子目录 = 一个 app）
@@ -53,7 +55,8 @@ pub fn list_apps(root: &Path) -> Vec<AppInfo> {
             .and_then(|x| x.as_array())
             .map(|a| a.iter().filter_map(|p| p.as_str().map(String::from)).collect())
             .unwrap_or_default();
-        out.push(AppInfo { id, name, version, entry, permissions, description });
+        let source_hub = v.get("source_hub").and_then(|x| x.as_str()).map(String::from);
+        out.push(AppInfo { id, name, version, entry, permissions, description, source_hub });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out

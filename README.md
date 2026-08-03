@@ -202,6 +202,15 @@ cp config.json dist/config.json   # 可选：携带已有 LLM 配置
 | DELETE | `/api/tasks/{id}` | 删除任务 |
 | GET/POST | `/api/config` | 本地配置（GET 掩码 api_key） |
 | POST | `/api/llm` | LLM 代理（`stream=true` 走 SSE 流式，否则 JSON 透传） |
+| GET | `/api/apps` | 已安装应用列表（manifest：id/name/version/entry/permissions/source_hub） |
+| GET | `/api/hubs` | 已连接 SkillHub 列表 |
+| POST | `/api/hubs/connect` | 连接 SkillHub（body: `{url}`；拉取校验 skillhub.md 索引入库，返回 hub 与可用应用） |
+| POST | `/api/hubs/refresh` | 刷新 hub 索引（body: `{name}`；失败保留旧索引，降级不丢目录） |
+| POST | `/api/hubs/disconnect` | 断开 hub（body: `{name}`；不删已装应用） |
+| GET | `/api/market/catalog` | 已连接 hub 合并目录（条目带 source + 来源 hub） |
+| POST | `/api/market/install` | 安装（body: `{source?, path?, hub?}`；source=hub 条目下载，`dry_run=true` 人审校验返回 manifest） |
+| POST | `/api/market/uninstall` | 卸载（body: `{id}`） |
+| POST | `/api/market/update` | 更新（body: `{id, path}` 本地新版本目录，卸载重装） |
 
 ## 迭代路线
 
@@ -228,11 +237,12 @@ Phase 3-B 规划引擎（✅ 基础已实现）
          ├─ ✅ 依赖就绪校验（进入 doing/done 前依赖必须完成，后端拒绝并提示）
          ├─ ✅ /task plan LLM 目标拆解（串行子任务链，依赖联动）
          └─ ▶ 深化：动态重规划；执行约束延续人审闭环
-Phase 3-C Harness 深化（▶ 待开工——工具 → 记忆 → 程序性自组织 → 生态）
-         ├─ ▶ P1 工具注册表 + Agent Loop：GET /api/tools 声明式工具清单（name/desc/params）；LLM 决策调工具 → 宿主执行 → 结果回填，Agent 回路从「启发式关键词 → grep」升级为 LLM 显式 Tool Use
-         ├─ ▶ P2 记忆生命周期：任务感知上下文组装（L1 常驻 → 按任务动态注入）+ 巩固/遗忘（自动压缩与降级，走待审通道）
-         ├─ ▶ P3 Skills / 程序性自组织：/suggest、/audit 产出从知识笔记升级为程序性技能（技能格式 + 注册表 + 自动触发）
-         └─ ▶ P4 App 系统（原 Phase 4 提前）：manifest + 安装/启停 + 权限声明 + 人审安装（/view 渲染层为地基；本地市场最后）
+Phase 3-C Harness 深化（✅ P1/P3/P4 + SkillHub 接入已完成；P2 巩固器已落地）
+         ├─ ✅ P1 工具注册表 + Agent Loop：GET /api/tools 声明式工具清单（name/desc/params）；LLM 决策调工具 → 宿主执行 → 结果回填，Agent 回路从「启发式关键词 → grep」升级为 LLM 显式 Tool Use
+         ├─ ✅ P2 巩固/遗忘：consolidate 两阶段（先规则后 LLM）+ 记忆提案四型待审通道；任务感知上下文组装（CE 组装器 + memory_summary 注入）
+         ├─ ✅ P3 Skills / 程序性自组织：/suggest、/audit 产出升级为程序性技能（技能格式 + 注册表 /api/skills + trigger 命中自动注入）
+         ├─ ✅ P4 App 系统（原 Phase 4 提前）：manifest + 权限白名单 + 生命周期（/api/market/*）+ 面板/托盘动态菜单 + 沙箱 iframe 渲染（/view）
+         └─ ✅ SkillHub 接入：应用市场 = hub 管理端 + 客户端——/market connect 连接第三方 SkillHub（skillhub.md 索引协议），目录安装走人审；本地导入兜底；market.connect 工具 + 技能触发（LLM 一句话连商店）；面板双 Tab（目录/已安装）+ 来源 hub 记录
 Phase 4  生态化（可选，与"轻量"定位有张力，个人场景可长期搁置）
          ├─ MCP 客户端（Stdio/SSE）；兼容标准 MCP App 渲染（复用统一 iframe 渲染层）
          └─ WASM 计算后端（仅当出现"本地运行不可信计算"的真实需求）
@@ -244,17 +254,18 @@ Phase 4  生态化（可选，与"轻量"定位有张力，个人场景可长期
 - **统一 iframe 渲染层，双源复用**：只维护一套 iframe 沙箱组件，同时渲染「本地 HTML 面板」与「未来兼容的标准 MCP App」；数据请求一律 postMessage 转发给宿主鉴权，前端不直连数据。
 - **App 逻辑不强上 WASM**：检索/图谱/文件逻辑已在 Rust 宿主，App 的"深度接入"= 调宿主 API（manifest 声明权限即可）；HTML + 宿主 API 代理覆盖 90% 场景，WASM 仅保留为可选计算后端，等出现真实需求再引入。
 - **通信复用现有传输**：iframe 用 postMessage 与父页面通信，父页面走现有 HTTP/SSE；不引入 WebSocket。
-- **应用包 = 文件夹 / zip**，不造自定义归档格式（.hax 之类）；市场只做本地导入（拖拽离线安装），不做在线市场——个人场景无多应用供给，在线市场属生态叙事。
+- **应用包 = 文件夹 / zip**，不造自定义归档格式（.hax 之类）；**应用市场 = SkillHub 管理端 + 客户端**——不内置市场目录，通过 `/market connect <url>` 连接第三方 SkillHub（hub = skillhub.md 轻索引，只管"谁有什么/去哪下载"），app 包本体在任意位置（git / GitHub zip / 本地），安装落 `kb/apps/` 后由本地托管 + 沙箱渲染（市场与托管职责分离、已安装即本地权威副本）；本地手动导入永远是兜底通道。
+- **SkillHub 信任分级**：连 hub 自动（拉 md 索引不执行代码，派生产物无人审）→ 从 hub 装 app 走 dry_run 人审确认；source 协议白名单（git+https / GitHub zip / 本地；裸 http 禁）；沙箱 iframe + manifest 权限白名单兜底。
 - **自组织必须带人工审核**：LLM 幻觉/错误关联会污染图谱，"可审计"是这套架构的立身之本；Agent 动态生成 App 同理，人审后安装，不绕开审核闭环。
 - **工具调用走宿主代理、LLM 不直连**：工具（检索/图谱/网页/任务/文件）一律经 `/api/*` 宿主鉴权执行，浏览器不直连 LLM 与本地文件——为 LLM 显式 Tool Use（Phase 3-C P1）预留同一安全边界，工具权限即宿主 API 权限，新工具=新端点而非放开直连。
 - **网页能力：bsk 外挂，Page 内化**。md-agent 不内置 browser-skill 形态（驱动真实浏览器 + 扩展，要求浏览器在线、会话纪律，与"后台自主"冲突，只作外部会话的外挂工具）。系统内置的"读/操作页面"能力 = Page 抽象（open/click/fill/extract/screenshot）+ 本地无头引擎：静态读取用 HTTP + HTML 解析（零浏览器依赖），动态/操作用 chromiumoxide 连系统 Edge/Chrome 的 headless 模式（零下载、自管登录态、Agent 可自主调度）；写操作（点击/提交）必须人审确认。
 
 ## 已知短板与边界
 
-- 工具调用尚未 LLM 显式决策：Agent 回路的检索词由前端启发式提取，LLM 不发工具调用（Tool Use 显式化在 Phase 3-C P1）
+- 工具调用已 LLM 显式决策（/api/tools 声明式清单 + Agent Loop），但工具集仍为宿主内建（8+1 个），外部工具/MCP 客户端（Stdio/SSE）未做（Phase 4）
 - 无 Subagent / Multi-Agent：单 Agent 模型；`/task plan` 拆解由 LLM 一次性生成、宿主顺序执行
-- 记忆无巩固/遗忘：L1/L2 只增不改（MEMORY 按日合并追加），自动压缩与降级未实现（Phase 3-C P2）
-- 无 Skills 注册表：自组织产出是知识笔记，尚无程序性技能格式与自动触发（Phase 3-C P3）
+- 记忆巩固器已实现（规则+LLM 两阶段、走待审通道），自动遗忘/降级与按任务动态注入的深化未做（Phase 3-C P2 余项）
+- Skills 注册表已就绪（/api/skills + trigger 触发注入），技能产物的质量收敛仍依赖人审（/approve）
 - 检索无语义召回：换种说法问可能搜不到（Phase 2 图谱缓解，但语义召回仍需向量，当前定位明确不做）
 - 多轮记忆仅会话内（localStorage 持久化，刷新不丢；跨重启如需持久可把历史写入 kb）
 - 写回审核为「待审目录 + 行级预览」（/preview 看追加内容、/approve 整篇落地），尚无逐行合并/驳回编辑

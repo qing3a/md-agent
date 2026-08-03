@@ -81,6 +81,11 @@ pub async fn serve(
         .route("/api/context/log", post(context_log))
         .route("/api/context/stats", get(context_stats))
         .route("/api/apps", get(apps_list))
+        .route("/api/hubs", get(hubs_list))
+        .route("/api/hubs/connect", post(hubs_connect))
+        .route("/api/hubs/refresh", post(hubs_refresh))
+        .route("/api/hubs/disconnect", post(hubs_disconnect))
+        .route("/api/market/catalog", get(market_catalog))
         .route("/api/market/install", post(market_install))
         .route("/api/market/uninstall", post(market_uninstall))
         .route("/api/market/update", post(market_update))
@@ -163,6 +168,14 @@ fn tools_json() -> Value {
             "desc": "列出任务引擎的当前任务（状态机：待办/进行中/完成/放弃）",
             "params": [],
             "example": "{}"
+        },
+        {
+            "name": "market.connect",
+            "desc": "连接第三方 SkillHub 商店（应用市场索引）：拉取并校验 hub 索引后入库，返回 hub 名与可用应用清单——用户要求安装/连接/添加应用商店、应用市场、SkillHub 时使用",
+            "params": [
+                {"name": "hub_url", "type": "string", "required": true, "desc": "hub 索引 URL，如 https://skillhub.cn/install/skillhub.md"}
+            ],
+            "example": "{\"hub_url\":\"https://skillhub.cn/install/skillhub.md\"}"
         }
     ])
 }
@@ -918,12 +931,71 @@ async fn apps_list(State(s): State<AppState>) -> Response {
     Json(json!({ "apps": crate::kb::list_apps(&s.kb_root) })).into_response()
 }
 
+// ---------- SkillHub（阶段 4）：hub 注册表 + 目录 ----------
+#[derive(Deserialize)]
+struct HubUrlBody {
+    url: String,
+}
+
+#[derive(Deserialize)]
+struct HubNameBody {
+    name: String,
+}
+
+async fn hubs_list(State(s): State<AppState>) -> Response {
+    Json(json!({ "hubs": crate::hub::list_hubs(&s.kb_root) })).into_response()
+}
+
+async fn hubs_connect(State(s): State<AppState>, Json(b): Json<HubUrlBody>) -> Response {
+    match crate::hub::connect_hub(&s.kb_root, &b.url).await {
+        Ok(h) => (StatusCode::CREATED, Json(json!({ "ok": true, "hub": h }))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+async fn hubs_refresh(State(s): State<AppState>, Json(b): Json<HubNameBody>) -> Response {
+    match crate::hub::refresh_hub(&s.kb_root, &b.name).await {
+        Ok(h) => Json(json!({ "ok": true, "hub": h })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+async fn hubs_disconnect(State(s): State<AppState>, Json(b): Json<HubNameBody>) -> Response {
+    match crate::hub::disconnect_hub(&s.kb_root, &b.name) {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+/// 目录：已连接 hub 的合并 app 清单（条目带 source + 来源 hub 标记，供面板「目录」Tab / install 用）
+async fn market_catalog(State(s): State<AppState>) -> Response {
+    let hubs = crate::hub::list_hubs(&s.kb_root);
+    let mut apps: Vec<Value> = Vec::new();
+    for h in &hubs {
+        for a in &h.apps {
+            apps.push(json!({
+                "id": a.id,
+                "name": a.name,
+                "version": a.version,
+                "entry": a.entry,
+                "permissions": a.permissions,
+                "description": a.description,
+                "source": a.source,
+                "hub": h.name,
+            }));
+        }
+    }
+    Json(json!({ "apps": apps })).into_response()
+}
+
 // ---------- 应用市场（阶段 2：安装/卸载/更新，本地路径导入通道） ----------
 #[derive(Deserialize)]
 struct MarketInstallBody {
     source: Option<String>,
     path: Option<String>,
     id: Option<String>,
+    /// 来源 hub 名（面板目录安装时随 source 传入，落盘后记录到 app.json）
+    hub: Option<String>,
     /// dry_run=true 只校验并返回 manifest（前端人审确认用），不落盘
     dry_run: Option<bool>,
 }
@@ -934,19 +1006,57 @@ struct MarketUninstallBody {
 }
 
 async fn market_install(State(s): State<AppState>, Json(b): Json<MarketInstallBody>) -> Response {
-    let path = b.path.unwrap_or_default();
-    if b.dry_run.unwrap_or(false) {
-        let src = std::path::PathBuf::from(&path);
-        match crate::market::read_manifest(&src) {
-            Ok(m) => Json(json!({ "ok": true, "dry_run": true, "app": m })).into_response(),
-            Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    // hub 条目安装：source（git/zip/local）→ 下载到临时目录 → 走现有校验/落盘管道
+    if let Some(src) = b.source.as_deref().filter(|s| !s.is_empty()) {
+        let dry = b.dry_run.unwrap_or(false);
+        let hub = b.hub.clone();
+        let tmp = std::env::temp_dir().join(format!("md-agent-dl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        match crate::hub::download_app(src, &tmp).await {
+            Ok(dir) => {
+                let r = if dry {
+                    crate::market::read_manifest(&dir).map(|m| json!({ "ok": true, "dry_run": true, "app": m }))
+                } else {
+                    crate::market::install_local(&s.kb_root, &dir.to_string_lossy()).map(|m| {
+                        if let Some(h) = hub.as_deref().filter(|h| !h.is_empty()) {
+                            record_source_hub(&s.kb_root, &m.id, h);
+                        }
+                        json!({ "ok": true, "app": m })
+                    })
+                };
+                let _ = std::fs::remove_dir_all(&tmp);
+                match r {
+                    Ok(v) => Json(v).into_response(),
+                    Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+                }
+            }
+            Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("下载失败: {e}") }))).into_response(),
         }
     } else {
-        match crate::market::install_local(&s.kb_root, &path) {
-            Ok(m) => (StatusCode::CREATED, Json(json!({ "ok": true, "app": m }))).into_response(),
-            Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+        // 本地路径通道（手动导入兜底）：path
+        let path = b.path.unwrap_or_default();
+        if b.dry_run.unwrap_or(false) {
+            let src = std::path::PathBuf::from(&path);
+            match crate::market::read_manifest(&src) {
+                Ok(m) => Json(json!({ "ok": true, "dry_run": true, "app": m })).into_response(),
+                Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+            }
+        } else {
+            match crate::market::install_local(&s.kb_root, &path) {
+                Ok(m) => (StatusCode::CREATED, Json(json!({ "ok": true, "app": m }))).into_response(),
+                Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+            }
         }
     }
+}
+
+/// 记录来源 hub：安装落盘后把 hub 名写回 kb/apps/<id>/app.json 的 source_hub 字段（幂等，失败静默）
+fn record_source_hub(root: &std::path::Path, id: &str, hub: &str) {
+    let mf = root.join("apps").join(id).join("app.json");
+    let Ok(content) = std::fs::read_to_string(&mf) else { return };
+    let Ok(mut v) = serde_json::from_str::<Value>(&content) else { return };
+    v["source_hub"] = json!(hub);
+    let _ = std::fs::write(&mf, v.to_string());
 }
 
 async fn market_uninstall(State(s): State<AppState>, Json(b): Json<MarketUninstallBody>) -> Response {

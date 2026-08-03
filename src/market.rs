@@ -27,7 +27,7 @@ pub fn read_manifest(dir: &Path) -> Result<AppInfo, String> {
         .and_then(|x| x.as_array())
         .map(|a| a.iter().filter_map(|p| p.as_str().map(String::from)).collect())
         .unwrap_or_default();
-    Ok(AppInfo { id, name, version, entry, permissions, description })
+    Ok(AppInfo { id, name, version, entry, permissions, description, source_hub: None })
 }
 
 fn valid_id(id: &str) -> bool {
