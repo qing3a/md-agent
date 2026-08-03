@@ -531,6 +531,7 @@
       case 'open': await openFile(rest[0]); break;
       case '/l1': await l1(); break;
       case '/sync': await sync(); break;
+      case '/syncall': await syncAll(); break; // 内部命令：快捷按钮「同步」全量重建
       case '/config': await cfg(); break;
       case '/remember': await remember(rest); break;
       case '/digest': await digest(rest.join(' ')); break;
@@ -1653,22 +1654,26 @@
       else html = baseHref + '\n' + html;
     }
     const iframe = document.createElement('iframe');
-    iframe.sandbox = 'allow-scripts';
+    // allow-modals：面板内 confirm/alert 生效（市场卸载/看板删除的人审确认）；仍无 allow-same-origin，桥层权限白名单不变
+    iframe.sandbox = 'allow-scripts allow-modals';
     const tabEl = document.createElement('button');
     tabEl.className = 'view-tab';
+    const ld = document.createElement('span');   // 加载角标（蓝色脉冲点，load 后移除）
+    ld.className = 'ld';
     const label = document.createElement('span');
     label.textContent = title;
     const x = document.createElement('span');
     x.textContent = '×';
     x.className = 'view-tab-x';
     x.title = '关闭';
+    tabEl.appendChild(ld);
     tabEl.appendChild(label);
     tabEl.appendChild(x);
     tabEl.addEventListener('click', () => activateView(id));
     x.addEventListener('click', (e) => { e.stopPropagation(); closeView(id); });
     const tab = { id, title, iframe, tabEl, loaded: false, busy: false, err: null, appId: app ? app.id : null, perms: app ? app.permissions : null };
-    // 加载状态跟踪：iframe load 确认加载完成；10s 未加载且无桥请求 → 标黄提示（后台节流加载慢可见）
-    iframe.addEventListener('load', () => { tab.loaded = true; tabEl.classList.remove('warn'); });
+    // 加载状态跟踪：iframe load 确认加载完成（移除角标）；10s 未加载且无桥请求 → 标黄提示
+    iframe.addEventListener('load', () => { tab.loaded = true; tabEl.classList.remove('warn'); ld.remove(); });
     setTimeout(() => {
       if (!tab.loaded && !tab.busy && tabEl.isConnected) tabEl.classList.add('warn');
     }, 10000);
@@ -1680,6 +1685,7 @@
   }
 
   document.getElementById('view-close').addEventListener('click', () => closeView(activeViewId));
+  document.getElementById('view-close-all').addEventListener('click', () => closeView());
   window.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape' && !viewOverlay.classList.contains('hidden')) closeView(activeViewId);
   });
@@ -1728,6 +1734,11 @@
       });
       const data = await res.json().catch(() => ({}));
       tab.iframe.contentWindow.postMessage({ id: msg.id, ok: res.ok, data }, '*');
+      // 面板写操作成功 → 主界面状态即时刷新（状态栏待审/任务数字不等 8s 轮询；面板内批准/改任务/补链/卸载后立即反映）
+      if (res.ok && (msg.method || 'GET') !== 'GET') {
+        refreshStatus();
+        if (msg.path && msg.path.indexOf('/api/market/') === 0) appsCache = null; // 市场变更 → /view <id> 查表失效
+      }
     } catch (e) {
       tab.iframe.contentWindow.postMessage({ id: msg.id, ok: false, error: String(e) }, '*');
     }
@@ -1798,7 +1809,7 @@
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ source: 'local', path }),
       }).catch((e) => { term.writeln('\x1b[31m安装失败: ' + e.message + '\x1b[0m'); return null; });
-      if (r) term.writeln('\x1b[32m✓ 已安装: \x1b[0m' + r.app.id + '（/view ' + r.app.id + ' 打开）');
+      if (r) { term.writeln('\x1b[32m✓ 已安装: \x1b[0m' + r.app.id + '（/view ' + r.app.id + ' 打开）'); appsCache = null; refreshStatus(); }
       return;
     }
     if (sub === 'uninstall') {
@@ -1810,7 +1821,7 @@
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id }),
       }).catch((e) => { term.writeln('\x1b[31m卸载失败: ' + e.message + '\x1b[0m'); return null; });
-      if (r) term.writeln('\x1b[32m✓ 已卸载: \x1b[0m' + id);
+      if (r) { term.writeln('\x1b[32m✓ 已卸载: \x1b[0m' + id); appsCache = null; refreshStatus(); }
       return;
     }
     if (sub === 'update') {
@@ -1823,7 +1834,7 @@
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id, path }),
       }).catch((e) => { term.writeln('\x1b[31m更新失败: ' + e.message + '\x1b[0m'); return null; });
-      if (r) term.writeln('\x1b[32m✓ 已更新: \x1b[0m' + r.app.id + ' v' + r.app.version);
+      if (r) { term.writeln('\x1b[32m✓ 已更新: \x1b[0m' + r.app.id + ' v' + r.app.version); appsCache = null; refreshStatus(); }
       return;
     }
     term.writeln('/market 子命令：\n  list                    已安装应用\n  import <路径>            从本地目录安装（人审确认）\n  uninstall <id>          卸载\n  update <id> <路径>       更新（本地新版本目录）');
@@ -1877,10 +1888,10 @@
     }
     if (a) {
       const w = (a.orphans ? a.orphans.length : 0) + (a.dangling ? a.dangling.length : 0) + (a.duplicates ? a.duplicates.length : 0) + (a.mentions ? a.mentions.length : 0);
-      secs.push(sideSec('审计', '/audit',
+      secs.push(sideSec('审计', '/view audit',
         w ? '⚠ 孤立 ' + (a.orphans || []).length + ' / 悬空 ' + (a.dangling || []).length + ' / 重复 ' + (a.duplicates || []).length + ' / 建议 ' + (a.mentions || []).length
           : '✓ 知识库健康',
-        w ? '点击运行审计' : ''));
+        w ? '点击健康审计面板' : ''));
     }
     sideBody.innerHTML = secs.join('');
   }
@@ -2179,6 +2190,17 @@
   async function sync() {
     const r = await api('/api/kb/sync', { method: 'POST' });
     term.writeln('\x1b[32m✓\x1b[0m INDEX 已重建：' + r.files + ' 篇 -> ' + r.index);
+  }
+
+  // 全量同步（快捷按钮「同步」用）：INDEX + 技能注册表 + 图谱，与心跳自动同步口径一致
+  async function syncAll() {
+    const [idx, g] = await Promise.all([
+      api('/api/kb/sync', { method: 'POST' }).catch((e) => term.writeln('\x1b[31mINDEX 重建失败: ' + e.message + '\x1b[0m')),
+      api('/api/graph/sync', { method: 'POST' }).catch((e) => term.writeln('\x1b[31m图谱重建失败: ' + e.message + '\x1b[0m')),
+    ]);
+    if (idx) term.writeln('\x1b[32m✓\x1b[0m INDEX 已重建：' + idx.files + ' 篇');
+    if (g && g.graph) term.writeln('\x1b[32m✓\x1b[0m 图谱已重建：' + g.graph.docs + ' 文档 / ' + g.graph.links + ' 链接');
+    refreshStatus();
   }
 
   async function cfg() {

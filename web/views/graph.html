@@ -10,7 +10,11 @@
   #treebox { flex: 1; min-width: 0; overflow: auto; padding: 14px; box-sizing: border-box; }
   #side { width: 300px; padding: 14px; border-left: 1px solid #313244;
           overflow: auto; font-size: 12px; box-sizing: border-box; background: #161622; }
-  h1 { font-size: 14px; color: #f5e0dc; margin: 0 0 10px; }
+  h1 { font-size: 14px; color: #f5e0dc; margin: 0; }
+  #head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  #refresh { background: #313244; color: #cdd6f4; border: none; border-radius: 6px;
+             padding: 4px 10px; font-size: 12px; cursor: pointer; }
+  #refresh:hover { background: #45475a; }
   #stats div { margin: 3px 0; }
 
   /* 文件树 */
@@ -46,7 +50,7 @@
 </head>
 <body>
 <div id="wrap">
-  <div id="treebox"><h1>知识库结构导航</h1><div id="tree">加载中…</div></div>
+  <div id="treebox"><div id="head"><h1>知识库结构导航</h1><button id="refresh" title="重新加载图谱">↻ 刷新</button></div><div id="tree">加载中…</div></div>
   <div id="side">
     <div id="stats"></div>
     <div id="detail"></div>
@@ -210,7 +214,9 @@
     }
   }
 
-  async function main() {
+  async function load() {
+    var box = document.getElementById('tree');
+    box.innerHTML = '<div style="color:#7f849c">加载中…</div>';
     var g = await hostApi('/api/graph/graph');
     state.nodes = g.nodes;
     state.edges = g.edges;
@@ -218,14 +224,22 @@
     g.nodes.forEach(function (n) { state.byPath[n.path] = n; });
     if (!g.nodes.length) {
       document.getElementById('tree').innerHTML =
-        '<div style="color:#f38ba8">图谱为空，终端执行 /rescan 重建</div>';
+        '<div style="color:#f38ba8">图谱为空，点击「同步」按钮或终端执行 /rescan 重建</div>';
       document.getElementById('stats').innerHTML = '<div>文档: 0</div>';
       return;
     }
     renderTree();
   }
 
-  main().catch(function (e) {
+  document.getElementById('refresh').addEventListener('click', function () {
+    this.disabled = true;
+    load().catch(function (e) {
+      document.getElementById('stats').innerHTML =
+        '<div style="color:#f38ba8">加载失败: ' + e.message + '</div>';
+    }).finally(function () { document.getElementById('refresh').disabled = false; });
+  });
+
+  load().catch(function (e) {
     document.getElementById('stats').innerHTML =
       '<div style="color:#f38ba8">加载失败: ' + e.message + '</div>';
   });

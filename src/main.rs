@@ -201,6 +201,10 @@ impl ApplicationHandler<UserEvent> for App {
                     // 已安装应用子菜单 → 打开应用视图
                     let id = ev.id.0.trim_start_matches("app:");
                     open_browser(&format!("{}?view={}", self.url, id));
+                } else if ev.id.0.starts_with("panel:") {
+                    // 面板导航子菜单 → 浏览器打开对应 ?view= 面板
+                    let id = ev.id.0.trim_start_matches("panel:");
+                    open_browser(&format!("{}?view={}", self.url, id));
                 }
             }
             UserEvent::RefreshTray => self.rebuild_tray(),
@@ -262,7 +266,7 @@ fn run_tray(url: &str, kb_root: &Path) {
     }
 }
 
-/// 构建动态托盘菜单：导航组（打开终端 / 应用市场）+ 已安装应用子菜单（动态）
+/// 构建动态托盘菜单：导航组（打开终端 / 应用市场）+ 已安装应用子菜单（动态）+ 面板导航子菜单
 /// + 设置组（心跳同步勾选 / Key 设置）+ 退出；分隔线分组便于扫读
 fn build_menu(kb_root: &Path) -> (Menu, TrayIds) {
     let menu = Menu::new();
@@ -295,6 +299,13 @@ fn build_menu(kb_root: &Path) -> (Menu, TrayIds) {
         }
         let _ = menu.append(&sub);
     }
+    // 面板导航子菜单（固定：待审/看板/审计/图谱 → 浏览器开 ?view= 面板）
+    let panel_sub = Submenu::new("面板", true);
+    for (id, name) in [("pending", "待审"), ("board", "看板"), ("audit", "审计"), ("graph", "图谱")] {
+        let it = MenuItem::with_id(format!("panel:{id}"), name, true, None);
+        let _ = panel_sub.append(&it);
+    }
+    let _ = menu.append(&panel_sub);
     // 设置组
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&hb_item);

@@ -151,9 +151,8 @@
     btn.disabled = true;
     try {
       await hostApi('/api/link', { method: 'POST', body: { src: src, dst: dst } });
-      var card = btn.closest('.card');
-      card.classList.add('done');
-      btn.remove();
+      // 补链成功 → 自动重跑审计：chips 计数与建议列表即时更新（不再等手动「重新审计」）
+      await refresh();
     } catch (e) {
       btn.textContent = '失败';
       btn.disabled = false;

@@ -80,6 +80,9 @@
   .view-tab.active { background: #45475a; color: #f5e0dc; }
   .view-tab.warn { color: #f9e2af; }  /* 加载慢（后台节流 10s 未就绪） */
   .view-tab.err { color: #f38ba8; }   /* 视图脚本错误（已上报宿主） */
+  .view-tab .ld { width: 6px; height: 6px; border-radius: 50%; background: #89b4fa;
+                  flex: none; animation: ld-pulse 1s ease-in-out infinite; }
+  @keyframes ld-pulse { 0%,100% { opacity: .4; } 50% { opacity: 1; } }
   .view-tab-x { color: #a6adc8; font-weight: 700; padding: 0 2px; border-radius: 3px; }
   .view-tab-x:hover { color: #f38ba8; background: #181825; }
   #view-panes { flex: 1; position: relative; min-height: 0; }
@@ -94,12 +97,11 @@
   <!-- 快捷工具栏（DOM）：输入框/状态栏回流内终端流（贴内容末尾），按钮行保留 -->
   <div id="input-bar">
     <div id="quick-btns">
-      <button data-cmd="/sync" title="重建 INDEX.md（自动索引 L2）">同步</button>
-      <button data-cmd="/rescan" title="重建知识图谱（SQLite）">图谱</button>
-      <button data-cmd="/pending" title="查看待审（LLM 写回先进这里）">待审</button>
+      <button data-cmd="/syncall" title="全量同步：重建 INDEX + 图谱 + 技能注册表">同步</button>
+      <button data-cmd="/view graph" title="知识库结构导航（查看图谱）">图谱</button>
+      <button data-cmd="/view pending" title="待审审核面板（批准/拒绝 LLM 写回）">待审</button>
       <button data-cmd="/digest" title="检索知识库并整理成新笔记（进待审）">整理</button>
       <button data-cmd="/side" title="速览侧边栏（任务/待审/图谱/审计）">速览</button>
-      <button data-cmd="/clear" title="清空多轮对话记忆">清记忆</button>
       <button data-cmd="/help" title="命令列表">帮助</button>
     </div>
   </div>
@@ -109,6 +111,7 @@
 <div id="view-overlay" class="hidden">
   <header>
     <div id="view-tabs"></div>
+    <button id="view-close-all" title="关闭全部视图">全部关闭</button>
     <button id="view-close" title="关闭当前视图 (Esc)">× 关闭</button>
   </header>
   <div id="view-panes"></div>

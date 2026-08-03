@@ -68,7 +68,7 @@
     <button onclick="load()">刷新</button>
   </div>
 </header>
-<div class="board" id="board"></div>
+<div class="board" id="board"><div class="empty" style="color:var(--dim)">加载中…</div></div>
 <script>
 const COLS = [
   ['todo', '待办'], ['doing', '进行中'], ['done', '已完成'], ['dropped', '已放弃']
@@ -152,7 +152,10 @@ function esc(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-load().catch((e) => alert(e.message));
+load().catch((e) => {
+  document.getElementById('board').innerHTML =
+    '<div class="empty" style="color:var(--red)">加载失败: ' + esc(e.message) + '</div>';
+});
 </script>
 </body>
 </html>
