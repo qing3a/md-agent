@@ -79,6 +79,8 @@ pub async fn serve(
         .route("/api/llm", post(llm_chat))
         .route("/api/context/log", post(context_log))
         .route("/api/context/stats", get(context_stats))
+        // 应用市场（阶段 0）：kb/apps/ 静态挂载到 /apps/*——沙箱 iframe 加载 app 的 HTML+assets（脚本子资源不受 CORS 限制）；/api/* 仍只走桥（沙箱 opaque origin 直连被拦，权限白名单在桥层）
+        .nest_service("/apps", tower_http::services::ServeDir::new(state.kb_root.join("apps")))
         .fallback_service(tower_http::services::ServeDir::new(state.web_dir.clone()))
         .with_state(state);
 
