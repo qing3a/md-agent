@@ -3,7 +3,7 @@
 本地常驻的 Agent Harness：托盘常驻底座 + 网页终端交互 + LLM 代理 + 检索/图谱/网页/任务工具链；记忆与写回以 Markdown 纯文本落盘，可审计、可追溯、永不锁库。
 
 > 一句话定位：**知识人写人读，AI 只负责整理、关联、推演、生成。**
-
+>
 > 本质：本系统是 Agent 的运行层（harness）——底座 + 终端 + LLM 代理 + 工具链；其中 **双层 MD 记忆是核心子系统**：正式记忆（人工审核固化）+ 待审草稿（Agent 候选，必经人审）+ 自组织整理器。它把 Agent 的长期记忆固化为纯文本文件，突破单次上下文窗口的容量限制；检索只是记忆的读取手段，知识正文永远是 Markdown。
 
 ## 核心哲学
@@ -17,28 +17,49 @@
 
 ## 当前能力（Phase 1–3 已完成 ✅）
 
-| 能力 | 说明 |
-|---|---|
-| 双层 MD 持久记忆 | 记忆子系统：L1 规范/记忆/索引层（CLAUDE.md 模式，启动注入）+ L2 内容层（grep 检索）；`INDEX.md` 自动生成；写回一律走待审，人工审核固化 |
-| 全文检索 | 内嵌 ripgrep 内核（grep + ignore crate），多关键词任一命中、智能大小写、小节上下文（`section`/`context`） |
-| **知识图谱** | SQLite `documents`/`links` 两表：`[[双向链接]]` 解析、反向链接、孤立文档检测、标签/项目维度统计；首次调用自动建库，`/rescan`、托盘「立即同步」或心跳自动重建 |
-| **伪命令行 Markdown 渲染** | 终端内 ANSI 富渲染（零依赖）：标题加粗、行内代码/加粗/链接/`[[双链]]` 着色、列表/引用/代码围栏；**表格按 markdown 行显示**（保留 `|` 结构，复制不失真）；frontmatter 变暗；流式回答按完整行渲染 |
-| **/view 面板渲染层** | iframe 沙箱 + postMessage 桥（视图经宿主调 `/api/*`，仅允许 api 前缀，真机验证通过）：`/view graph` **知识库结构导航**（目录层级缩进树 + 项目色点 + 孤立/悬空标记，点击文档右侧显示出链/入链并可跳转——全图环形布局发散已弃用）、`/view board` 任务看板、`/view pending` 待审审核面板、`/view audit` 审计面板、`/view <html>` 渲染 kb 内本地 HTML、`/view off` 或 Esc 关闭；**多标签页并存**（各视图可同时打开、点击标签切换、标签 × / Esc 关单个、`/view off` 全关）；**视图健壮性**（10s 未加载 tab 标黄、沙箱脚本错误上报宿主标红 + 终端提示、桥请求 20s 超时兜底） |
-| **心跳自动同步（自组织自动发现）** | 默认关闭；开启后每 60s（可调）指纹比对知识库（路径+mtime+大小，排除 pending/），变化自动重建 INDEX+图谱并跑本地审计，状态行提示「心跳开 + ⚠审计发现」；托盘勾选 / `/heartbeat` / 配置页三入口；`sync_lock` 与手动写端点防并发 |
-| **终端壳体验** | 启动欢迎横幅 + 状态汇总（版本/KB/图谱/模型/待审/进行中任务）；**输入框回流内**——4 行结构贴内容末尾（上边框/输入行/下边框/状态行），resize 自动重画；↑↓ 输入历史、Tab 命令循环补全（`/` 命令 + `@` 文件提及）、Ctrl+C 中断、**Esc 停止**、**Ctrl+K 速览**均经 `attachCustomKeyEventHandler`；**推理思考折叠**（流式 `reasoning_content` → 推理期灰色「🧠 思考中…」→ 首个内容到达时清除并出「──── 回答 ────」标题，回答后「Thought · N 秒」折叠行）；**本次回答 token 用量**（`stream_options.include_usage`，引用来源前）；**@ 文件提及**（`@xxx`+Tab 补全 KB 文档路径，提交时指定文档全文注入检索目标）；**输入草稿 + 命令历史 localStorage 持久化**（刷新恢复未提交输入，上限 100）；**速览侧边栏**（`/side` / 快捷按钮 / Ctrl+K 唤出左侧抽屉：任务/待审/图谱/审计速览，点卡片直达对应面板）；快捷按钮行（同步/图谱/待审/整理/**速览**/清记忆/帮助，DOM）；状态行（● 服务/模型/KB/待审/任务/图谱/心跳 + ⚠审计警告，8s 轮询）；提交消息块保留流内整行背景色；回答期间输入框可编辑但禁提交 |
-| **审计面板** | `/view audit`：审计结果卡片化——补链建议一键 [应用]、悬空/孤立/重复分组展示（`/audit` 终端版保留） |
-| **记忆自组织（Phase 3-A 基础）** | `/audit` 本地规则健康审计（孤立/无出链/重复标题/悬空链接/提及未链接建议，零 LLM 快速确定）；`/link` 人工补链接（文件名双链、去重、自动重建图谱）；`/link-all` 一键应用建议；`/suggest` 补全缺失主题（带主题名）或**无参盲区模式**（先审计后让 LLM 分析知识盲区生成新文档，进待审）；`/diff`/`/conflicts` 行级对比与冲突检查 |
-| **待审行级预览** | `/preview <待审路径>` 只读展示批准后将写入的内容（记忆条目按当日小节合并规则计算，不落盘） |
-| **网页读取与操作** | `/fetch <url> [标题]` 静态抓取；`/page <url> [标题]` 动态读取（headless 等 JS 渲染）；`/page act <url> <json 动作数组>` **写侧**（click/fill/select/scroll，动作清单**人工确认后执行**，返回页面结果） |
-| **任务引擎（Phase 3-B）** | `kb/.tasks.db` 独立 SQLite：目标/状态机（待办·进行中·完成·放弃）/依赖/推进日志；`/task` 终端文字看板 + `/task board` HTML 看板；**依赖就绪校验**（进入进行中/完成时依赖必须已完成）；`/task plan <目标>` LLM 拆解串行子任务链 |
-| LLM 代理 | OpenAI 兼容（Ollama/DeepSeek 等），后端代理防 CORS 与密钥暴露；**SSE 流式透传** |
-| Agent 问答回路 | 启动注入 L1 → 提取关键词 → 检索 L2 → 拼 Prompt → 流式回答 → `[文件:行号]` 引用（检索词当前为前端启发式提取；LLM 显式 Tool Use 见路线图 Phase 3-C P1） |
-| 多轮对话记忆 | 会话内保留最近 4 轮，**localStorage 持久化**（刷新页面不丢，`/clear` 清空） |
-| 写回沉淀 | LLM 回答附 `<!-- md-agent-save -->` 块自动落盘：新知识写 L2（自动补 frontmatter）、决策写 L1 MEMORY；`/remember` 手动沉淀 |
-| **待审机制** | LLM 生成的新笔记/记忆条目先进 `pending/`（不直接污染知识库）：`/view pending` **图形审核面板**（三栏：待审清单批量勾选 / 目标文档上下文+绿色 diff / 可编辑内容；支持**编辑后批准**与批量批准/拒绝）；终端 `/pending` `/approve` `/reject` 保留；落地自动重建 INDEX+图谱；待审文件不进检索与图谱 |
-| `/digest` | 检索结果交给 LLM 整理成结构化笔记写入 `notes/` |
-| 可视化配置页 | `/config.html`：endpoint / model / api_key（掩码显示）+ 测试连接 |
-| 托盘常驻 | tray-icon + winit，右键菜单：打开终端 / **心跳同步（可勾选开关）** / 立即同步 / 退出；release 单 exe 隐藏控制台 |
+### 记忆核心
+
+- **双层 MD 持久记忆**：记忆子系统：L1 规范/记忆/索引层（CLAUDE.md 模式，启动注入）+ L2 内容层（grep 检索）；`INDEX.md` 自动生成；写回一律走待审，人工审核固化
+- **待审机制**：LLM 生成的新笔记/记忆条目先进 `pending/`（不直接污染知识库）：`/view pending` 图形审核面板（三栏：待审清单批量勾选 / 目标文档上下文+绿色 diff / 可编辑内容；支持编辑后批准与批量批准/拒绝）；终端 `/pending` `/approve` `/reject` 保留；落地自动重建 INDEX+图谱；待审文件不进检索与图谱
+- **多轮对话记忆**：会话内保留最近 4 轮，localStorage 持久化（刷新页面不丢，`/clear` 清空）
+- **写回沉淀**：LLM 回答附 `<!-- md-agent-save -->` 块自动落盘：新知识写 L2（自动补 frontmatter）、决策写 L1 MEMORY；`/remember` 手动沉淀
+
+### 检索与图谱
+
+- **全文检索**：内嵌 ripgrep 内核（grep + ignore crate），多关键词任一命中、智能大小写、小节上下文（`section`/`context`）
+- **知识图谱**：SQLite `documents`/`links` 两表：`[[双向链接]]` 解析、反向链接、孤立文档检测、标签/项目维度统计；首次调用自动建库，`/sync`、`/rescan` 或心跳自动重建
+
+### 终端交互
+
+- **终端壳体验**：启动欢迎横幅 + 状态汇总（版本/KB/图谱/模型/待审/进行中任务）；**输入框回流内**——4 行结构贴内容末尾（上边框/输入行/下边框/状态行），resize 自动重画；↑↓ 输入历史、Tab 命令循环补全（`/` 命令 + `@` 文件提及）、Ctrl+C 中断、Esc 停止、Ctrl+K 速览均经 `attachCustomKeyEventHandler`；推理思考折叠（流式 `reasoning_content` → 推理期灰色「🧠 思考中…」→ 首个内容到达时清除并出「──── 回答 ────」标题，回答后「Thought · N 秒」折叠行）；本次回答 token 用量（`stream_options.include_usage`，引用来源前）；@ 文件提及（`@xxx`+Tab 补全 KB 文档路径，提交时指定文档全文注入检索目标）；输入草稿 + 命令历史 localStorage 持久化（刷新恢复未提交输入，上限 100）；速览侧边栏（`/side` / 快捷按钮 / Ctrl+K 唤出左侧抽屉：任务/待审/图谱/审计速览，点卡片直达对应面板）；快捷按钮行（同步/图谱/待审/整理/速览/清记忆/帮助，DOM）；状态行（● 服务/模型/KB/待审/任务/图谱/心跳 + ⚠审计警告，8s 轮询）；提交消息块保留流内整行背景色；回答期间输入框可编辑但禁提交
+- **伪命令行 Markdown 渲染**：终端内 ANSI 富渲染（零依赖）：标题加粗、行内代码/加粗/链接/`[[双链]]` 着色、列表/引用/代码围栏；**表格按 markdown 行显示**（保留 `|` 结构，复制不失真）；frontmatter 变暗；流式回答按完整行渲染
+
+### 面板视图
+
+- **/view 面板渲染层**：iframe 沙箱 + postMessage 桥（视图经宿主调 `/api/*`，仅允许 api 前缀，真机验证通过）：`/view graph` 知识库结构导航（目录层级缩进树 + 项目色点 + 孤立/悬空标记，点击文档右侧显示出链/入链并可跳转——全图环形布局发散已弃用）、`/view board` 任务看板、`/view pending` 待审审核面板、`/view audit` 审计面板、`/view <html>` 渲染 kb 内本地 HTML、`/view off` 或 Esc 关闭；多标签页并存（各视图可同时打开、点击标签切换、标签 × / Esc 关单个、`/view off` 全关）；视图健壮性（10s 未加载 tab 标黄、沙箱脚本错误上报宿主标红 + 终端提示、桥请求 20s 超时兜底）
+- **审计面板**：`/view audit`：审计结果卡片化——补链建议一键 [应用]、悬空/孤立/重复分组展示（`/audit` 终端版保留）
+- **待审行级预览**：`/preview <待审路径>` 只读展示批准后将写入的内容（记忆条目按当日小节合并规则计算，不落盘）
+- **可视化配置页**：`/config.html`：endpoint / model / api_key（掩码显示）+ 测试连接
+
+### 自组织与审核闭环
+
+- **心跳自动同步（自组织自动发现）**：默认关闭；开启后每 60s（可调）指纹比对知识库（路径+mtime+大小，排除 pending/），变化自动重建 INDEX+图谱并跑本地审计，状态行提示「心跳开 + ⚠审计发现」；托盘勾选 / `/heartbeat` / 配置页三入口；`sync_lock` 与手动写端点防并发
+- **记忆自组织（Phase 3-A 基础）**：`/audit` 本地规则健康审计（孤立/无出链/重复标题/悬空链接/提及未链接建议，零 LLM 快速确定）；`/link` 人工补链接（文件名双链、去重、自动重建图谱）；`/link-all` 一键应用建议；`/suggest` 补全缺失主题（带主题名）或无参盲区模式（先审计后让 LLM 分析知识盲区生成新文档，进待审）；`/diff`/`/conflicts` 行级对比与冲突检查
+- **/digest**：检索结果交给 LLM 整理成结构化笔记写入 `notes/`
+
+### 工具链
+
+- **网页读取与操作**：`/fetch <url> [标题]` 静态抓取；`/page <url> [标题]` 动态读取（headless 等 JS 渲染）；`/page act <url> <json 动作数组>` 写侧（click/fill/select/scroll，动作清单**人工确认后执行**，返回页面结果）
+- **任务引擎（Phase 3-B）**：`kb/.tasks.db` 独立 SQLite：目标/状态机（待办·进行中·完成·放弃）/依赖/推进日志；`/task` 终端文字看板 + `/task board` HTML 看板；**依赖就绪校验**（进入进行中/完成时依赖必须已完成）；`/task plan <目标>` LLM 拆解串行子任务链
+
+### Agent 与 LLM
+
+- **LLM 代理**：OpenAI 兼容（Ollama/DeepSeek 等），后端代理防 CORS 与密钥暴露；SSE 流式透传
+- **Agent 问答回路**：启动注入 L1 → 提取关键词 → 检索 L2 → 拼 Prompt → 流式回答 → `[文件:行号]` 引用（检索词当前为前端启发式提取；LLM 显式 Tool Use 见路线图 Phase 3-C P1）
+
+### 常驻与运维
+
+- **托盘常驻**：tray-icon + winit，右键菜单分组：打开终端 / 应用市场 + 已安装应用子菜单（动态）/ 心跳同步（复选框 + 文字「开/关」双信号，点击即切换）/ Key 设置（直达 /config.html API Key 输入）/ 退出；release 单 exe 隐藏控制台
 
 ## 架构（四层）
 
@@ -89,30 +110,45 @@ JSON
 直接输入问题走 Agent 问答；`/help` 查看全部：
 
 ```
+# 检索与阅读
 /search <关键词>      检索双层库（显示所属小节）
 open <路径>           查看 KB 内 MD
 /l1                   查看 L1 规范/记忆/索引层
-/sync                 重建 INDEX.md
-/digest <主题>        检索并把结果整理成新笔记写入 notes/
-/remember [路径] 内容  手动沉淀（默认 MEMORY.md）
 /graph <路径>         知识图谱：出链/入链/关联簇
 /orphans              孤立文档（无入链也无出链）
 /projects             项目维度统计    /tags 标签统计
+
+# 记忆写回与索引
+/remember [路径] 内容  手动沉淀（默认 MEMORY.md）
+/digest <主题>        检索并把结果整理成新笔记写入 notes/
+/sync                 重建 INDEX.md
 /rescan               重建知识图谱（SQLite）
+
+# 待审与预览
 /pending              查看待审（LLM 写回/生成笔记先进这里）
 /preview <待审路径>    行级预览：批准后将写入的内容（只读）
 /approve <路径|all>    批准待审 → 写入知识库（自动重建 INDEX+图谱）
 /reject <路径|all>     丢弃待审
+
+# 面板与速览
 /view graph|board|pending|audit|<html>|off  面板渲染层（多标签并存，Esc 关闭当前）
 /side                速览侧边栏（任务/待审/图谱/审计，Ctrl+K 或快捷按钮同样唤出）
+
+# 自组织
 /audit                知识库健康审计（盲区/冲突/补链接建议）
 /conflicts            冲突检查（重复标题/悬空链接）   /diff <A> <B> 行级对比
 /link <源> <目标>      补链接（在源文档追加 [[目标]]，人工确认）
 /link-all              一键应用 /audit 的全部补链接建议
 /suggest [主题]        LLM 补全缺失主题（无参 = 盲区分析模式，均进待审）
+
+# 网页
 /fetch <url> [标题]    静态抓取网页：阅读视图 / 带标题则沉淀为待审笔记
 /page <url> [标题]     动态网页读取（headless Edge/Chrome，等 JS 渲染）
+
+# 任务
 /task                  任务看板：new/start/done/drop/note/dep/rm/plan/board
+
+# 系统
 /clear                清空多轮对话记忆
 /config               查看配置（掩码）
 /heartbeat [on|off|interval <秒>|status]  心跳自动同步开关/周期/状态（变化自动重建+审计提示）
@@ -248,20 +284,20 @@ python scripts/mock_llm.py 9000     # 自定义端口
 ## 目录
 
 ```
-src/main.rs   托盘 + winit 事件循环 + 服务线程
-src/server.rs Axum 路由与接口
-src/search.rs 检索（ignore 遍历 + grep crate，多关键词/智能大小写/小节上下文）
-src/graph.rs  知识图谱（SQLite documents/links、[[链接]] 解析、反链/孤立/标签/项目查询）
-src/llm.rs    LLM 代理（非流式 JSON + 流式 SSE 透传）
-src/fetch.rs  /fetch 静态网页抓取（HTTP + HTML 文本提取）
-src/page.rs   /page 动态网页 + /page act 动作执行（chromiumoxide + 系统 Edge/Chrome headless CDP）
-src/heartbeat.rs 心跳自动同步（指纹检测 / 状态结构）
-src/task.rs   任务引擎（kb/.tasks.db 独立库：状态机/依赖/日志）
-src/kb.rs     双层记忆布局 / frontmatter 解析 / INDEX 自动生成 / 路径安全 / 待审机制
-src/config.rs 本地配置
-web/          xterm.js 终端前端（Agent 回路 + 管理命令）+ config.html 配置页
-web/views/    内置面板视图（graph.html 结构导航 / board.html 任务看板）
-kb/           L1 规范层 + L2 内容层（首次运行自动补齐模板）
-scripts/      mock_llm.py 开发测试工具
-dist/         release 打包产物（双击即用）
+src/main.rs       托盘 + winit 事件循环 + 服务线程
+src/server.rs     Axum 路由与接口
+src/search.rs     检索（ignore 遍历 + grep crate，多关键词/智能大小写/小节上下文）
+src/graph.rs      知识图谱（SQLite documents/links、[[链接]] 解析、反链/孤立/标签/项目查询）
+src/llm.rs        LLM 代理（非流式 JSON + 流式 SSE 透传）
+src/fetch.rs      /fetch 静态网页抓取（HTTP + HTML 文本提取）
+src/page.rs       /page 动态网页 + /page act 动作执行（chromiumoxide + 系统 Edge/Chrome headless CDP）
+src/heartbeat.rs  心跳自动同步（指纹检测 / 状态结构）
+src/task.rs       任务引擎（kb/.tasks.db 独立库：状态机/依赖/日志）
+src/kb.rs         双层记忆布局 / frontmatter 解析 / INDEX 自动生成 / 路径安全 / 待审机制
+src/config.rs     本地配置
+web/              xterm.js 终端前端（Agent 回路 + 管理命令）+ config.html 配置页
+web/views/        内置面板视图（graph.html 结构导航 / board.html 任务看板）
+kb/               L1 规范层 + L2 内容层（首次运行自动补齐模板）
+scripts/          mock_llm.py 开发测试工具
+dist/             release 打包产物（双击即用）
 ```

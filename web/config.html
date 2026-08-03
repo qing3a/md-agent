@@ -157,6 +157,8 @@
   $('saveBtn').addEventListener('click', save);
   $('testBtn').addEventListener('click', testConn);
   load();
+  // 托盘「Key 设置」→ #key 直达并聚焦 API Key 输入框
+  if (location.hash === '#key') $('apiKey').focus();
 </script>
 </body>
 </html>

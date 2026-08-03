@@ -329,10 +329,11 @@
       const hbTxt = hb ? (hb.enabled ? '心跳开' : '心跳关') : '';
       let auditTxt = '';
       if (hb && hb.audit && (hb.audit.orphans || hb.audit.dangling || hb.audit.duplicates || hb.audit.mentions)) {
-        auditTxt = ' ⚠审计' +
-          (hb.audit.orphans ? '孤立' + hb.audit.orphans : '') +
-          (hb.audit.dangling ? '悬空' + hb.audit.dangling : '') +
-          (hb.audit.duplicates ? '重复' + hb.audit.duplicates : '');
+        const parts = [];
+        if (hb.audit.orphans) parts.push('孤立 ' + hb.audit.orphans);
+        if (hb.audit.dangling) parts.push('悬空 ' + hb.audit.dangling);
+        if (hb.audit.duplicates) parts.push('重复 ' + hb.audit.duplicates);
+        auditTxt = ' ⚠ 审计：' + parts.join(' · ');
       }
       statusLine = truncateW(
         '\x1b[' + (ok ? '32' : '31') + 'm●\x1b[0m ' + (ok ? '服务运行中' : '服务异常') +

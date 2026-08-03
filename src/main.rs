@@ -147,7 +147,7 @@ struct TrayIds {
     open: MenuId,
     market: MenuId,
     hb: MenuId,
-    sync: MenuId,
+    key: MenuId,
     quit: MenuId,
 }
 
@@ -195,15 +195,8 @@ impl ApplicationHandler<UserEvent> for App {
                     let _ = crate::config::save(&cfg);
                     eprintln!("心跳自动同步: {}", if cfg.heartbeat.enabled { "开" } else { "关" });
                     self.rebuild_tray();
-                } else if ev.id == self.ids.sync {
-                    match kb::sync_index(&self.kb_root) {
-                        Ok(r) => eprintln!("INDEX 已重建: {} 篇", r.files),
-                        Err(e) => eprintln!("INDEX 重建失败: {e}"),
-                    }
-                    match graph::sync_graph(&self.kb_root) {
-                        Ok(g) => eprintln!("图谱已重建: {} 文档 / {} 链接 / {} 悬空", g.docs, g.links, g.dangling),
-                        Err(e) => eprintln!("图谱重建失败: {e}"),
-                    }
+                } else if ev.id == self.ids.key {
+                    open_browser(&format!("{}/config.html#key", self.url));
                 } else if ev.id.0.starts_with("app:") {
                     // 已安装应用子菜单 → 打开应用视图
                     let id = ev.id.0.trim_start_matches("app:");
@@ -220,7 +213,7 @@ impl App {
     /// 重建动态托盘菜单（30s 定时 + 心跳切换 + 应用安装/卸载后）
     fn rebuild_tray(&mut self) {
         if let Some(tray) = &self.tray {
-            let (menu, ids) = build_menu(&self.url, &self.kb_root);
+            let (menu, ids) = build_menu(&self.kb_root);
             let _ = tray.set_menu(Some(Box::new(menu)));
             self.ids = ids;
         }
@@ -246,7 +239,7 @@ fn run_tray(url: &str, kb_root: &Path) {
         let _ = proxy.send_event(UserEvent::Menu(e));
     }));
 
-    let (menu, ids) = build_menu(url, kb_root);
+    let (menu, ids) = build_menu(kb_root);
     let mut app = App {
         url: url.to_string(),
         kb_root: kb_root.to_path_buf(),
@@ -269,26 +262,32 @@ fn run_tray(url: &str, kb_root: &Path) {
     }
 }
 
-/// 构建动态托盘菜单：固定项（打开终端 / 应用市场 / 心跳 / 立即同步 / 退出）+ 已安装应用子菜单（动态）
-fn build_menu(url: &str, kb_root: &Path) -> (Menu, TrayIds) {
+/// 构建动态托盘菜单：导航组（打开终端 / 应用市场）+ 已安装应用子菜单（动态）
+/// + 设置组（心跳同步勾选 / Key 设置）+ 退出；分隔线分组便于扫读
+fn build_menu(kb_root: &Path) -> (Menu, TrayIds) {
     let menu = Menu::new();
     let open_item = MenuItem::new("打开终端", true, None);
     let market_item = MenuItem::new("应用市场", true, None);
+    // 复选框 + 文字态双信号：对勾在部分主题下不明显，文字「开/关」保证反馈可见。
+    // 注意 with_id 参数顺序：(id, text, enabled, checked, accelerator) —— enabled 恒为 true，
+    // 若把 checked 传进 enabled，关态项会被原生置灰而点不动。
+    let hb_on = crate::config::load().heartbeat.enabled;
     let hb_item = CheckMenuItem::with_id(
         "hb-sync",
-        "心跳同步",
-        crate::config::load().heartbeat.enabled,
+        if hb_on { "心跳同步：开" } else { "心跳同步：关" },
         true,
+        hb_on,
         None,
     );
-    let sync_item = MenuItem::new("立即同步", true, None);
+    let key_item = MenuItem::new("Key 设置", true, None);
     let quit_item = MenuItem::new("退出", true, None);
+    // 导航组
     let _ = menu.append(&open_item);
     let _ = menu.append(&market_item);
-    let _ = menu.append(&PredefinedMenuItem::separator());
     // 已安装应用子菜单（动态：kb/apps/*/app.json）
     let apps = crate::kb::list_apps(kb_root);
     if !apps.is_empty() {
+        let _ = menu.append(&PredefinedMenuItem::separator());
         let sub = Submenu::new("已安装应用", true);
         for a in &apps {
             let it = MenuItem::with_id(format!("app:{}", a.id), format!("{} v{}", a.name, a.version), true, None);
@@ -296,15 +295,17 @@ fn build_menu(url: &str, kb_root: &Path) -> (Menu, TrayIds) {
         }
         let _ = menu.append(&sub);
     }
+    // 设置组
+    let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&hb_item);
-    let _ = menu.append(&sync_item);
+    let _ = menu.append(&key_item);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&quit_item);
     let ids = TrayIds {
         open: open_item.id().clone(),
         market: market_item.id().clone(),
         hb: hb_item.id().clone(),
-        sync: sync_item.id().clone(),
+        key: key_item.id().clone(),
         quit: quit_item.id().clone(),
     };
     (menu, ids)
