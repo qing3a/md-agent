@@ -200,9 +200,13 @@ pub fn sync_graph(root: &Path) -> Result<GraphSyncReport, String> {
     }
 
     let mut link_rows: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     for (src, content) in &contents {
         for tgt in parse_links(content) {
-            link_rows.push((src.clone(), tgt));
+            // 同一文档内重复 [[链接]] 去重：否则 UNIQUE(src,dst) 约束会让整个图谱同步失败
+            if seen.insert((src.clone(), tgt.clone())) {
+                link_rows.push((src.clone(), tgt));
+            }
         }
     }
 

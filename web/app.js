@@ -1315,6 +1315,17 @@
         target = 'pending/MEMORY.' + Date.now() + '.md';
         // 保留条目原文（approve 时后端按当日小节合并）
         if (!/^##\s/.test(content)) content = '## ' + today + '\n' + content;
+        // 记忆断链修复 B：自动生成到相关 L2 文档的双链建议（进待审人审确认，编辑后批准可增删）
+        try {
+          const sug = await api('/api/link/suggest', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: content.replace(/^##\s+[^\n]*\n?/, '') }), // 去掉日期标题，避免日期词噪声
+          });
+          const fresh = (sug.links || [])
+            .map((l) => (l.path || '').split('/').pop().replace(/\.md$/i, ''))
+            .filter((s) => s && !content.includes('[[' + s + ']]'));
+          if (fresh.length) content += '\n相关：' + fresh.map((s) => '[[' + s + ']]').join(' ');
+        } catch (e) { /* 关联建议失败不阻塞写回 */ }
       } else {
         target = 'pending/' + path;
         if (!/^---/.test(content)) {

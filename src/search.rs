@@ -182,3 +182,190 @@ fn context_of(lines: &[&str], hit_line: u64, radius: usize, max_chars: usize) ->
     }
     out.trim_end().to_string()
 }
+
+// ---------- 记忆关联建议（记忆断链修复 B） ----------
+
+#[derive(Debug, Serialize)]
+pub struct SuggestLink {
+    /// 相对 KB 根路径（notes/...）
+    pub path: String,
+    /// 命中的检索词（去重）
+    pub matched: Vec<String>,
+    /// 总命中次数
+    pub hits: usize,
+}
+
+/// 中文通用词（关联评分时剔除，防噪声命中）
+const LINK_STOPWORDS: &[&str] = &[
+    "这个", "那个", "这些", "那些", "因为", "所以", "但是", "然后", "可以", "就是", "不是",
+    "一个", "我们", "你们", "他们", "什么", "怎么", "如何", "现在", "还是", "没有", "进行",
+    "已经", "需要", "应该", "相关", "之后", "之前", "比如", "例如", "如果", "问题", "内容",
+];
+
+/// 记忆关联建议：给定记忆条目文本，从 L2 notes/ 找相关文档（词重叠评分）。
+/// ASCII 词(≥3 含字母) + CJK 二元组（去停用词）做检索词；每文档统计「命中词数」与
+/// 总命中数，按命中词数降序、再按总命中降序；优先命中词数 ≥2 的文档（防通用词噪声），
+/// 不足再用 ≥1 的补到 limit。返回 top N——供写回 MEMORY 时生成「相关：[[双链]]」建议。
+pub fn suggest_links(root: &Path, content: &str, limit: usize) -> Result<Vec<SuggestLink>, String> {
+    let terms = link_terms(content);
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let notes = root.join("notes");
+    // (路径, 命中词集合, 总命中数)
+    let mut scored: Vec<(String, HashSet<String>, usize)> = Vec::new();
+    if notes.exists() {
+        let mut walker = ignore::WalkBuilder::new(&notes)
+            .hidden(false)
+            .git_ignore(false)
+            .git_global(false)
+            .git_exclude(false)
+            .build();
+        for entry in walker.flatten() {
+            let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
+            if !is_file {
+                continue;
+            }
+            let p = entry.path();
+            if p.extension().map(|e| e != "md").unwrap_or(true) {
+                continue;
+            }
+            let rel = p
+                .strip_prefix(&root)
+                .map(|r| r.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let Ok(text) = std::fs::read_to_string(p) else { continue };
+            let lower = text.to_lowercase();
+            let mut matched: HashSet<String> = HashSet::new();
+            let mut hits = 0usize;
+            for t in &terms {
+                let c = lower.matches(t).count();
+                if c > 0 {
+                    hits += c;
+                    matched.insert(t.clone());
+                }
+            }
+            if !matched.is_empty() {
+                scored.push((rel, matched, hits));
+            }
+        }
+    }
+    scored.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(b.2.cmp(&a.2)).then(a.0.cmp(&b.0)));
+
+    let to_link = |(path, matched, hits): &(String, HashSet<String>, usize)| -> SuggestLink {
+        let mut m: Vec<String> = matched.iter().cloned().collect();
+        m.sort();
+        SuggestLink { path: path.clone(), matched: m, hits: *hits }
+    };
+
+    let mut out: Vec<SuggestLink> = Vec::new();
+    for s in scored.iter().filter(|s| s.1.len() >= 2) {
+        out.push(to_link(s));
+        if out.len() >= limit {
+            return Ok(out);
+        }
+    }
+    let weak: Vec<&(String, HashSet<String>, usize)> = scored
+        .iter()
+        .filter(|s| s.1.len() == 1 && !out.iter().any(|o| o.path == s.0))
+        .collect();
+    for s in weak {
+        out.push(to_link(s));
+        if out.len() >= limit {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// 提取关联检索词：ASCII 词（≥3 且含字母，小写）+ CJK（U+4E00..9FFF）连续片段滑窗二元组
+fn link_terms(content: &str) -> Vec<String> {
+    let mut set: HashSet<String> = HashSet::new();
+    let mut buf = String::new();
+    let mut ascii_mode = false;
+    let flush = |buf: &mut String, ascii_mode: bool, set: &mut HashSet<String>| {
+        if buf.is_empty() {
+            return;
+        }
+        if ascii_mode {
+            if buf.len() >= 3 && buf.chars().any(|c| c.is_ascii_alphabetic()) {
+                set.insert(buf.to_lowercase());
+            }
+        } else {
+            let s: Vec<char> = buf.chars().collect();
+            for i in 0..s.len().saturating_sub(1) {
+                let bg: String = s[i..i + 2].iter().collect();
+                if !LINK_STOPWORDS.contains(&bg.as_str()) {
+                    set.insert(bg);
+                }
+            }
+        }
+        buf.clear();
+    };
+    for ch in content.chars() {
+        let is_ascii = ch.is_ascii_alphanumeric() || ch == '_';
+        let is_cjk = ('\u{4E00}'..='\u{9FFF}').contains(&ch);
+        if is_ascii {
+            if !ascii_mode {
+                flush(&mut buf, ascii_mode, &mut set);
+                ascii_mode = true;
+            }
+            buf.push(ch);
+        } else if is_cjk {
+            if ascii_mode {
+                flush(&mut buf, ascii_mode, &mut set);
+                ascii_mode = false;
+            }
+            buf.push(ch);
+        } else {
+            flush(&mut buf, ascii_mode, &mut set);
+            ascii_mode = false;
+        }
+    }
+    flush(&mut buf, ascii_mode, &mut set);
+    set.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("md-agent-st-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("notes/架构")).unwrap();
+        d
+    }
+
+    #[test]
+    fn suggest_links_finds_related_doc() {
+        let root = tmp("links");
+        std::fs::write(root.join("notes/架构/托盘应用.md"), "# 托盘应用\n托盘心跳 双链 CheckMenuItem 参数\n").unwrap();
+        std::fs::write(root.join("notes/其它文档.md"), "# 其它\n无相关内容\n").unwrap();
+        let out = suggest_links(&root, "修了托盘心跳 CheckMenuItem 参数 bug", 3).unwrap();
+        assert_eq!(out.len(), 1, "只应命中相关文档");
+        assert!(out[0].path.ends_with("托盘应用.md"));
+        assert!(out[0].matched.len() >= 2, "强关联应命中多个词");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn suggest_links_empty_on_no_match() {
+        let root = tmp("links2");
+        std::fs::write(root.join("notes/文档.md"), "# 文档\n只有不相关内容\n").unwrap();
+        let out = suggest_links(&root, "跟库里完全无关的话题讨论", 3).unwrap();
+        assert!(out.is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn link_terms_no_punct_garbage() {
+        let t = link_terms("为什么会有孤立文档？现在 修了bug");
+        // 全角问号不应产生带标点二元组
+        assert!(!t.iter().any(|s| s.contains('？')), "不得含全角标点: {t:?}");
+        assert!(t.iter().any(|s| s == "checkmenuitem" || s == "bug"), "ASCII 词应保留");
+        assert!(t.iter().any(|s| s == "文档"), "中文二元组应保留");
+    }
+}

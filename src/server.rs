@@ -66,6 +66,7 @@ pub async fn serve(
         .route("/api/heartbeat", get(heartbeat_get))
         .route("/api/heartbeat", post(heartbeat_set))
         .route("/api/link", post(link_add))
+        .route("/api/link/suggest", post(link_suggest))
         .route("/api/fetch", get(fetch_page))
         .route("/api/page", get(page_read))
         .route("/api/page/act", post(page_act))
@@ -519,6 +520,24 @@ async fn link_add(State(st): State<AppState>, Json(body): Json<LinkBody>) -> Res
     let _ = crate::kb::sync_index(&st.kb_root);
     let _ = crate::graph::sync_graph(&st.kb_root);
     Json(json!({ "ok": true, "src": src, "dst": dst, "link": link_line })).into_response()
+}
+
+/// 记忆关联建议（记忆断链修复 B）：给定记忆条目文本，返回相关 L2 文档（词重叠评分，
+/// 命中词数 ≥2 优先）。前端写回 MEMORY 进待审时调用，生成「相关：[[双链]]」建议行交人审。
+#[derive(Deserialize)]
+struct LinkSuggestBody {
+    content: String,
+}
+
+async fn link_suggest(State(st): State<AppState>, Json(body): Json<LinkSuggestBody>) -> Response {
+    match crate::search::suggest_links(&st.kb_root, &body.content, 3) {
+        Ok(links) => Json(json!({ "ok": true, "links": links })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        )
+            .into_response(),
+    }
 }
 
 // ---------- 网页读取（/fetch 静态抓取） ----------
