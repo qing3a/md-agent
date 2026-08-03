@@ -42,6 +42,37 @@
   let history = loadHistory(); // 多轮对话记忆（localStorage 持久化，刷新不丢）
   const MAX_HISTORY = 8; // 最近 4 轮
 
+  // L0 会话快照（轻量，步骤①）：本页会话的「问题+回答」对，空闲防抖写入 kb/sessions/<时间>.md。
+  // 流水非知识——后端已排除 sessions/ 于图谱/检索/心跳指纹；为未来提炼流水线（task.rs 蒸馏 → pending 人审）存原料。
+  const MAX_SESSION_LOG = 50;
+  let sessionLog = [];      // [{q, a, ts}]
+  let sessionFile = null;   // 本会话固定文件名（首次落盘时定）
+  let l0Timer = null;
+  function sessionStamp() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+  }
+  function writeL0Snapshot() {
+    if (!sessionLog.length || sessionLog.length === 0) return;
+    if (!sessionFile) sessionFile = 'sessions/' + sessionStamp() + '.md';
+    const body = sessionLog.map((s) =>
+      '## Q: ' + String(s.q || '').slice(0, 300) + '\nA: ' + String(s.a || '(无回答/中断)').slice(0, 3000)
+    ).join('\n\n');
+    const content = '---\ntype: session\ndate: ' + localToday() + '\n---\n\n# 会话记录\n\n' + body + '\n';
+    api('/api/file', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: sessionFile, content }),
+    }).catch(() => { /* L0 落盘失败不打扰用户 */ });
+  }
+  function scheduleL0Snapshot() {
+    clearTimeout(l0Timer);
+    l0Timer = setTimeout(writeL0Snapshot, 20000); // 20s 无新问答 → 落盘
+  }
+  // 会话关闭前尽力写一次（best-effort，不 await）
+  window.addEventListener('beforeunload', writeL0Snapshot);
+  window.addEventListener('pagehide', writeL0Snapshot);
+
   function loadHistory() {
     try {
       const h = JSON.parse(localStorage.getItem('md-agent-history') || '[]');
@@ -1051,6 +1082,11 @@
     if (history.length > MAX_HISTORY) history = history.slice(-MAX_HISTORY);
     saveHistory();
 
+    // L0 会话快照（步骤①）：累积问题+回答对，空闲防抖落盘 kb/sessions/
+    sessionLog.push({ q: question, a: cleanFull || '(无回答/中断)', ts: Date.now() });
+    if (sessionLog.length > MAX_SESSION_LOG) sessionLog = sessionLog.slice(-MAX_SESSION_LOG);
+    scheduleL0Snapshot();
+
     if (top.length) {
       term.writeln('\x1b[1;32m──── 引用来源 ────\x1b[0m');
       const seen = new Set();
@@ -1877,7 +1913,14 @@
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ source: entry.source }),
       }).catch((e) => { term.writeln('\x1b[31m安装失败: ' + e.message + '\x1b[0m'); return null; });
-      if (r) { term.writeln('\x1b[32m✓ 已安装: \x1b[0m' + r.app.id + '（/view ' + r.app.id + ' 打开）'); appsCache = null; refreshStatus(); }
+      if (r) {
+        if (r.kind === 'skill') {
+          term.writeln('\x1b[32m✓ 已安装技能: \x1b[0m' + r.id + '（trigger 命中自动注入；/skills 查看）');
+        } else {
+          term.writeln('\x1b[32m✓ 已安装: \x1b[0m' + r.app.id + '（/view ' + r.app.id + ' 打开）');
+        }
+        appsCache = null; refreshStatus();
+      }
       return;
     }
     if (sub === 'list') {
@@ -1908,7 +1951,14 @@
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ source: 'local', path }),
       }).catch((e) => { term.writeln('\x1b[31m安装失败: ' + e.message + '\x1b[0m'); return null; });
-      if (r) { term.writeln('\x1b[32m✓ 已安装: \x1b[0m' + r.app.id + '（/view ' + r.app.id + ' 打开）'); appsCache = null; refreshStatus(); }
+      if (r) {
+        if (r.kind === 'skill') {
+          term.writeln('\x1b[32m✓ 已安装技能: \x1b[0m' + r.id + '（trigger 命中自动注入；/skills 查看）');
+        } else {
+          term.writeln('\x1b[32m✓ 已安装: \x1b[0m' + r.app.id + '（/view ' + r.app.id + ' 打开）');
+        }
+        appsCache = null; refreshStatus();
+      }
       return;
     }
     if (sub === 'uninstall') {

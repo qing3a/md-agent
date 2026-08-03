@@ -982,6 +982,7 @@ async fn market_catalog(State(s): State<AppState>) -> Response {
                 "description": a.description,
                 "source": a.source,
                 "hub": h.name,
+                "kind": a.kind,
             }));
         }
     }
@@ -1006,22 +1007,32 @@ struct MarketUninstallBody {
 }
 
 async fn market_install(State(s): State<AppState>, Json(b): Json<MarketInstallBody>) -> Response {
-    // hub 条目安装：source（git/zip/local）→ 下载到临时目录 → 走现有校验/落盘管道
+    // hub 条目安装：source（git/zip/裸 md/local）→ 下载到临时目录 → 按包内容识别（app→kb/apps/，skill→kb/skills/）
     if let Some(src) = b.source.as_deref().filter(|s| !s.is_empty()) {
         let dry = b.dry_run.unwrap_or(false);
         let hub = b.hub.clone();
         let tmp = std::env::temp_dir().join(format!("md-agent-dl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         match crate::hub::download_app(src, &tmp).await {
-            Ok(dir) => {
+            Ok(loc) => {
                 let r = if dry {
-                    crate::market::read_manifest(&dir).map(|m| json!({ "ok": true, "dry_run": true, "app": m }))
+                    crate::market::probe_bundle(&loc)
+                        .map(|(kind, info)| json!({ "ok": true, "dry_run": true, "kind": kind, "app": info }))
                 } else {
-                    crate::market::install_local(&s.kb_root, &dir.to_string_lossy()).map(|m| {
-                        if let Some(h) = hub.as_deref().filter(|h| !h.is_empty()) {
-                            record_source_hub(&s.kb_root, &m.id, h);
+                    crate::market::install_bundle(&s.kb_root, &loc).map(|(kind, id)| {
+                        let app = if kind == "app" {
+                            crate::market::read_manifest(&s.kb_root.join("apps").join(&id))
+                                .map(|m| json!(m))
+                                .unwrap_or(json!({ "id": id }))
+                        } else {
+                            json!({ "id": id, "name": id, "version": "0.0.0" })
+                        };
+                        if kind == "app" {
+                            if let Some(h) = hub.as_deref().filter(|h| !h.is_empty()) {
+                                record_source_hub(&s.kb_root, &id, h);
+                            }
                         }
-                        json!({ "ok": true, "app": m })
+                        json!({ "ok": true, "kind": kind, "id": id, "app": app })
                     })
                 };
                 let _ = std::fs::remove_dir_all(&tmp);
@@ -1033,19 +1044,22 @@ async fn market_install(State(s): State<AppState>, Json(b): Json<MarketInstallBo
             Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("下载失败: {e}") }))).into_response(),
         }
     } else {
-        // 本地路径通道（手动导入兜底）：path
+        // 本地路径通道（手动导入兜底）：path（应用目录 / 技能目录 / 裸 SKILL.md 文件）
         let path = b.path.unwrap_or_default();
-        if b.dry_run.unwrap_or(false) {
-            let src = std::path::PathBuf::from(&path);
-            match crate::market::read_manifest(&src) {
-                Ok(m) => Json(json!({ "ok": true, "dry_run": true, "app": m })).into_response(),
-                Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
-            }
+        if path.trim().is_empty() {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺 path（本地路径）或 source（hub 条目）" }))).into_response();
+        }
+        let loc = std::path::PathBuf::from(&path);
+        let r = if b.dry_run.unwrap_or(false) {
+            crate::market::probe_bundle(&loc)
+                .map(|(kind, info)| json!({ "ok": true, "dry_run": true, "kind": kind, "app": info }))
         } else {
-            match crate::market::install_local(&s.kb_root, &path) {
-                Ok(m) => (StatusCode::CREATED, Json(json!({ "ok": true, "app": m }))).into_response(),
-                Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
-            }
+            crate::market::install_bundle(&s.kb_root, &loc)
+                .map(|(kind, id)| json!({ "ok": true, "kind": kind, "id": id, "app": json!({ "id": id }) }))
+        };
+        match r {
+            Ok(v) => Json(v).into_response(),
+            Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
         }
     }
 }

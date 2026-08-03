@@ -18,6 +18,8 @@ pub struct HubApp {
     pub permissions: Vec<String>,
     pub source: String,
     pub description: String,
+    /// 条目类型（索引可声明 type: app|skill，缺省 app；安装时以包内容识别为准）
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +146,9 @@ fn push_valid_app(apps: &mut Vec<HubApp>, mut a: HubApp) {
     if a.entry.is_empty() {
         a.entry = "index.html".to_string();
     }
+    if a.kind.is_empty() {
+        a.kind = "app".to_string();
+    }
     apps.push(a);
 }
 
@@ -157,6 +162,7 @@ fn apply_field(a: &mut HubApp, line: &str) {
         "entry" => a.entry = v.to_string(),
         "description" => a.description = v.to_string(),
         "source" => a.source = v.to_string(),
+        "type" => a.kind = v.to_string(),
         "permissions" => {
             a.permissions = v
                 .trim_start_matches('[')
@@ -244,9 +250,15 @@ pub fn disconnect_hub(root: &Path, name: &str) -> Result<(), String> {
     std::fs::remove_file(&file).map_err(|e| e.to_string())
 }
 
+/// 可抓取的 HTTP 源：https 或本地 mock（http://localhost / http://127.0.0.1）
+fn fetchable(s: &str) -> bool {
+    s.starts_with("https://") || s.starts_with("http://localhost") || s.starts_with("http://127.0.0.1")
+}
+
 /// 按 source 下载 app 包到临时目录（tmp_root 由调用方创建并负责清理），返回 app 包根目录。
 /// 支持：local:<路径>（本地目录，直接引用）/ git+https://<url>[#<子目录>]（git clone --depth 1）/
-/// https://…zip（下载 + PowerShell Expand-Archive，解压后自动定位含 app.json 的目录）
+/// https://…zip（下载 + PowerShell Expand-Archive，解压后自动定位含 app.json 的目录）/
+/// https://…md 裸技能文件（直接下载文本）
 pub async fn download_app(source: &str, tmp_root: &Path) -> Result<PathBuf, String> {
     let s = source.trim();
     if let Some(p) = s.strip_prefix("local:") {
@@ -279,7 +291,7 @@ pub async fn download_app(source: &str, tmp_root: &Path) -> Result<PathBuf, Stri
         }
         return Ok(target);
     }
-    if s.starts_with("https://") && s.ends_with(".zip") {
+    if fetchable(s) && s.ends_with(".zip") {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(90))
             .user_agent("md-agent/0.1 (skillhub client)")
@@ -307,7 +319,25 @@ pub async fn download_app(source: &str, tmp_root: &Path) -> Result<PathBuf, Stri
         }
         return Ok(find_app_dir(&out));
     }
-    Err("不支持的 source 协议（仅 local: / git+https: / https zip）".to_string())
+    // 裸技能文件（https://…md 或本地 mock）：直接下载文本，返回文件路径（install_bundle 识别为技能）
+    if fetchable(s) && s.ends_with(".md") {
+        std::fs::create_dir_all(tmp_root).map_err(|e| e.to_string())?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent("md-agent/0.1 (skillhub client)")
+            .build()
+            .map_err(|e| format!("构建客户端失败: {e}"))?;
+        let resp = client.get(s).send().await.map_err(|e| format!("下载失败: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+        let bytes = resp.bytes().await.map_err(|e| format!("读取失败: {e}"))?;
+        let bytes = &bytes[..bytes.len().min(MAX_INDEX_BYTES)];
+        let md_path = tmp_root.join("SKILL.md");
+        std::fs::write(&md_path, String::from_utf8_lossy(bytes).as_bytes()).map_err(|e| e.to_string())?;
+        return Ok(md_path);
+    }
+    Err("不支持的 source 协议（仅 local: / git+https: / https zip / https md）".to_string())
 }
 
 /// 解压产物定位 app 包根：根含 app.json 则用根，否则扫一层子目录（GitHub archive 有顶层 repo-commit/ 目录）

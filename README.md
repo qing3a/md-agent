@@ -242,7 +242,7 @@ Phase 3-C Harness 深化（✅ P1/P3/P4 + SkillHub 接入已完成；P2 巩固�
          ├─ ✅ P2 巩固/遗忘：consolidate 两阶段（先规则后 LLM）+ 记忆提案四型待审通道；任务感知上下文组装（CE 组装器 + memory_summary 注入）
          ├─ ✅ P3 Skills / 程序性自组织：/suggest、/audit 产出升级为程序性技能（技能格式 + 注册表 /api/skills + trigger 命中自动注入）
          ├─ ✅ P4 App 系统（原 Phase 4 提前）：manifest + 权限白名单 + 生命周期（/api/market/*）+ 面板/托盘动态菜单 + 沙箱 iframe 渲染（/view）
-         └─ ✅ SkillHub 接入：应用市场 = hub 管理端 + 客户端——/market connect 连接第三方 SkillHub（skillhub.md 索引协议），目录安装走人审；本地导入兜底；market.connect 工具 + 技能触发（LLM 一句话连商店）；面板双 Tab（目录/已安装）+ 来源 hub 记录
+         └─ ✅ SkillHub 接入：应用市场 = hub 管理端 + 客户端——/market connect 连接第三方 SkillHub（skillhub.md 索引协议），安装走命令行（面板降级：第三方无稳定 API，面板只管理运行/关闭/卸载）；本地导入兜底；market.connect 工具 + 技能触发（LLM 一句话连商店）；面板双 Tab（目录/已安装）+ 来源 hub 记录 + 条目统一（应用与技能同目录，按包内容识别落点：app.json→kb/apps/，SKILL.md/裸 md→kb/skills/）
 Phase 4  生态化（可选，与"轻量"定位有张力，个人场景可长期搁置）
          ├─ MCP 客户端（Stdio/SSE）；兼容标准 MCP App 渲染（复用统一 iframe 渲染层）
          └─ WASM 计算后端（仅当出现"本地运行不可信计算"的真实需求）
@@ -255,7 +255,7 @@ Phase 4  生态化（可选，与"轻量"定位有张力，个人场景可长期
 - **App 逻辑不强上 WASM**：检索/图谱/文件逻辑已在 Rust 宿主，App 的"深度接入"= 调宿主 API（manifest 声明权限即可）；HTML + 宿主 API 代理覆盖 90% 场景，WASM 仅保留为可选计算后端，等出现真实需求再引入。
 - **通信复用现有传输**：iframe 用 postMessage 与父页面通信，父页面走现有 HTTP/SSE；不引入 WebSocket。
 - **应用包 = 文件夹 / zip**，不造自定义归档格式（.hax 之类）；**应用市场 = SkillHub 管理端 + 客户端**——不内置市场目录，通过 `/market connect <url>` 连接第三方 SkillHub（hub = skillhub.md 轻索引，只管"谁有什么/去哪下载"），app 包本体在任意位置（git / GitHub zip / 本地），安装落 `kb/apps/` 后由本地托管 + 沙箱渲染（市场与托管职责分离、已安装即本地权威副本）；本地手动导入永远是兜底通道。
-- **SkillHub 信任分级**：连 hub 自动（拉 md 索引不执行代码，派生产物无人审）→ 从 hub 装 app 走 dry_run 人审确认；source 协议白名单（git+https / GitHub zip / 本地；裸 http 禁）；沙箱 iframe + manifest 权限白名单兜底。
+- **SkillHub 信任分级**：连 hub 自动（拉 md 索引不执行代码，派生产物无人审）→ 安装走命令行（`/market install <id>` / `/market import <路径>`，dry_run 人审确认）；source 协议白名单（git+https / GitHub zip / 裸 md / 本地；裸 http 禁）；沙箱 iframe + manifest 权限白名单兜底。
 - **自组织必须带人工审核**：LLM 幻觉/错误关联会污染图谱，"可审计"是这套架构的立身之本；Agent 动态生成 App 同理，人审后安装，不绕开审核闭环。
 - **工具调用走宿主代理、LLM 不直连**：工具（检索/图谱/网页/任务/文件）一律经 `/api/*` 宿主鉴权执行，浏览器不直连 LLM 与本地文件——为 LLM 显式 Tool Use（Phase 3-C P1）预留同一安全边界，工具权限即宿主 API 权限，新工具=新端点而非放开直连。
 - **网页能力：bsk 外挂，Page 内化**。md-agent 不内置 browser-skill 形态（驱动真实浏览器 + 扩展，要求浏览器在线、会话纪律，与"后台自主"冲突，只作外部会话的外挂工具）。系统内置的"读/操作页面"能力 = Page 抽象（open/click/fill/extract/screenshot）+ 本地无头引擎：静态读取用 HTTP + HTML 解析（零浏览器依赖），动态/操作用 chromiumoxide 连系统 Edge/Chrome 的 headless 模式（零下载、自管登录态、Agent 可自主调度）；写操作（点击/提交）必须人审确认。

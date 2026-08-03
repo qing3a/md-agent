@@ -101,18 +101,8 @@
     <div class="empty" id="empty"></div>
   </div>
 </div>
-<div id="hint">连接 SkillHub：<code>连接 hub</code> 或终端 <code>/market connect &lt;url&gt;</code> · 目录安装走人审确认 · 更新走终端 <code>/market update &lt;id&gt; &lt;路径&gt;</code> · 运行在宿主新标签打开</div>
+<div id="hint">连接 SkillHub：<code>连接 hub</code> 或终端 <code>/market connect &lt;url&gt;</code> · 安装走命令行（人审确认）：<code>/market install &lt;id&gt;</code> 或 <code>/market import &lt;路径&gt;</code> · 更新走 <code>/market update &lt;id&gt; &lt;路径&gt;</code> · 运行在宿主新标签打开</div>
 <div id="toast" class="toast"></div>
-<div id="overlay" class="hidden">
-  <div class="ov-box">
-    <h3 id="ov-title">预览</h3>
-    <div id="ov-body"></div>
-    <div class="ov-actions">
-      <button id="ov-cancel">取消</button>
-      <button id="ov-ok" class="primary">确认</button>
-    </div>
-  </div>
-</div>
 
 <script>
 var hubs = [], catalog = [], apps = [];
@@ -144,8 +134,9 @@ function render() {
   var items = $('items');
   if (tab === 'catalog') {
     items.innerHTML = catalog.map(function (a, i) {
+      var kindBadge = a.kind === 'skill' ? '<span class="src">[技能]</span>' : '';
       return '<div class="item' + (sel && sel.kind === 'cat' && sel.id === a.id ? ' sel' : '') + '" data-i="' + i + '">' +
-        '<div class="n">' + esc(a.name) + '<span class="v">v' + esc(a.version) + '</span><span class="src">[' + esc(a.hub) + ']</span></div>' +
+        '<div class="n">' + esc(a.name) + '<span class="v">v' + esc(a.version) + '</span><span class="src">[' + esc(a.hub) + ']</span>' + kindBadge + '</div>' +
         '<div class="p">' + esc(a.id) + ' · [' + esc((a.permissions || []).join(',')) + ']</div></div>';
     }).join('');
   } else {
@@ -185,10 +176,8 @@ function showDetail(s) {
 
   var acts = $('d-actions');
   if (s.kind === 'cat') {
-    acts.innerHTML = '<button id="act-preview">预览 manifest</button>' +
-      '<button id="act-install" class="primary">安装</button>';
-    $('act-preview').addEventListener('click', function () { previewEntry(s); });
-    $('act-install').addEventListener('click', function () { installEntry(s); });
+    // 目录条目只浏览：安装走命令行（第三方 hub 无稳定 API，安装需显式确认来源）
+    acts.innerHTML = '<span class="upd-hint">安装（人审确认）：<code>/market install ' + esc(s.id) + '</code>（应用或技能按内容自动识别）<br>兜底：<code>/market import &lt;路径&gt;</code> 手动导入</span>';
   } else {
     acts.innerHTML = '<button id="act-run" class="primary">运行</button>' +
       '<button id="act-uninstall" class="danger">卸载</button>' +
@@ -220,53 +209,6 @@ $('items').addEventListener('click', function (e) {
 $('tab-catalog').addEventListener('click', function () { tab = 'catalog'; sel = null; render(); });
 $('tab-installed').addEventListener('click', function () { tab = 'installed'; sel = null; render(); });
 $('refresh').addEventListener('click', load);
-
-// ---------- 人审确认 overlay ----------
-function showOverlay(title, html, okText, onOk) {
-  $('ov-title').textContent = title;
-  $('ov-body').innerHTML = html;
-  var ok = $('ov-ok');
-  ok.style.display = onOk ? '' : 'none';
-  ok.textContent = okText || '确认';
-  $('ov-ok').onclick = onOk || hideOverlay;
-  $('overlay').classList.remove('hidden');
-}
-function hideOverlay() { $('overlay').classList.add('hidden'); }
-$('ov-cancel').addEventListener('click', hideOverlay);
-$('overlay').addEventListener('click', function (e) { if (e.target === $('overlay')) hideOverlay(); });
-
-function manifestHtml(app, hub) {
-  return '<div class="ov-row">应用: <b>' + esc(app.name) + '</b> v' + esc(app.version) + '（id: ' + esc(app.id) + '）</div>' +
-    (hub ? '<div class="ov-row">来源 hub: <b>' + esc(hub) + '</b></div>' : '') +
-    '<div class="ov-row">权限:</div>' + permHtml(app.permissions) +
-    (app.description ? '<div class="ov-row" style="margin-top:8px">描述: ' + esc(app.description) + '</div>' : '');
-}
-
-async function dryRun(entry) {
-  return hostApi('/api/market/install', { method: 'POST', body: { source: entry.source, dry_run: true } });
-}
-
-function previewEntry(entry) {
-  dryRun(entry).then(function (probe) {
-    showOverlay('预览 manifest', manifestHtml(probe.app, entry.hub), '', null);
-  }).catch(function (e) { toast('校验失败: ' + e.message, false); });
-}
-
-function installEntry(entry) {
-  dryRun(entry).then(function (probe) {
-    showOverlay('确认安装（人审）', manifestHtml(probe.app, entry.hub) +
-      '<div class="ov-note">确认后将从 ' + esc(entry.hub) + ' 下载并安装到本地（沙箱运行，仅放行已声明权限）</div>',
-      '确认安装', async function () {
-        hideOverlay();
-        try {
-          var r = await hostApi('/api/market/install', { method: 'POST', body: { source: entry.source, hub: entry.hub } });
-          toast('✓ 已安装 ' + r.app.id, true);
-          tab = 'installed'; sel = null;
-          await load();
-        } catch (e) { toast('安装失败: ' + e.message, false); }
-      });
-  }).catch(function (e) { toast('校验失败: ' + e.message, false); });
-}
 
 // ---------- 运行 / 卸载 ----------
 function runApp(id) {
