@@ -107,6 +107,10 @@
   #view-panes { flex: 1; position: relative; min-height: 0; }
   #view-panes iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: none; display: none; }
   #view-panes iframe.active { display: block; }
+  /* /view 分屏参照：分屏模式终端占左 40%（FitAddon 重算列数），视图盖右 60%，对话流随时可见可参照 */
+  body.view-split #terminal { width: 40%; }
+  body.view-split #input-bar { width: 40%; }
+  body.view-split #view-overlay { left: 40%; }
 </style>
 </head>
 <body>
@@ -129,6 +133,7 @@
 <div id="view-overlay" class="hidden">
   <header>
     <div id="view-tabs"></div>
+    <button id="view-split" title="切换分屏：终端保持可见可参照（对话流不遮挡）">分屏</button>
     <button id="view-close-all" title="关闭全部视图">全部关闭</button>
     <button id="view-close" title="关闭当前视图 (Esc)">× 关闭</button>
   </header>

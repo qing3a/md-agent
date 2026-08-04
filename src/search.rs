@@ -234,7 +234,8 @@ pub fn suggest_links(root: &Path, content: &str, limit: usize) -> Result<Vec<Sug
             let rel = p
                 .strip_prefix(&root)
                 .map(|r| r.to_string_lossy().into_owned())
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .replace('\\', "/"); // Windows 路径归一化（与 search() 一致），否则前端按 / 切分拿错链接目标
             let Ok(text) = std::fs::read_to_string(p) else { continue };
             let lower = text.to_lowercase();
             let mut matched: HashSet<String> = HashSet::new();

@@ -16,7 +16,10 @@
   Core.extractKeywords = function (q) {
     const kw = new Set();
     for (const m of q.matchAll(/[A-Za-z0-9][A-Za-z0-9_-]*/g)) kw.add(m[0].toLowerCase());
-    let cjk = q.replace(/[A-Za-z0-9_-]+/g, ' ');
+    let cjk = q
+      .replace(/[A-Za-z0-9_-]+/g, ' ')
+      // 剥离全角/CJK 标点（，。！？：；（）【】「」『』…·——等），防止标点混入中文短语产生噪声关键词
+      .replace(/[\uFF00-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF65\u3000-\u303F\u2018\u2019\u201C\u201D\u2026\u00B7\u2014]/g, ' ');
     for (const w of FW) cjk = cjk.split(w).join(' ');
     let buf = '';
     const flush = () => {

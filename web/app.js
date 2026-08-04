@@ -1757,7 +1757,7 @@
       allClosed = true;
     }
     saveViewSpecs(); // /view 标签组合记忆（恢复时按 kind/arg 重新拉取）
-    if (allClosed) term.focus(); // 视图层全部关闭 → 焦点归还终端（修复：每次面板往返都要点一下终端才能继续打字）
+    if (allClosed) { applySplit(false); term.focus(); } // 视图全关：退出分屏（终端恢复全宽）+ 焦点归还终端
   }
 
   function openView(title, html, app, spec) {
@@ -1846,6 +1846,29 @@
   window.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape' && !viewOverlay.classList.contains('hidden')) closeView(activeViewId);
   });
+
+  // /view 分屏参照：分屏模式终端左 40%（FitAddon 重算列数）+ 视图右 60%，对话流可见可参照
+  // 选择实时记忆；关闭全部视图时自动退出分屏（终端恢复全宽）
+  const viewSplitBtn = document.getElementById('view-split');
+  const SPLIT_KEY = 'md-agent-view-split';
+  function refitTerm() {
+    try { fit.fit(); } catch (e) { /* fit 失败不阻塞 */ }
+    redrawPromptIfVisible();
+  }
+  function applySplit(on) {
+    document.body.classList.toggle('view-split', on);
+    try { localStorage.setItem(SPLIT_KEY, on ? '1' : '0'); } catch (e) { /* 忽略 */ }
+    updateSplitBtn();
+    setTimeout(refitTerm, 50); // overlay 布局变化后重算终端列数
+  }
+  function updateSplitBtn() {
+    if (viewSplitBtn) viewSplitBtn.textContent = document.body.classList.contains('view-split') ? '全屏' : '分屏';
+  }
+  if (viewSplitBtn) {
+    viewSplitBtn.addEventListener('click', () => applySplit(!document.body.classList.contains('view-split')));
+    try { if (localStorage.getItem(SPLIT_KEY) === '1') applySplit(true); } catch (e) { /* 忽略 */ }
+    updateSplitBtn();
+  }
 
   // postMessage 桥：任一 tab 的 iframe 视图 → 宿主 API（只允许 /api/ 前缀）；escape 关视图；view-error 标红
   window.addEventListener('message', async (ev) => {
@@ -2135,9 +2158,8 @@
     const ql = (q || '').trim().toLowerCase();
     const items = [];
     if (!ql) {
-      // 空查询：视图目标 + 已装应用（简洁首页，可滚动）
+      // 空查询：仅视图目标（简洁首页）；已装应用输入关键词才匹配，避免应用多时列表变长
       for (const v of VIEW_TARGETS) items.push({ k: v.k, d: v.d, run: v.run });
-      try { for (const a of await getApps()) items.push({ k: a.name, d: a.id + ' v' + a.version + '（应用）', run: '/view ' + a.id }); } catch (e) { /* 应用列表不可用则忽略 */ }
       return items;
     }
     if (ql.startsWith('@')) {
@@ -2325,6 +2347,7 @@
     if (!r.orphans.length && !r.no_out.length && !r.duplicates.length && !r.dangling.length && !r.mentions.length) {
       term.writeln('\x1b[32m✓ 知识库健康，无盲区无冲突\x1b[0m');
     }
+    term.writeln('\x1b[90m(图形版: /view audit 卡片式分组 · 补链建议一键应用 · 审计按钮/状态行 ⚠ 直达)\x1b[0m');
   }
 
   // /conflicts：重复标题（带路径）+ 悬空链接

@@ -16,6 +16,8 @@ t('ASCII 词提取', JSON.stringify(Core.extractKeywords('test rag vector')) ===
 t('CJK 整段+滑动双字（向量）', Core.extractKeywords('向量检索').includes('向量'));
 t('功能词切断（为什么）', !Core.extractKeywords('为什么这样').includes('为什么') && Core.extractKeywords('为什么这样').includes('这样'));
 t('英文大小写归一', Core.extractKeywords('RAG System')[0] === 'rag');
+t('全角标点剥离（，。！）', JSON.stringify(Core.extractKeywords('向量，检索。完成！')).includes('向量') && JSON.stringify(Core.extractKeywords('向量，检索。完成！')).includes('检索'));
+t('全角括号不混入短语', Core.extractKeywords('知识库（整理）').includes('知识库') && Core.extractKeywords('知识库（整理）').includes('整理'));
 
 console.log('== extractJsonObjects ==');
 t('单对象', Core.extractJsonObjects('{"a":1}').length === 1);
