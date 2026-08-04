@@ -18,6 +18,16 @@ pub const NOTES_DIR: &str = "notes";
 pub const SKILLS_DIR: &str = "skills";
 /// 应用目录（应用市场阶段 1：kb/apps/<id>/app.json = 每个应用的 manifest）
 pub const APPS_DIR: &str = "apps";
+/// L1 可读白名单（read_l1 端点）：规范/记忆/索引层 = L1_FILES + INDEX + 记忆摘要。
+/// memory_summary.md 是派生产物（摘要提示，允许读取），不替代 MEMORY.md 原文。
+pub const L1_READABLE_FILES: [&str; 6] = [
+    "KB.md",
+    "FRAMEWORK.md",
+    "RULES.md",
+    "MEMORY.md",
+    INDEX_FILE,
+    "memory_summary.md",
+];
 
 /// 已安装应用（应用市场阶段 1）：来自 kb/apps/<id>/app.json
 #[derive(Debug, Serialize)]
@@ -410,6 +420,92 @@ pub fn list_l1(root: &Path, full: bool) -> Vec<L1File> {
         }
     }
     out
+}
+
+/// read_l1 结果（上下文组装 v2：LLM 显式工具取用 L1 规范/记忆/索引层）
+#[derive(Debug, Serialize)]
+pub struct L1ReadResult {
+    pub ok: bool,
+    pub file: String,
+    /// head=文件头（前 max 字）+ 章节清单 | section=命中 ## 小节原文 | section_list=未命中，给章节清单
+    pub mode: String,
+    /// 文件全文字符数（截断前）
+    pub total_chars: usize,
+    /// head=前 max 字；section=小节原文（含 ## 标题，截到 max）；section_list=空串
+    pub content: String,
+    /// `## ` 小节标题清单（三种 mode 均附）
+    pub sections: Vec<String>,
+}
+
+/// read_l1：读 L1 规范/记忆/索引层原文（返回源文件原文，非派生产物；memory_summary 例外允许）。
+/// 切分单位 = 文件 / `##` 小节（记忆统一模型铁律 1，不发明新元数据）。
+/// - file 白名单外 → Err（调用方返回 400）
+/// - file + 无 q → 文件头（前 max 字）+ `##` 章节清单，mode=head
+/// - file + q → 定位第一个「标题或正文」含 q 的 `##` 小节（到下一个 `##` 前，截到 max），mode=section
+/// - 未命中 → 章节清单，mode=section_list
+pub fn read_l1(root: &Path, file: &str, q: Option<&str>, max_chars: usize) -> Result<L1ReadResult, String> {
+    if !L1_READABLE_FILES.contains(&file) {
+        return Err(format!("文件不在 L1 可读白名单: {file}"));
+    }
+    let content = fs::read_to_string(root.join(file)).map_err(|e| format!("读取 {file} 失败: {e}"))?;
+    let total_chars = content.chars().count();
+    let lines: Vec<&str> = content.lines().collect();
+
+    // `## ` 小节标题（去掉前缀，标题本身作为索引）
+    let sections: Vec<String> = lines
+        .iter()
+        .filter(|l| l.trim_start().starts_with("## "))
+        .map(|l| l.trim_start().trim_start_matches("## ").trim().to_string())
+        .collect();
+
+    let trunc = |s: &str| s.chars().take(max_chars).collect::<String>();
+
+    // file + q：定位第一个「标题或正文」含 q 的 ## 小节
+    if let Some(qraw) = q {
+        let q = qraw.trim();
+        if !q.is_empty() {
+            let ql = q.to_lowercase();
+            let heading_idx: Vec<usize> = lines
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.trim_start().starts_with("## "))
+                .map(|(i, _)| i)
+                .collect();
+            for (k, &start) in heading_idx.iter().enumerate() {
+                let end = heading_idx.get(k + 1).copied().unwrap_or(lines.len());
+                let sec_raw = lines[start..end].join("\n");
+                if sec_raw.to_lowercase().contains(&ql) {
+                    return Ok(L1ReadResult {
+                        ok: true,
+                        file: file.to_string(),
+                        mode: "section".to_string(),
+                        total_chars,
+                        content: trunc(&sec_raw),
+                        sections,
+                    });
+                }
+            }
+            // 未命中 → 章节清单
+            return Ok(L1ReadResult {
+                ok: true,
+                file: file.to_string(),
+                mode: "section_list".to_string(),
+                total_chars,
+                content: String::new(),
+                sections,
+            });
+        }
+    }
+
+    // file + 无 q → 文件头 + 章节清单
+    Ok(L1ReadResult {
+        ok: true,
+        file: file.to_string(),
+        mode: "head".to_string(),
+        total_chars,
+        content: trunc(&content),
+        sections,
+    })
 }
 
 // ---------- 待审机制（Phase 3 前置：生成 → 预览 → 确认） ----------
@@ -817,6 +913,73 @@ mod tests {
         assert_eq!(apps[0].id, "match");
         assert_eq!(apps[0].permissions, vec!["llm".to_string()]);
         assert_eq!(apps[0].entry, "index.html");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    // ---------- read_l1（上下文组装 v2） ----------
+
+    #[test]
+    fn read_l1_head_mode() {
+        let root = test_root("l1head");
+        ensure_layout(&root).unwrap();
+        fs::write(root.join("RULES.md"), "# 规范\n\n## Frontmatter\n- 所有文件以 --- 开头\n\n## 命名\n- kebab-case\n").unwrap();
+        let r = read_l1(&root, "RULES.md", None, 1200).unwrap();
+        assert_eq!(r.mode, "head");
+        assert!(r.content.starts_with("# 规范"));
+        assert_eq!(r.content.chars().count(), r.total_chars, "max 足够大时不截断");
+        assert_eq!(r.sections, vec!["Frontmatter".to_string(), "命名".to_string()]);
+        // 小 max 截断生效（按字符截，不劈 CJK）
+        let r2 = read_l1(&root, "RULES.md", None, 10).unwrap();
+        assert_eq!(r2.content.chars().count(), 10);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn read_l1_section_hit_returns_section_original() {
+        let root = test_root("l1sec");
+        ensure_layout(&root).unwrap();
+        fs::write(root.join("FRAMEWORK.md"), "# 框架\n\n## 双链\n- 使用 `[[文件名]]` 在 MD 之间建立链接\n\n## 分层原则\n- L1 只放要点\n").unwrap();
+        let r = read_l1(&root, "FRAMEWORK.md", Some("双链"), 1200).unwrap();
+        assert_eq!(r.mode, "section");
+        assert!(r.content.contains("## 双链"), "小节应含 ## 标题");
+        assert!(r.content.contains("[[文件名]]"), "返回源文件原文");
+        assert!(!r.content.contains("分层原则"), "只返回命中小节，不含后续小节");
+        // 未命中 q 也应能读（memory_summary 是允许读的派生产物）
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn read_l1_section_miss_returns_section_list() {
+        let root = test_root("l1miss");
+        ensure_layout(&root).unwrap();
+        fs::write(root.join("FRAMEWORK.md"), "# 框架\n\n## 双链\n- x\n\n## 分层原则\n- y\n").unwrap();
+        let r = read_l1(&root, "FRAMEWORK.md", Some("不存在的词"), 1200).unwrap();
+        assert_eq!(r.mode, "section_list");
+        assert!(r.content.is_empty());
+        assert_eq!(r.sections, vec!["双链".to_string(), "分层原则".to_string()]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn read_l1_rejects_non_whitelist() {
+        let root = test_root("l1rej");
+        ensure_layout(&root).unwrap();
+        write(&root, "notes/不存在.md", "# x\n");
+        assert!(read_l1(&root, "不存在.md", None, 1200).is_err());
+        // 白名单外（含路径穿越尝试）一律拒绝
+        assert!(read_l1(&root, "notes/不存在.md", None, 1200).is_err());
+        assert!(read_l1(&root, "../MEMORY.md", None, 1200).is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn read_l1_ok_reads_memory_summary_derived() {
+        let root = test_root("l1msum");
+        ensure_layout(&root).unwrap();
+        fs::write(root.join("memory_summary.md"), "# 记忆摘要（自动生成）\n\n## 2026-08-03\n- 决策丙\n").unwrap();
+        let r = read_l1(&root, "memory_summary.md", None, 1200).unwrap();
+        assert_eq!(r.mode, "head");
+        assert!(r.content.contains("决策丙"));
         fs::remove_dir_all(&root).unwrap();
     }
 }

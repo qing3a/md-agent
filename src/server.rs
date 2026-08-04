@@ -46,6 +46,7 @@ pub async fn serve(
         .route("/api/consolidate", post(consolidate_handler))
         .route("/api/search", get(search_handler))
         .route("/api/l1", get(l1_handler))
+        .route("/api/l1/read", get(l1_read_handler))
         .route("/api/file", get(file_read))
         .route("/api/file", post(file_write))
         .route("/api/kb/sync", post(kb_sync))
@@ -114,6 +115,16 @@ fn tools_json() -> Value {
                 {"name": "ctx", "type": "string", "required": false, "desc": "传 1 返回命中行前后上下文片段"}
             ],
             "example": "{\"q\":\"托盘 架构\",\"layer\":\"notes\",\"ctx\":\"1\"}"
+        },
+        {
+            "name": "read_l1",
+            "desc": "读取知识库 L1 规范/记忆/索引层（KB/FRAMEWORK/RULES/MEMORY/INDEX/记忆摘要）。回答涉及规范约定、历史决策、既有记忆且前缀摘要不足时，先调它定位原文",
+            "params": [
+                {"name": "file", "type": "string", "required": true, "desc": "L1 文件名：KB.md|FRAMEWORK.md|RULES.md|MEMORY.md|INDEX.md|memory_summary.md"},
+                {"name": "q", "type": "string", "required": false, "desc": "定位词：空=返回文件头+章节清单；非空=返回第一个含该词的 ## 小节原文"},
+                {"name": "max_chars", "type": "string", "required": false, "desc": "字符上限（默认 1200）"}
+            ],
+            "example": "{\"file\":\"FRAMEWORK.md\",\"q\":\"双链\"}"
         },
         {
             "name": "memory_search",
@@ -275,6 +286,34 @@ struct L1Params {
     /// 1 时返回完整内容（Agent 启动注入 L1 用）
     #[serde(default)]
     full: String,
+}
+
+#[derive(Deserialize)]
+struct L1ReadParams {
+    /// L1 文件名（白名单：KB.md/FRAMEWORK.md/RULES.md/MEMORY.md/INDEX.md/memory_summary.md）
+    file: Option<String>,
+    /// 定位词：定位第一个含 q 的 `## ` 小节
+    q: Option<String>,
+    /// 字符上限（默认 1200；超出部分截断）
+    max: Option<usize>,
+}
+
+/// read_l1（上下文组装 v2：LLM 显式工具取用 L1 规范/记忆/索引层）。
+/// 参数行为矩阵：无 file → 400；file+无 q → head+章节清单；file+q 命中 → 小节原文；未命中 → 章节清单。
+/// 白名单外 → 400；返回源文件原文（memory_summary 是允许读的派生产物）。
+async fn l1_read_handler(State(st): State<AppState>, Query(p): Query<L1ReadParams>) -> Response {
+    let Some(file) = p.file.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "缺 file 参数（KB.md/FRAMEWORK.md/RULES.md/MEMORY.md/INDEX.md/memory_summary.md）" })),
+        )
+            .into_response();
+    };
+    let max = p.max.unwrap_or(1200).clamp(100, 20_000);
+    match crate::kb::read_l1(&st.kb_root, file, p.q.as_deref(), max) {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
 }
 
 #[derive(Deserialize)]
