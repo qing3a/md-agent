@@ -18,6 +18,10 @@
   term.loadAddon(fit);
   term.open(document.getElementById('terminal'));
   fit.fit();
+  // 多行串安全写屏：xterm 的 \n(LF) 只下移不回车，单次 writeln 多行内容会从上一行末尾接着写（阶梯错位）。
+  // 统一把内嵌换行规范为 \r\n（单行调用零影响；修复 cfg JSON / renderMdFile 等所有单次写多行的路径）
+  const _termWriteln = term.writeln.bind(term);
+  term.writeln = (d) => _termWriteln(String(d).replace(/\r?\n/g, '\r\n'));
   // resize 防抖（150ms），避免拖动窗口时频繁重排终端
   let fitTimer = null;
   // resize 重画输入框（方案 A：reflow 变形后重画 4 行结构，光标送回输入行）
@@ -202,6 +206,35 @@
       busy = false;
       setBusyUI();
       showPrompt();   // 回答结束后重画输入框（上边框/输入行/下边框/状态行）
+      refreshStatus();
+    }
+  }
+
+  // 面板 → 宿主命令（市场「运行」/ 功能首页命令卡片）：与键盘提交同一输入条生命周期
+  // （submitMsg 移除输入条 → 输出 → showPrompt 重建），避免 atPrompt 悬空导致状态行写进输出中间；
+  // 与键盘路径差异：保留用户当前输入行草稿（line 不动）、不记命令历史。
+  async function panelCmd(cmd) {
+    const t = String(cmd || '').trim();
+    if (!t || confirmCb) return;
+    if (busy && !isNavCmd(t)) return;   // 回答中：与键盘一致，仅放行导航命令
+    if (busy) {
+      try { await run(t); } catch (e) { term.writeln('\x1b[31m' + ((e && e.message) || e) + '\x1b[0m'); }
+      return;
+    }
+    const savedLine = line;
+    line = t;
+    submitMsg();       // 输入条移除 + 画「md-agent> <cmd>」提交块（atPrompt=false）
+    line = savedLine;  // 恢复草稿（不 pushHistory / clearDraft）
+    busy = true;
+    setBusyUI();
+    try {
+      await run(t);
+    } catch (e) {
+      term.writeln('\x1b[31m' + ((e && e.message) || e) + '\x1b[0m');
+    } finally {
+      busy = false;
+      setBusyUI();
+      showPrompt();
       refreshStatus();
     }
   }
@@ -459,8 +492,10 @@
     if (confirmCb) {
       const c = data.trim().toLowerCase();
       const cb = confirmCb;
-      if (c === 'y') { confirmCb = null; term.writeln('\x1b[32m✓ 已确认\x1b[0m'); cb(true); showPrompt(); }
-      else if (c === 'n' || data === '\r' || code === 27) { confirmCb = null; term.writeln('\x1b[90m已取消\x1b[0m'); cb(false); showPrompt(); }
+      // 注意：此处不调 showPrompt()——命令仍在执行（atPrompt 保持 false），输入条由命令结束后统一重建；
+      // 提前重画输入条会把 atPrompt 置 true，8s 状态栏轮询会把状态行写进命令输出中间
+      if (c === 'y') { confirmCb = null; term.writeln('\x1b[32m✓ 已确认\x1b[0m'); cb(true); }
+      else if (c === 'n' || data === '\r' || code === 27) { confirmCb = null; term.writeln('\x1b[90m已取消\x1b[0m'); cb(false); }
       else { term.write('\b \b'); }
       return;
     }
@@ -802,7 +837,7 @@
         reasoning = (msg && msg.reasoning_content) || '';
         lastUsage = body.usage || null;
         toolJson = Core.tryParseTool(full, TOOL_API);
-        if (!toolJson) { term.writeln(TITLE); term.write(renderMdFile(full)); }
+        if (!toolJson) { term.writeln(TITLE); term.writeln(renderMdFile(full)); }
         return { full, reasoning, reasoningStartAt, firstContentAt, lastUsage, toolJson };
       }
       const reader = res.body.getReader();
@@ -864,7 +899,7 @@
             if (!saveSeen) {
               if (full.includes('<!-- md-agent-save -->')) {
                 saveSeen = true;
-                term.write('\n');
+                term.write('\r\n'); // 完整回车换行（裸 \n 只下移，光标会停在列 X，后续输入条被画偏）
                 continue;
               }
               feedDelta(delta);
@@ -914,7 +949,7 @@
       toolJson = Core.tryParseTool(full, TOOL_API);
       if (!toolJson) {
         term.writeln(TITLE);
-        term.write(renderMdFile(full));
+        term.writeln(renderMdFile(full));
       }
     } else {
       toolJson = Core.detectToolInFull(full, TOOL_API);
@@ -1905,8 +1940,27 @@
     if (!msg) return;
     if (msg.type === 'escape') { closeView(tab.id); return; }
     if (msg.type === 'cmd') {
-      // 面板 → 宿主命令（应用市场「运行」等）；仅信任的内置面板（非 app 视图）可发
-      if (!tab.appId && msg.cmd) run(msg.cmd);
+      // 面板 → 宿主命令（应用市场「运行」/ 功能首页命令卡片等）；仅信任的内置面板（非 app 视图）可发。
+      // 走 panelCmd 而非裸 run()：与键盘提交同输入条生命周期，否则 atPrompt 悬空会致状态行乱入输出
+      if (!tab.appId && msg.cmd) panelCmd(msg.cmd);
+      return;
+    }
+    if (msg.type === 'prefill') {
+      // 面板 → 宿主：预填终端输入行（功能首页命令卡片「打开功能」= 命令打到输入框，补参后回车）
+      if (!tab.appId && !busy && atPrompt) { line = msg.cmd || ''; redrawInput(); term.focus(); }
+      return;
+    }
+    if (msg.type === 'flag') {
+      // 面板 → 宿主：读写 md-agent-* 标志位（沙箱内 localStorage 是内存代理不落盘，标志位宿主持有）
+      // 仅内置面板可发；键白名单 md-agent- 前缀（防面板越权读写其他存储）
+      if (tab.appId) return;
+      if (msg.get && String(msg.get).startsWith('md-agent-')) {
+        let v = null;
+        try { v = localStorage.getItem(msg.get); } catch (e) { /* 忽略 */ }
+        tab.iframe.contentWindow.postMessage({ id: msg.id, get: msg.get, value: v }, '*');
+      } else if (msg.key && String(msg.key).startsWith('md-agent-') && msg.set !== undefined) {
+        try { if (msg.set === null) localStorage.removeItem(msg.key); else localStorage.setItem(msg.key, msg.set); } catch (e) { /* 忽略 */ }
+      }
       return;
     }
     if (msg.type === 'view-error') {
@@ -1957,6 +2011,11 @@
     }
   });
 
+  // /view 去重：同 (kind, arg) 的视图已开则直接激活，不重复开标签（功能首页「打开功能」连点不叠标签）
+  function findView(kind, arg) {
+    return viewTabsList.find((t) => t.specKind === kind && t.specArg === arg);
+  }
+
   // /view graph      内置知识图谱可视化
   // /view <路径>      kb 内本地 HTML 视图
   // /view off        关闭（或 Esc）
@@ -1965,11 +2024,13 @@
       closeView();
       return;
     }
-    if (arg === 'graph' || arg === 'board' || arg === 'pending' || arg === 'audit' || arg === 'market') {
+    if (arg === 'graph' || arg === 'board' || arg === 'pending' || arg === 'audit' || arg === 'market' || arg === 'home') {
+      const dup = findView('builtin', arg);
+      if (dup) { activateView(dup.id); return; }
       const name = arg + '.html';
       const r = await fetch('/views/' + name);
       if (!r.ok) throw new Error('内置视图加载失败: HTTP ' + r.status);
-      const titles = { graph: '知识库结构导航', board: '任务看板', pending: '待审审核', audit: '知识库健康审计', market: '应用市场' };
+      const titles = { graph: '知识库结构导航', board: '任务看板', pending: '待审审核', audit: '知识库健康审计', market: '应用市场', home: '功能首页' };
       openView(titles[arg], await r.text(), null, { kind: 'builtin', arg });
       return;
     }
@@ -1977,10 +2038,14 @@
     const apps = await getApps();
     const app = apps.find((a) => a.id === arg);
     if (app) {
+      const dup = findView('app', arg);
+      if (dup) { activateView(dup.id); return; }
       const r = await api('/api/file?path=apps/' + app.id + '/' + encodeURIComponent(app.entry));
       openView(app.name, r.content, { id: app.id, permissions: app.permissions }, { kind: 'app', arg: app.id });
       return;
     }
+    const dup = findView('file', arg);
+    if (dup) { activateView(dup.id); return; }
     const r = await api('/api/file?path=' + encodeURIComponent(arg));
     openView(r.path, r.content, null, { kind: 'file', arg });
   }
@@ -1990,6 +2055,10 @@
     const v = new URLSearchParams(location.search).get('view');
     if (v) { try { await viewCmd(v); } catch (e) { term.writeln('\x1b[31m自动打开失败: ' + e.message + '\x1b[0m'); } return; }
     try { await restoreViews(); } catch (e) { /* 恢复失败不打扰 */ }
+    // 功能首页（方案 B）：无标签记忆时默认打开（首页内可关，标志位存宿主 localStorage）
+    if (!viewTabsList.length && localStorage.getItem('md-agent-start-home') !== '0') {
+      try { await viewCmd('home'); } catch (e) { /* 首页打开失败不打扰 */ }
+    }
   })();
 
   // ---------- 应用市场（阶段 2）：/market list | import <路径> | uninstall <id> | update <id> <路径> ----------
@@ -2155,6 +2224,7 @@
 
   // 命令面板候选：内置视图 + / 命令 + @KB 文档 + 已装应用（均以「可执行的命令串」为 run）
   const VIEW_TARGETS = [
+    { k: '首页', d: '功能总览（全部功能一键进入）', run: '/view home' },
     { k: '图谱', d: '知识库结构导航', run: '/view graph' },
     { k: '待审', d: '待审审核面板（批准/拒绝写回）', run: '/view pending' },
     { k: '审计', d: '知识库健康审计', run: '/view audit' },

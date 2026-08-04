@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>功能首页</title>
+<style>
+  :root { --bg:#1e1e2e; --panel:#26263a; --panel2:#2f2f46; --line:#3a3a55;
+          --fg:#cdd6f4; --dim:#7f849c; --green:#a6e3a1; --red:#f38ba8;
+          --yellow:#f9e2af; --blue:#89b4fa; --purple:#cba6f7; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg);
+    font: 13px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+    border-bottom: 1px solid var(--line); }
+  h1 { font-size: 15px; color: var(--yellow); }
+  .sp { flex: 1; }
+  .meta { font-size: 11px; color: var(--dim); }
+  button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 7px; padding: 5px 14px; font-size: 12px; cursor: pointer; }
+  button:hover { border-color: var(--blue); color: var(--blue); }
+
+  #main { flex: 1; overflow: auto; padding: 12px 14px 16px; }
+  .sec-title { color: var(--blue); font-size: 12px; font-weight: 600; letter-spacing: 1px;
+    margin: 14px 0 8px; }
+  .sec-title:first-child { margin-top: 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(172px, 1fr)); gap: 8px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; cursor: pointer; position: relative;
+    transition: border-color .15s, background .15s; }
+  .card:hover { border-color: var(--blue); background: var(--panel2); }
+  .card .n { font-weight: 600; margin-top: 4px; }
+  .card .d { font-size: 11px; color: var(--dim); margin-top: 2px; line-height: 1.5; }
+  .card .run { font-size: 10px; color: var(--purple); margin-top: 4px;
+    font-family: Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card .run::before { content: "$ "; color: var(--dim); }
+  .badge { position: absolute; top: -5px; right: -6px; min-width: 15px; height: 15px;
+    padding: 0 4px; border-radius: 8px; background: var(--red); color: #111;
+    font-size: 10px; font-weight: 700; line-height: 15px; text-align: center; }
+  .badge.warn { background: var(--yellow); }
+  .badge.none { display: none; }
+
+  .status-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
+  .stat .k { font-size: 11px; color: var(--dim); }
+  .stat .v { font-size: 18px; font-weight: 700; margin-top: 2px; }
+  .stat .v small { font-size: 11px; color: var(--dim); font-weight: 400; }
+  .stat .v.g { color: var(--green); } .stat .v.r { color: var(--red); } .stat .v.y { color: var(--yellow); }
+
+  .empty { background: var(--panel); border: 1px dashed var(--line); border-radius: 8px;
+    padding: 14px; color: var(--dim); font-size: 12px; text-align: center; }
+
+  #hint { padding: 8px 14px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px;
+    display: flex; align-items: center; gap: 12px; }
+  #hint code { color: var(--yellow); }
+  #hint label { display: flex; align-items: center; gap: 5px; cursor: pointer; margin-left: auto; white-space: nowrap; }
+  #hint input { accent-color: var(--blue); }
+  .toast { position: fixed; bottom: 44px; left: 50%; transform: translateX(-50%);
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 6px 14px; font-size: 12px; display: none; z-index: 12; }
+  .toast.ok { border-color: var(--green); color: var(--green); }
+  .toast.err { border-color: var(--red); color: var(--red); }
+</style>
+</head>
+<body>
+<header>
+  <h1>功能首页</h1>
+  <span class="meta" id="stamp"></span>
+  <div class="sp"></div>
+  <button id="refresh">刷新</button>
+</header>
+<div id="main">
+  <div class="sec-title">▸ 面板 · 重交互</div>
+  <div class="grid" id="g-panels"></div>
+  <div class="sec-title">▸ 命令 · 快速动作</div>
+  <div class="grid" id="g-cmds"></div>
+  <div class="sec-title">▸ 已装应用</div>
+  <div class="grid" id="g-apps"></div>
+  <div class="sec-title">▸ 状态速览</div>
+  <div class="status-grid" id="g-status"></div>
+</div>
+<div id="hint">
+  <span>点击卡片直达 · <code>Ctrl+K</code> 模糊检索 · 面板 <code>Esc</code> 关闭</span>
+  <label title="启动时若无可恢复的视图标签，自动打开本页"><input type="checkbox" id="opt-start"> 下次启动显示首页</label>
+</div>
+<div id="toast" class="toast"></div>
+
+<script>
+// ---------- 工具 ----------
+function $(id) { return document.getElementById(id); }
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+function toast(msg, ok) {
+  var t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + (ok ? 'ok' : 'err');
+  t.style.display = 'block';
+  setTimeout(function () { t.style.display = 'none'; }, 2400);
+}
+// 启动开关读写宿主 localStorage（沙箱内 localStorage 是内存代理不落盘，标志位必须存宿主侧）
+function getFlag(key, cb) {
+  var id = Math.random().toString(36).slice(2);
+  function h(ev) {
+    if (ev.data && ev.data.id === id && ev.data.get === key) {
+      window.removeEventListener('message', h);
+      cb(ev.data.value);
+    }
+  }
+  window.addEventListener('message', h);
+  window.parent.postMessage({ type: 'flag', get: key, id: id }, '*');
+}
+function setFlag(key, value) {
+  window.parent.postMessage({ type: 'flag', set: value, key: key }, '*');
+}
+
+// ---------- 卡片数据（面板类 / 命令类） ----------
+// 面板类：run 经宿主 /view 打开（同参去重，已开则激活）
+var PANELS = [
+  { ic: '🕸', n: '图谱', d: '知识库结构导航（文档/链接/孤立）', run: '/view graph' },
+  { ic: '📋', n: '待审', d: '审核 LLM 写回：批准 / 拒绝', run: '/view pending', badge: 'pending', btype: 'red' },
+  { ic: '🏥', n: '审计', d: '知识库健康审计（悬空/重复/盲区）', run: '/view audit', badge: 'audit', btype: 'warn' },
+  { ic: '🗂', n: '看板', d: '任务看板（待办/进行中/完成）', run: '/view board' },
+  { ic: '🛒', n: '市场', d: '应用市场（SkillHub 管理端）', run: '/view market' },
+];
+// 命令类：prefill 预填终端输入行（补参后回车）；run 直接执行
+var CMDS = [
+  { ic: '🔍', n: '检索', d: '全文检索双层库', prefill: '/search ' },
+  { ic: '🧩', n: '任务拆解', d: 'LLM 拆解任务链', prefill: '/task plan ' },
+  { ic: '🌐', n: '抓取', d: '静态抓取网页', prefill: '/fetch ' },
+  { ic: '🖥', n: '动态页', d: 'Edge/Chrome 动态读取', prefill: '/page ' },
+  { ic: '💡', n: '盲区分析', d: '补全缺失文档建议', prefill: '/suggest ' },
+  { ic: '🔗', n: '批量补链', d: '全库补 [[双向链接]]', run: '/link-all' },
+  { ic: '🧠', n: '巩固器', d: 'MEMORY 去重 / 整合', run: '/consolidate' },
+  { ic: '🔄', n: '重建索引', d: 'INDEX.md 自动生成', run: '/sync' },
+  { ic: '🗒', n: '待审列表', d: '命令行列出待审', run: '/pending' },
+  { ic: '⚙️', n: '配置', d: 'endpoint / model / key', run: '/config' },
+];
+
+function cardHtml(c, badgeId) {
+  var b = c.badge
+    ? '<div class="n">' + esc(c.n) + '<span class="badge none" id="' + badgeId + '"></span></div>'
+    : '<div class="n">' + esc(c.n) + '</div>';
+  return '<div class="card" data-run="' + esc(c.run) + '" data-prefill="' + esc(c.prefill || '') + '">' +
+    '<div class="ic">' + c.ic + '</div>' + b +
+    '<div class="d">' + esc(c.d) + '</div>' +
+    '<div class="run">' + esc(c.run) + '</div></div>';
+}
+
+// ---------- 状态速览 ----------
+function auditWarnings(a) {
+  return a ? ((a.orphans || []).length + (a.dangling || []).length + (a.duplicates || []).length + (a.mentions || []).length) : -1;
+}
+function statHtml(k, v, cls, sub) {
+  return '<div class="stat"><div class="k">' + k + '</div>' +
+    '<div class="v ' + cls + '">' + v + (sub ? ' <small>' + sub + '</small>' : '') + '</div></div>';
+}
+
+// ---------- 加载与渲染 ----------
+function render(st) {
+  $('g-panels').innerHTML = PANELS.map(function (c, i) { return cardHtml(c, 'bp' + i); }).join('');
+  $('g-cmds').innerHTML = CMDS.map(cardHtml).join('');
+
+  // 已装应用
+  var apps = (st.apps && st.apps.apps) ? st.apps.apps : [];
+  if (!apps.length) {
+    $('g-apps').innerHTML = '<div class="empty" style="grid-column:1/-1">无已安装应用<br>终端 <code>/market import &lt;路径&gt;</code> 导入 · <code>/market connect &lt;hub-url&gt;</code> 连接 SkillHub</div>';
+  } else {
+    $('g-apps').innerHTML = apps.map(function (a) {
+      return '<div class="card app" data-run="/view ' + esc(a.id) + '">' +
+        '<div class="n">' + esc(a.name) + '<span style="font-size:10px;color:var(--dim);font-weight:400;margin-left:6px">v' + esc(a.version) + '</span></div>' +
+        '<div class="p" style="font-size:10px;color:var(--blue)">' + esc(a.id) + ' · [' + esc((a.permissions || []).join(',')) + ']</div>' +
+        '<div class="d">' + esc(a.description || '') + '</div>' +
+        '<div class="run">/view ' + esc(a.id) + '</div></div>';
+    }).join('');
+  }
+
+  // 状态速览
+  var pn = (st.pending && st.pending.pending) ? st.pending.pending.length : 0;
+  var aw = auditWarnings(st.audit);
+  var ts = st.tasks || {};
+  var gs = st.graph || {};
+  var hb = st.hb || {};
+  var s = '';
+  s += statHtml('待审', pn, pn ? 'r' : 'g', '篇待写回');
+  s += statHtml('审计', aw < 0 ? '-' : aw, aw > 0 ? 'y' : 'g', aw > 0 ? '处告警' : '知识库健康');
+  s += statHtml('任务', (ts.todo || 0) + (ts.doing || 0) + (ts.done || 0) + (ts.dropped || 0), 'g',
+    (ts.todo || 0) + ' 待办 · ' + (ts.doing || 0) + ' 进行中');
+  s += statHtml('图谱', gs.docs || 0, 'g', (gs.links || 0) + ' 链接' + (gs.dangling ? ' · 悬空 ' + gs.dangling : ''));
+  s += statHtml('心跳', hb.enabled ? '开' : '关', hb.enabled ? 'g' : 'r',
+    hb.last_sync ? '上次 ' + esc(hb.last_sync) : '默认关闭 /heartbeat');
+  $('g-status').innerHTML = s;
+
+  // 徽标（待审红 / 审计黄）：按 badge 字段反查卡片下标，避免数组顺序改动后错位
+  var biP = PANELS.findIndex(function (c) { return c.badge === 'pending'; });
+  var biA = PANELS.findIndex(function (c) { return c.badge === 'audit'; });
+  var bp = biP >= 0 ? $('bp' + biP) : null;
+  var ba = biA >= 0 ? $('bp' + biA) : null;
+  if (bp) { bp.textContent = pn; bp.className = 'badge' + (pn ? '' : ' none'); }
+  if (ba) { ba.textContent = aw > 0 ? aw : ''; ba.className = 'badge warn' + (aw > 0 ? '' : ' none'); }
+
+  $('stamp').textContent = '刷新于 ' + new Date().toTimeString().slice(0, 8) + ' · ' + apps.length + ' 应用';
+}
+
+function load() {
+  Promise.all([
+    hostApi('/api/kb/pending').catch(function () { return null; }),
+    hostApi('/api/audit').catch(function () { return null; }),
+    hostApi('/api/tasks/stats').catch(function () { return null; }),
+    hostApi('/api/graph/stats').catch(function () { return null; }),
+    hostApi('/api/heartbeat').catch(function () { return null; }),
+    hostApi('/api/apps').catch(function () { return null; }),
+  ]).then(function (rs) {
+    render({ pending: rs[0], audit: rs[1], tasks: rs[2], graph: rs[3], hb: rs[4], apps: rs[5] });
+  }).catch(function () { toast('状态加载失败', false); });
+}
+
+// ---------- 交互 ----------
+document.addEventListener('click', function (e) {
+  var el = e.target.closest('.card');
+  if (!el) return;
+  var prefill = el.dataset.prefill;
+  var run = el.dataset.run;
+  if (prefill) {
+    window.parent.postMessage({ type: 'prefill', cmd: prefill }, '*');
+    toast('已就绪：补全后回车', true);
+  } else {
+    window.parent.postMessage({ type: 'cmd', cmd: run }, '*');
+    toast('已执行 ' + run, true);
+  }
+});
+
+$('refresh').addEventListener('click', load);
+// 启动开关：读宿主标志位（默认开）；勾选变更写回宿主
+getFlag('md-agent-start-home', function (v) { $('opt-start').checked = v !== '0'; });
+$('opt-start').addEventListener('change', function () {
+  setFlag('md-agent-start-home', this.checked ? '1' : '0');
+  toast(this.checked ? '下次启动显示首页' : '下次启动不再自动显示首页', true);
+});
+// 状态徽标 8s 轮询（与状态栏同频；刷新应用区防目录漂移）
+setInterval(load, 8000);
+
+load();
+</script>
+</body>
+</html>
