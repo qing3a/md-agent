@@ -1068,6 +1068,34 @@ mod app_data_tests {
         assert!(write_app_data(&kb, "../x", &serde_json::json!({})).is_err());
         let _ = std::fs::remove_dir_all(&kb);
     }
+
+    #[test]
+    fn cache_breaker_attribution() {
+        use serde_json::json;
+        let entries = vec![
+            json!({"fp_system": "a", "fp_skills": "s1", "fp_mid": "m1", "fp_user": "u1"}),
+            // 仅 user 变 → 尾部增长（正常）
+            json!({"fp_system": "a", "fp_skills": "s1", "fp_mid": "m1", "fp_user": "u2"}),
+            // mid 变（首个变化桶=mid，user 同时变不算）
+            json!({"fp_system": "a", "fp_skills": "s1", "fp_mid": "m2", "fp_user": "u3"}),
+            // system 变 → 整前缀炸
+            json!({"fp_system": "b", "fp_skills": "s1", "fp_mid": "m2", "fp_user": "u3"}),
+            // skills 变
+            json!({"fp_system": "b", "fp_skills": "s2", "fp_mid": "m2", "fp_user": "u3"}),
+            // 完全相同 → 不计数
+            json!({"fp_system": "b", "fp_skills": "s2", "fp_mid": "m2", "fp_user": "u3"}),
+            // 旧格式无指纹 → 跳过（不污染 prev），后续有指纹条目与最近一次有指纹条目比较
+            json!({"input_tokens": 100}),
+            // prev 仍为 e6（b,s2,m2,u3）：system b→c 变化 → 再计一次 system
+            json!({"fp_system": "c", "fp_skills": "s2", "fp_mid": "m2", "fp_user": "u3"}),
+        ];
+        let b = cache_breakers(&entries);
+        assert_eq!(b.get("user"), Some(&1));
+        assert_eq!(b.get("mid"), Some(&1));
+        assert_eq!(b.get("system"), Some(&2));
+        assert_eq!(b.get("skills"), Some(&1));
+        assert_eq!(b.len(), 4);
+    }
 }
 
 // ---------- SkillHub（阶段 4）：hub 注册表 + 目录 ----------
@@ -1241,6 +1269,15 @@ struct ContextLogBody {
     cache_read: Option<u64>,
     cache_creation: Option<u64>,
     total_tokens: Option<u64>,
+    // per-source 分桶（方向 2）：src_* 为估算 token 数，fp_* 为内容指纹（miss 归因）
+    src_system: Option<u64>,
+    src_skills: Option<u64>,
+    src_mid: Option<u64>,
+    src_user: Option<u64>,
+    fp_system: Option<String>,
+    fp_skills: Option<String>,
+    fp_mid: Option<String>,
+    fp_user: Option<String>,
 }
 
 async fn context_log(State(s): State<AppState>, Json(b): Json<ContextLogBody>) -> Response {
@@ -1253,6 +1290,14 @@ async fn context_log(State(s): State<AppState>, Json(b): Json<ContextLogBody>) -
         "cache_read": b.cache_read.unwrap_or(0),
         "cache_creation": b.cache_creation.unwrap_or(0),
         "total_tokens": b.total_tokens.unwrap_or(0),
+        "src_system": b.src_system.unwrap_or(0),
+        "src_skills": b.src_skills.unwrap_or(0),
+        "src_mid": b.src_mid.unwrap_or(0),
+        "src_user": b.src_user.unwrap_or(0),
+        "fp_system": b.fp_system.unwrap_or_default(),
+        "fp_skills": b.fp_skills.unwrap_or_default(),
+        "fp_mid": b.fp_mid.unwrap_or_default(),
+        "fp_user": b.fp_user.unwrap_or_default(),
     });
     let path = s.kb_root.join(".context-log.jsonl");
     use std::io::Write;
@@ -1283,7 +1328,10 @@ async fn context_stats(State(s): State<AppState>) -> Response {
             return Json(json!({
                 "total": 0, "by_kind": {}, "input_tokens": 0, "output_tokens": 0,
                 "cache_read": 0, "cache_creation": 0, "cache_read_ratio": null,
-                "avg_tool_count": 0, "overflow_count": 0
+                "avg_tool_count": 0, "overflow_count": 0,
+                "src": { "system": 0, "skills": 0, "mid": 0, "user": 0, "total": 0,
+                         "pct": { "system": 0.0, "skills": 0.0, "mid": 0.0, "user": 0.0 } },
+                "cache_breakers": {}
             }))
             .into_response()
         }
@@ -1295,24 +1343,36 @@ async fn context_stats(State(s): State<AppState>) -> Response {
     let mut cc = 0u64;
     let mut tools = 0u64;
     let mut tool_n = 0u64;
+    let mut src_sys = 0u64;
+    let mut src_sk = 0u64;
+    let mut src_mid = 0u64;
+    let mut src_user = 0u64;
     let mut by_kind: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut entries: Vec<Value> = Vec::new();
     for line in content.lines() {
         if line.trim().is_empty() {
             continue;
         }
         if let Ok(v) = serde_json::from_str::<Value>(line) {
             total += 1;
-            let kind = v["kind"].as_str().unwrap_or("question").to_string();
-            *by_kind.entry(kind).or_insert(0) += 1;
-            input += v["input_tokens"].as_u64().unwrap_or(0);
-            output += v["output_tokens"].as_u64().unwrap_or(0);
-            cr += v["cache_read"].as_u64().unwrap_or(0);
-            cc += v["cache_creation"].as_u64().unwrap_or(0);
-            let tc = v["tool_count"].as_u64().unwrap_or(0);
-            if tc > 0 {
-                tools += tc;
-                tool_n += 1;
-            }
+            entries.push(v);
+        }
+    }
+    for v in &entries {
+        let kind = v["kind"].as_str().unwrap_or("question").to_string();
+        *by_kind.entry(kind).or_insert(0) += 1;
+        input += v["input_tokens"].as_u64().unwrap_or(0);
+        output += v["output_tokens"].as_u64().unwrap_or(0);
+        cr += v["cache_read"].as_u64().unwrap_or(0);
+        cc += v["cache_creation"].as_u64().unwrap_or(0);
+        src_sys += v["src_system"].as_u64().unwrap_or(0);
+        src_sk += v["src_skills"].as_u64().unwrap_or(0);
+        src_mid += v["src_mid"].as_u64().unwrap_or(0);
+        src_user += v["src_user"].as_u64().unwrap_or(0);
+        let tc = v["tool_count"].as_u64().unwrap_or(0);
+        if tc > 0 {
+            tools += tc;
+            tool_n += 1;
         }
     }
     // 命中率近似：有 cache_creation（miss）时 = cr/(cr+cc)；否则 = cr/(cr+input) 兜底
@@ -1323,6 +1383,8 @@ async fn context_stats(State(s): State<AppState>) -> Response {
     } else {
         None
     };
+    let breakers = cache_breakers(&entries);
+    let src_total = src_sys + src_sk + src_mid + src_user;
     Json(json!({
         "total": total,
         "by_kind": by_kind,
@@ -1333,6 +1395,57 @@ async fn context_stats(State(s): State<AppState>) -> Response {
         "cache_read_ratio": ratio,
         "avg_tool_count": if tool_n > 0 { tools as f64 / tool_n as f64 } else { 0.0 },
         "overflow_count": 0,
+        // per-source 分桶（方向 2）：估算 token 累计 + 占比；cache_breakers = 缓存断裂归因分布
+        "src": {
+            "system": src_sys,
+            "skills": src_sk,
+            "mid": src_mid,
+            "user": src_user,
+            "total": src_total,
+            "pct": {
+                "system": if src_total > 0 { src_sys as f64 / src_total as f64 } else { 0.0 },
+                "skills": if src_total > 0 { src_sk as f64 / src_total as f64 } else { 0.0 },
+                "mid": if src_total > 0 { src_mid as f64 / src_total as f64 } else { 0.0 },
+                "user": if src_total > 0 { src_user as f64 / src_total as f64 } else { 0.0 },
+            },
+        },
+        "cache_breakers": breakers,
     }))
     .into_response()
+}
+
+/// 缓存断裂归因：对连续记账条目，按序找第一个指纹变化的源分桶（system→skills→mid→user）。
+/// 首个变化的桶 = 缓存边界断裂点（其前为可缓存稳定段）；全变（含 user）属正常尾部增长。
+fn cache_breakers(entries: &[Value]) -> std::collections::HashMap<String, u64> {
+    let mut breakers: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut prev: Option<(Option<String>, Option<String>, Option<String>, Option<String>)> = None;
+    for v in entries {
+        let cur = (
+            v["fp_system"].as_str().map(String::from),
+            v["fp_skills"].as_str().map(String::from),
+            v["fp_mid"].as_str().map(String::from),
+            v["fp_user"].as_str().map(String::from),
+        );
+        if cur.0.is_none() {
+            continue; // 旧格式条目无指纹，跳过归因
+        }
+        if let Some(p) = &prev {
+            let b = if cur.0 != p.0 {
+                "system"
+            } else if cur.1 != p.1 {
+                "skills"
+            } else if cur.2 != p.2 {
+                "mid"
+            } else if cur.3 != p.3 {
+                "user"
+            } else {
+                ""
+            };
+            if !b.is_empty() {
+                *breakers.entry(b.to_string()).or_insert(0) += 1;
+            }
+        }
+        prev = Some(cur);
+    }
+    breakers
 }

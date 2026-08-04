@@ -139,36 +139,70 @@
 
   // ---------- Context Engineering 组装器 v1（模块化 builder，稳定前缀在前） ----------
   // 稳定前缀（会话内不变 → DeepSeek 自动前缀缓存命中）：身份 + L1 规范/记忆 + 工具清单 + 回答规则
-  // 易变尾部（跨问题变化）：命中技能放最后，最大化共享前缀（oh-my-pi SystemPromptPlan 思想）
-  Core.buildGuidePrefix = function (parts) {
+  // 易变内容（命中技能）不进 system：由调用方放 userMsg 尾部（tail attachment 语义），避免命中即炸前缀缓存
+
+  // ---------- CE 分节注册表（方向 3，cc-haha systemPromptSection 思路） ----------
+  // 系统提示词按 name 分节：普通节会话内 memo（/clear 或配置翻转才重算）；cacheBreak 节每轮重算（必须给 reason）。
+  // 保证稳定前缀字节级不变——新增内容默认走 memo 节；易变内容必须显式声明理由，否则静默失效缓存。
+  const sectionCache = new Map();
+  Core.resetSectionCache = function () { sectionCache.clear(); };
+  Core.defineSection = function (name, compute, opts) {
+    return { name, compute, opts: opts || {} };
+  };
+  // 按序解析：memo 节命中缓存直接复用；cacheBreak 节每轮重算（today 等）。返回与 sections 等长的数组（含 null）。
+  Core.resolveSections = function (sections) {
+    return sections.map((s) => {
+      if (!s.opts.cacheBreak && sectionCache.has(s.name)) return sectionCache.get(s.name);
+      const v = s.compute();
+      if (!s.opts.cacheBreak) sectionCache.set(s.name, v);
+      return v;
+    });
+  };
+
+  Core.buildGuidePrefix = function (parts, opts) {
     // C 半步：llmConfigured 工具化取用时 L1 全文移出前缀（规范/记忆由 read_l1 按需取），引导语随之条件化，避免「声明有 L1 却无内容」的悬空引导
     const hasL1 = !!(parts.guideText || parts.memoryText);
-    return [
-      '你是本地双层 MD 知识库的检索问答助手。',
-      hasL1 && '以下是知识库 L1 规范/记忆/索引层（权威约定，需遵循）：',
-      parts.guideText && '【规范层（KB/FRAMEWORK/RULES）】\n' + parts.guideText,
-      parts.memoryText && '【记忆/索引层（MEMORY/INDEX）】\n' + parts.memoryText,
-      '',
-      '工具调用（需要更多知识库/网页/文件信息时主动使用）：',
-      '调用工具时**第一行就输出**：{"tool":"<工具名>","args":{...}}（不要先输出解释或其它文字，不要代码块标记）；',
-      '需要多个信息时可连续输出多行工具调用。',
-      '可用工具：',
-      parts.toolsTxt || '(工具清单加载失败)',
-      '调用后你会收到「工具返回」，基于它继续回答；不需要工具时直接回答。',
-      '',
-      '回答规则：',
-      '1. 检索与记忆取用规则：回答涉及知识库内容时，**必须先调用工具取用**——规范/历史决策/既有记忆查 read_l1，L2 正文查 search/memory_search；基于工具返回回答，引用标注来源；片段确实不足时如实说明，不得仅凭模型自身知识陈述规范；',
-      '2. 优先依据用户消息中给出的检索片段回答，引用格式 [文件:行号]；',
-      '3. 片段不足时如实说明，不要编造；',
-      '4. 用中文简洁回答；',
-      '5. 多轮对话中注意保持与上文一致（引用只需标注本轮片段来源）；',
-      '6. 今天是 ' + (parts.today || '') + '。若本次问答产生了值得沉淀的知识（新事实、已定决策、用户纠正、新规范），在回答末尾单独附写回块（不要放进代码块）：',
-      '   <!-- md-agent-save -->',
-      '   {"path":"相对KB根路径","mode":"append|new","content":"markdown正文"}',
-      '   - 新知识：path 指向 notes/ 下的 L2 文件，mode=new，正文含 # 标题；',
-      '   - 追加/决策/纠正：path=MEMORY.md，mode=append；',
-      '   - 没有可沉淀内容时不要输出该块。',
-    ].filter(Boolean).join('\n');
+    const fresh = !!(opts && opts.fresh); // fresh-window 降级：绕过缓存（显式丢记忆的最小上下文）
+    const sections = [
+      Core.defineSection('identity', () =>
+        '你是本地双层 MD 知识库的检索问答助手。' + (hasL1 ? '\n以下是知识库 L1 规范/记忆/索引层（权威约定，需遵循）：' : '')),
+      Core.defineSection('guide', () => (parts.guideText ? '【规范层（KB/FRAMEWORK/RULES）】\n' + parts.guideText : null)),
+      Core.defineSection('memory', () => (parts.memoryText ? '【记忆/索引层（MEMORY/INDEX）】\n' + parts.memoryText : null)),
+      Core.defineSection('tools', () =>
+        '工具调用（需要更多知识库/网页/文件信息时主动使用）：\n' +
+        '调用工具时**第一行就输出**：{"tool":"<工具名>","args":{...}}（不要先输出解释或其它文字，不要代码块标记）；\n' +
+        '需要多个信息时可连续输出多行工具调用。\n可用工具：\n' + (parts.toolsTxt || '(工具清单加载失败)') +
+        '\n调用后你会收到「工具返回」，基于它继续回答；不需要工具时直接回答。'),
+      Core.defineSection(
+        'frc',
+        () =>
+          // 方向 4（cc-haha SUMMARIZE_TOOL_RESULTS 思路）：工具结果注入是「截断摘要」而非全文——
+          // 模型被告知可重查，截断不影响取用，同时控制工具轮 miss token 体积
+          '工具返回可能是截断摘要（完整内容未全部注入）。使用工具结果时把关键信息写进你的回答；' +
+          '之后如需完整内容，重新调用该工具即可。',
+        { reason: '静态指令，memo' }
+      ),
+      Core.defineSection(
+        'rules',
+        () =>
+          '回答规则：\n' +
+          '1. 检索与记忆取用规则：回答涉及知识库内容时，**必须先调用工具取用**——规范/历史决策/既有记忆查 read_l1，L2 正文查 search/memory_search；基于工具返回回答，引用标注来源；片段确实不足时如实说明，不得仅凭模型自身知识陈述规范；\n' +
+          '2. 优先依据用户消息中给出的检索片段回答，引用格式 [文件:行号]；\n' +
+          '3. 片段不足时如实说明，不要编造；\n' +
+          '4. 用中文简洁回答；\n' +
+          '5. 多轮对话中注意保持与上文一致（引用只需标注本轮片段来源）；\n' +
+          '6. 今天是 ' + (parts.today || '') + '。若本次问答产生了值得沉淀的知识（新事实、已定决策、用户纠正、新规范），在回答末尾单独附写回块（不要放进代码块）：\n' +
+          '   <!-- md-agent-save -->\n' +
+          '   {"path":"相对KB根路径","mode":"append|new","content":"markdown正文"}\n' +
+          '   - 新知识：path 指向 notes/ 下的 L2 文件，mode=new，正文含 # 标题；\n' +
+          '   - 追加/决策/纠正：path=MEMORY.md，mode=append；\n' +
+          '   - 没有可沉淀内容时不要输出该块。',
+        { cacheBreak: true, reason: 'today 跨天变化（每天一次 miss，可接受）' }
+      ),
+    ];
+    const rs = fresh ? sections.map((s) => s.compute()) : Core.resolveSections(sections);
+    // 结构组装（紧凑，与原始 buildGuidePrefix 输出一致）：identity/guide/memory 连排 → tools → frc → rules
+    return rs.filter(Boolean).join('\n');
   };
   Core.buildSkillTail = function (skillTxt) {
     return skillTxt ? '相关技能（命中触发词，按技能步骤执行）：' + skillTxt : '';

@@ -44,6 +44,11 @@
   let GUIDE_TEXT = ''; // L1 规范层（KB/FRAMEWORK/RULES）——稳定前缀
   let MEMORY_TEXT = ''; // L1 记忆/索引层（MEMORY/INDEX）——易变
   let llmConfigured = false; // 上下文组装 v2：LLM 配置（endpoint 非空）时知识取用走「工具化」，否则降级「注入 + 启发式预检索」
+  // 配置翻转（endpoint 增删，8s 轮询感知）→ 系统提示词分节缓存失效：前缀语义变化，必须重算
+  function applyLlmConfigured(v) {
+    if (v !== llmConfigured) Core.resetSectionCache();
+    llmConfigured = v;
+  }
   let history = loadHistory(); // 多轮对话记忆（localStorage 持久化，刷新不丢）
   const MAX_HISTORY = 8; // 最近 4 轮
 
@@ -378,7 +383,7 @@
       const ver = (h && h.version) || '?';
       const kb = (c && c.kb_root) || '-';
       const model = (c && c.llm && c.llm.model) || '未配置';
-      llmConfigured = !!(c && c.llm && c.llm.endpoint); // 上下文组装 v2：有 LLM 配置 → 工具化取用
+      applyLlmConfigured(!!(c && c.llm && c.llm.endpoint)); // 上下文组装 v2：有 LLM 配置 → 工具化取用
       const pend = (p && Array.isArray(p.pending)) ? p.pending.length : '-';
       const todo = (t && t.stats) ? (t.stats.todo || 0) + (t.stats.doing || 0) : '-';
       const gs = (g && g.docs) ? (g.docs || 0) + ' 文档 / ' + (g.links || 0) + ' 链接' : '-';
@@ -401,7 +406,7 @@
       const ok = !!(h && h.status === 'ok');
       const model = (c && c.llm && c.llm.model) || '未配置 LLM';
       const kb = (c && c.kb_root) || '-';
-      llmConfigured = !!(c && c.llm && c.llm.endpoint); // 配置页改 endpoint 后 ≤8s 生效（无需重载页面）
+      applyLlmConfigured(!!(c && c.llm && c.llm.endpoint)); // 配置页改 endpoint 后 ≤8s 生效（无需重载页面）
       const pend = (p && Array.isArray(p.pending)) ? p.pending.length : '-';
       const todo = (t && t.stats) ? (t.stats.todo || 0) + (t.stats.doing || 0) : '-';
       const gs = (g && g.docs) ? (g.docs || 0) + ' 文档 / ' + (g.links || 0) + ' 链接' : '-';
@@ -635,7 +640,7 @@
       case '/config': await cfg(); break;
       case '/remember': await remember(rest); break;
       case '/digest': await digest(rest.join(' ')); break;
-      case '/clear': history = []; saveHistory(); term.writeln('多轮记忆已清空'); break;
+      case '/clear': history = []; saveHistory(); Core.resetSectionCache(); term.writeln('多轮记忆已清空（系统提示词分节缓存已重置）'); break;
       case '/link-all': await linkAll(); break;
       case '/fetch': await fetchCmd(rest); break;
       case '/page': await pageCmd(rest); break;
@@ -749,6 +754,15 @@
     return appsCache;
   }
 
+  // ---------- CE 记账增强（per-source 分桶）：输入按源分桶估算 + 指纹，miss 归因在 /api/context/stats（ZCode inputBaselineBySource 思想）
+  const estTokens = (s) => Math.ceil(String(s || '').length / 3);
+  const fpOf = (s) => {
+    let h = 5381;
+    const str = String(s || '');
+    for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) >>> 0;
+    return h.toString(36);
+  };
+
   // 工具名 → 端点调用（args 为 LLM 给的参数对象）
   const TOOL_API = {
     'search': (a) => api('/api/search?q=' + encodeURIComponent(a.q || '') + '&layer=' + encodeURIComponent(a.layer || 'notes') + (a.ctx ? '&ctx=1' : '')),
@@ -772,9 +786,10 @@
     if (!fn) throw new Error('未知工具: ' + name);
     const r = await fn(args || {});
     if (name === 'search' || name === 'memory_search') {
+      // 方向 4：命中 10→8、单条上下文截断 200——摘要注入，模型可重查（frc 指令节背书）
       const hits = r.hits || [];
-      return hits.slice(0, 10).map((h) =>
-        '[' + h.file + ':' + h.line + (h.section ? ' 小节:' + h.section : '') + '] ' + (h.context || h.text || '')
+      return hits.slice(0, 8).map((h) =>
+        '[' + h.file + ':' + h.line + (h.section ? ' 小节:' + h.section : '') + '] ' + String(h.context || h.text || '').slice(0, 200)
       ).join('\n') || '(无命中)';
     }
     if (name === 'read_l1') {
@@ -787,8 +802,8 @@
       return (r.linked || []).map((l) => '[[目标]] ' + (l.dst || '') + (l.resolved ? ' → ' + l.dst_path : ' (悬空)')).join('\n') || '(无出链)';
     }
     if (name === 'graph.backlinks') return (r.backlinks || []).join('\n') || '(无入链)';
-    if (name === 'fetch' || name === 'page') return '标题: ' + (r.title || '') + '\n' + String(r.text || '').slice(0, 3000);
-    if (name === 'file') return String(r.content || '').slice(0, 3000);
+    if (name === 'fetch' || name === 'page') return '标题: ' + (r.title || '') + '\n' + String(r.text || '').slice(0, 2000); // 方向 4：3000→2000 摘要注入
+    if (name === 'file') return String(r.content || '').slice(0, 2000); // 方向 4：3000→2000 摘要注入
     if (name === 'tasks') {
       const t = r.tasks || [];
       return t.length ? t.map((x) => '#' + x.id + ' [' + x.status + '] ' + (x.title || x.goal)).join('\n') : '(无任务)';
@@ -1031,25 +1046,27 @@
         )
       )
       .join('\n\n');
-    // CE 组装器（稳定前缀在前）：规范层 + 记忆层 + 工具清单 + 回答规则 = 稳定前缀；技能 = 易变尾部
+    // CE 组装器（稳定前缀在前）：规范层 + 记忆层 + 工具清单 + 回答规则 = 稳定前缀（会话内字节级稳定）；
+    // 技能等易变内容不进 system（命中即炸前缀缓存）→ 放 userMsg 尾部（tail attachment 语义，cc-haha 背书）
     // C 半步：llmConfigured（工具化取用）时前缀瘦身——L1 全文移出前缀，规范/记忆由 LLM 显式调 read_l1 按需取；
     // 无 LLM 配置降级路径保留注入（启发式预检索）
-    const system = [
-      Core.buildGuidePrefix({
-        guideText: llmConfigured ? '' : (GUIDE_TEXT || L1_TEXT), // 规范层优先，L1 全量兜底
-        memoryText: llmConfigured ? '' : ((await getMemorySummary()) || MEMORY_TEXT), // CE 第 4 步：注入摘要（派生产物），全文兜底
-        toolsTxt,
-        today: localToday(),
-      }),
-      Core.buildSkillTail(skillTxt),
-    ].filter(Boolean).join('\n\n');
-    // 上下文组装 v2：有 LLM 配置 → userMsg 只含「问题」+ @ 指定文档（检索片段不再预注入，由 LLM 显式调工具取用）；
+    const system = Core.buildGuidePrefix({
+      guideText: llmConfigured ? '' : (GUIDE_TEXT || L1_TEXT), // 规范层优先，L1 全量兜底
+      memoryText: llmConfigured ? '' : ((await getMemorySummary()) || MEMORY_TEXT), // CE 第 4 步：注入摘要（派生产物），全文兜底
+      toolsTxt,
+      today: localToday(),
+    });
+    const skillTail = Core.buildSkillTail(skillTxt);
+    // 上下文组装 v2：有 LLM 配置 → userMsg 只含「问题」+ 技能 + @ 指定文档（检索片段不再预注入，由 LLM 显式调工具取用）；
     // 无 LLM 配置 → 降级注入启发式预检索片段
     const userMsg = llmConfigured
       ? ['问题：' + question]
+          .concat(skillTail ? ['', skillTail] : [])
           .concat(atFrag.length ? ['', '指定文档（用户 @ 提及，据此回答）：'].concat(atFrag) : [])
           .join('\n')
-      : ['问题：' + question, '', '知识库检索片段（L2）：', frag || '(无片段)'].join('\n');
+      : ['问题：' + question, '', '知识库检索片段（L2）：', frag || '(无片段)']
+          .concat(skillTail ? ['', skillTail] : [])
+          .join('\n');
     const messages = [
       { role: 'system', content: system },
       ...history,
@@ -1070,7 +1087,7 @@
       if (!r || !r.overflow) return r;
       term.writeln('\x1b[33m(上下文超限 → 降级最小上下文重试)\x1b[0m');
       const fresh = [
-        { role: 'system', content: Core.buildGuidePrefix({ guideText: llmConfigured ? '' : (GUIDE_TEXT || L1_TEXT), memoryText: '', toolsTxt, today: localToday() }) },
+        { role: 'system', content: Core.buildGuidePrefix({ guideText: llmConfigured ? '' : (GUIDE_TEXT || L1_TEXT), memoryText: '', toolsTxt, today: localToday() }, { fresh: true }) },
         { role: 'user', content: '问题：' + question },
       ];
       const r2 = await llmStreamOnce(fresh);
@@ -1098,7 +1115,7 @@
       try { result = await runTool(tj.tool, tj.args); }
       catch (e) { result = '工具调用失败: ' + ((e && e.message) || e); }
       messages.push({ role: 'assistant', content: r.full });
-      messages.push({ role: 'user', content: '工具 ' + tj.tool + ' 返回（基于它直接回答；仍缺关键信息才可再调用工具，引用标注 [工具:' + tj.tool + ']）：\n' + String(result).slice(0, 4000) });
+      messages.push({ role: 'user', content: '工具 ' + tj.tool + ' 返回（基于它直接回答；仍缺关键信息才可再调用工具，引用标注 [工具:' + tj.tool + ']）：\n' + String(result).slice(0, 3000) }); // 方向 4：4000→3000 摘要注入
       full = ''; // 工具轮内容不渲染
       toolCount++;
       if (toolCount >= MAX_TOOL) {
@@ -1132,6 +1149,11 @@
       const u = lastUsage;
       const cacheRead = u.prompt_cache_hit_tokens ?? u.cache_read_input_tokens ?? 0;
       const cacheCreation = u.prompt_cache_miss_tokens ?? u.cache_creation_input_tokens ?? 0;
+      // per-source 分桶：system=首条消息；user=末条（含技能/指定文档/工具结果）；mid=中间（历史+工具轮）
+      const sysTxt = (messages[0] && messages[0].content) || '';
+      const userTxt = (messages[messages.length - 1] && messages[messages.length - 1].content) || '';
+      let midTxt = '';
+      for (let i = 1; i < messages.length - 1; i++) midTxt += (messages[i].content || '') + '\n';
       fetch('/api/context/log', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1143,6 +1165,14 @@
           cache_read: cacheRead,
           cache_creation: cacheCreation,
           total_tokens: u.total_tokens || 0,
+          src_system: estTokens(sysTxt),
+          src_skills: estTokens(skillTail),
+          src_mid: estTokens(midTxt),
+          src_user: estTokens(userTxt),
+          fp_system: fpOf(sysTxt),
+          fp_skills: fpOf(skillTail),
+          fp_mid: fpOf(midTxt),
+          fp_user: fpOf(userTxt),
         }),
       }).catch(() => {});
     }
