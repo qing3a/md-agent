@@ -1361,6 +1361,13 @@
         target = 'pending/MEMORY.' + Date.now() + '.md';
         // 保留条目原文（approve 时后端按当日小节合并）
         if (!/^##\s/.test(content)) content = '## ' + today + '\n' + content;
+        // 记忆摘要只收 `- `/`* ` 开头行：裸文本正文 bullet 化，否则该记忆对后续会话不可见
+        content = content.split('\n').map((l, i) => {
+          if (i === 0 && /^##\s/.test(l)) return l; // 日期标题保留
+          const t = l.trim();
+          if (!t || /^[-*]\s/.test(t)) return l; // 已是 bullet 或空行保留
+          return '- ' + l; // 其余正文加 bullet
+        }).join('\n');
         // 记忆断链修复 B：自动生成到相关 L2 文档的双链建议（进待审人审确认，编辑后批准可增删）
         try {
           const sug = await api('/api/link/suggest', {

@@ -87,8 +87,8 @@ pub fn search(root: &Path, query: &str, layer: &str, ctx: bool) -> Result<Search
                 continue;
             }
             let path = entry.path();
-            // 待审目录不参与检索（pending 待确认后才落地）
-            if path.components().any(|c| c.as_os_str() == "pending") {
+            // 待审目录不参与检索（pending 待确认后才落地）；L0 会话快照（sessions/）是流水非知识，也不进检索
+            if path.components().any(|c| c.as_os_str() == "pending" || c.as_os_str() == "sessions") {
                 continue;
             }
             if path.extension().and_then(|e| e.to_str()) != Some("md") {

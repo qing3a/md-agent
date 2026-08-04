@@ -113,8 +113,8 @@ fn collect_md_files(root: &Path) -> Vec<PathBuf> {
             continue;
         }
         let p = entry.path();
-        // 待审目录不进图谱（Phase 3 前置：pending 待确认后才落地）
-        if p.components().any(|c| c.as_os_str() == "pending") {
+        // 待审目录不进图谱（Phase 3 前置：pending 待确认后才落地）；L0 会话快照（sessions/）是流水非知识，也不进图谱
+        if p.components().any(|c| c.as_os_str() == "pending" || c.as_os_str() == "sessions") {
             continue;
         }
         if p.extension().and_then(|e| e.to_str()) == Some("md") {
