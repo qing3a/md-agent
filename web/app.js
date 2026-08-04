@@ -996,11 +996,13 @@
         )
       )
       .join('\n\n');
-    // CE 组装器 v1（稳定前缀在前）：规范层 + 记忆层 + 工具清单 + 回答规则 = 稳定前缀；技能 = 易变尾部
+    // CE 组装器（稳定前缀在前）：规范层 + 记忆层 + 工具清单 + 回答规则 = 稳定前缀；技能 = 易变尾部
+    // C 半步：llmConfigured（工具化取用）时前缀瘦身——L1 全文移出前缀，规范/记忆由 LLM 显式调 read_l1 按需取；
+    // 无 LLM 配置降级路径保留注入（启发式预检索）
     const system = [
       Core.buildGuidePrefix({
-        guideText: GUIDE_TEXT || L1_TEXT, // 规范层优先，L1 全量兜底
-        memoryText: (await getMemorySummary()) || MEMORY_TEXT, // CE 第 4 步：注入摘要（派生产物），全文兜底
+        guideText: llmConfigured ? '' : (GUIDE_TEXT || L1_TEXT), // 规范层优先，L1 全量兜底
+        memoryText: llmConfigured ? '' : ((await getMemorySummary()) || MEMORY_TEXT), // CE 第 4 步：注入摘要（派生产物），全文兜底
         toolsTxt,
         today: localToday(),
       }),
@@ -1033,7 +1035,7 @@
       if (!r || !r.overflow) return r;
       term.writeln('\x1b[33m(上下文超限 → 降级最小上下文重试)\x1b[0m');
       const fresh = [
-        { role: 'system', content: Core.buildGuidePrefix({ guideText: GUIDE_TEXT || L1_TEXT, memoryText: '', toolsTxt, today: localToday() }) },
+        { role: 'system', content: Core.buildGuidePrefix({ guideText: llmConfigured ? '' : (GUIDE_TEXT || L1_TEXT), memoryText: '', toolsTxt, today: localToday() }) },
         { role: 'user', content: '问题：' + question },
       ];
       const r2 = await llmStreamOnce(fresh);

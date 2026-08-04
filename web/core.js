@@ -141,9 +141,11 @@
   // 稳定前缀（会话内不变 → DeepSeek 自动前缀缓存命中）：身份 + L1 规范/记忆 + 工具清单 + 回答规则
   // 易变尾部（跨问题变化）：命中技能放最后，最大化共享前缀（oh-my-pi SystemPromptPlan 思想）
   Core.buildGuidePrefix = function (parts) {
+    // C 半步：llmConfigured 工具化取用时 L1 全文移出前缀（规范/记忆由 read_l1 按需取），引导语随之条件化，避免「声明有 L1 却无内容」的悬空引导
+    const hasL1 = !!(parts.guideText || parts.memoryText);
     return [
       '你是本地双层 MD 知识库的检索问答助手。',
-      '以下是知识库 L1 规范/记忆/索引层（权威约定，需遵循）：',
+      hasL1 && '以下是知识库 L1 规范/记忆/索引层（权威约定，需遵循）：',
       parts.guideText && '【规范层（KB/FRAMEWORK/RULES）】\n' + parts.guideText,
       parts.memoryText && '【记忆/索引层（MEMORY/INDEX）】\n' + parts.memoryText,
       '',

@@ -239,7 +239,7 @@ Phase 3-B 规划引擎（✅ 基础已实现）
          └─ ▶ 深化：动态重规划；执行约束延续人审闭环
 Phase 3-C Harness 深化（✅ P1/P3/P4 + SkillHub 接入已完成；P2 巩固器已落地）
          ├─ ✅ P1 工具注册表 + Agent Loop：GET /api/tools 声明式工具清单（name/desc/params）；LLM 决策调工具 → 宿主执行 → 结果回填，Agent 回路从「启发式关键词 → grep」升级为 LLM 显式 Tool Use
-         ├─ ✅ P2 巩固/遗忘：consolidate 两阶段（先规则后 LLM）+ 记忆提案四型待审通道；任务感知上下文组装（CE 组装器 + memory_summary 注入）
+         ├─ ✅ P2 巩固/遗忘：consolidate 两阶段（先规则后 LLM）+ 记忆提案四型待审通道；任务感知上下文组装（CE 组装器 + memory_summary 注入；C 半步：LLM 配置时 L1 全文移出前缀、read_l1/search 按需取用——同口径评测 input/total -47%、cache 率 74%）
          ├─ ✅ P3 Skills / 程序性自组织：/suggest、/audit 产出升级为程序性技能（技能格式 + 注册表 /api/skills + trigger 命中自动注入）
          ├─ ✅ P4 App 系统（原 Phase 4 提前）：manifest + 权限白名单 + 生命周期（/api/market/*）+ 面板/托盘动态菜单 + 沙箱 iframe 渲染（/view）
          └─ ✅ SkillHub 接入：应用市场 = hub 管理端 + 客户端——/market connect 连接第三方 SkillHub（skillhub.md 索引协议），安装走命令行（面板降级：第三方无稳定 API，面板只管理运行/关闭/卸载）；本地导入兜底；market.connect 工具 + 技能触发（LLM 一句话连商店）；面板双 Tab（目录/已安装）+ 来源 hub 记录 + 条目统一（应用与技能同目录，按包内容识别落点：app.json→kb/apps/，SKILL.md/裸 md→kb/skills/）
