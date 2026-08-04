@@ -192,6 +192,7 @@
     if (/^\/api\/fetch/.test(p)) return 'fetch';
     if (/^\/api\/page/.test(p)) return 'page';
     if (/^\/api\/(audit|consolidate)/.test(p)) return 'audit';
+    if (/^\/api\/apps\/[^/]+\/data/.test(p)) return 'storage'; // App 状态持久化（localStorage 代理落盘）
     if (/^\/api\/kb\/(sync|pending\/approve|pending\/reject|pending\/preview)/.test(p) || /^\/api\/link/.test(p)) return 'write';
     return null;
   };

@@ -72,6 +72,9 @@ t('llm 权限放行', Core.appCan('/api/llm', 'POST', ['llm']));
 t('无权限拒绝', !Core.appCan('/api/llm', 'POST', ['search']));
 t('file GET=read', Core.appCan('/api/file', 'GET', ['read']) && !Core.appCan('/api/file', 'POST', ['read']));
 t('file POST=write', Core.appCan('/api/file', 'POST', ['write']));
+t('storage 映射（app data）', Core.permForPath('/api/apps/match/data') === 'storage');
+t('storage 权限放行', Core.appCan('/api/apps/match/data', 'GET', ['storage']) && Core.appCan('/api/apps/match/data', 'POST', ['storage']));
+t('无 storage 权限拒绝', !Core.appCan('/api/apps/match/data', 'POST', ['llm']));
 t('未映射端点拒绝', !Core.appCan('/api/config', 'GET', ['llm', 'search', 'graph']));
 
 console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败');

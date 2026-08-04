@@ -82,6 +82,7 @@ pub async fn serve(
         .route("/api/context/log", post(context_log))
         .route("/api/context/stats", get(context_stats))
         .route("/api/apps", get(apps_list))
+        .route("/api/apps/{id}/data", get(app_data_get).post(app_data_post))
         .route("/api/hubs", get(hubs_list))
         .route("/api/hubs/connect", post(hubs_connect))
         .route("/api/hubs/refresh", post(hubs_refresh))
@@ -968,6 +969,105 @@ async fn tasks_delete(State(s): State<AppState>, AxumPath(id): AxumPath<i64>) ->
 // ---------- 应用市场（阶段 1：已安装 app 列表，manifest 在 kb/apps/<id>/app.json） ----------
 async fn apps_list(State(s): State<AppState>) -> Response {
     Json(json!({ "apps": crate::kb::list_apps(&s.kb_root) })).into_response()
+}
+
+// ---------- App 状态持久化（storage 权限）：kb/apps/<id>/data/localstorage.json ----------
+// 桥层 localStorage 代理的落盘目标（沙箱无 allow-same-origin → localStorage 不可用，代理经此端点持久化）。
+// 宿主桥已校验 tab.appId 与 storage 权限；端点自身防御 id 穿越。
+
+#[derive(Deserialize)]
+struct AppDataBody {
+    data: serde_json::Value,
+}
+
+/// app id → 数据文件路径；id 必须是 app 目录名（拒绝路径分隔符/穿越）
+fn app_data_file(kb_root: &std::path::Path, id: &str) -> Option<std::path::PathBuf> {
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains("..")
+        || id.contains(':')
+        || id == "."
+    {
+        return None;
+    }
+    Some(kb_root.join("apps").join(id).join("data").join("localstorage.json"))
+}
+
+fn read_app_data(kb_root: &std::path::Path, id: &str) -> serde_json::Value {
+    match app_data_file(kb_root, id).and_then(|p| std::fs::read_to_string(p).ok()) {
+        Some(s) => serde_json::from_str(&s).unwrap_or_else(|_| serde_json::json!({})),
+        None => serde_json::json!({}), // 首次无文件 → 空对象
+    }
+}
+
+fn write_app_data(kb_root: &std::path::Path, id: &str, v: &serde_json::Value) -> Result<std::path::PathBuf, String> {
+    let p = app_data_file(kb_root, id).ok_or_else(|| "非法 app id".to_string())?;
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("创建 data 目录失败: {e}"))?;
+    }
+    let s = serde_json::to_string_pretty(v).map_err(|e| e.to_string())?;
+    std::fs::write(&p, s).map_err(|e| format!("写入失败: {e}"))?;
+    Ok(p)
+}
+
+async fn app_data_get(State(s): State<AppState>, AxumPath(id): AxumPath<String>) -> Response {
+    if app_data_file(&s.kb_root, &id).is_none() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "非法 app id" }))).into_response();
+    }
+    Json(json!({ "data": read_app_data(&s.kb_root, &id) })).into_response()
+}
+
+async fn app_data_post(State(s): State<AppState>, AxumPath(id): AxumPath<String>, Json(b): Json<AppDataBody>) -> Response {
+    let v = if b.data.is_object() { b.data } else { serde_json::json!({}) };
+    match write_app_data(&s.kb_root, &id, &v) {
+        Ok(p) => Json(json!({ "ok": true, "path": p.display().to_string() })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod app_data_tests {
+    use super::*;
+
+    fn tmp_kb(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("md-agent-appdata-{}-{}", name, std::process::id()))
+    }
+
+    #[test]
+    fn id_validation_rejects_traversal() {
+        let kb = tmp_kb("valid");
+        assert!(app_data_file(&kb, "match").is_some());
+        assert!(app_data_file(&kb, "../evil").is_none());
+        assert!(app_data_file(&kb, "a/b").is_none());
+        assert!(app_data_file(&kb, "a\\b").is_none());
+        assert!(app_data_file(&kb, "").is_none());
+        assert!(app_data_file(&kb, "c:evil").is_none());
+        let _ = std::fs::remove_dir_all(&kb);
+    }
+
+    #[test]
+    fn read_write_roundtrip() {
+        let kb = tmp_kb("rt");
+        // 无文件 → 空对象
+        assert_eq!(read_app_data(&kb, "match"), serde_json::json!({}));
+        // 写入 → 读回
+        let v = serde_json::json!({ "candidates": [{ "name": "张三" }], "count": 3 });
+        write_app_data(&kb, "match", &v).expect("write");
+        assert_eq!(read_app_data(&kb, "match"), v);
+        // 覆盖写
+        let v2 = serde_json::json!({ "candidates": [] });
+        write_app_data(&kb, "match", &v2).expect("write2");
+        assert_eq!(read_app_data(&kb, "match"), v2);
+        let _ = std::fs::remove_dir_all(&kb);
+    }
+
+    #[test]
+    fn write_rejects_bad_id() {
+        let kb = tmp_kb("badid");
+        assert!(write_app_data(&kb, "../x", &serde_json::json!({})).is_err());
+        let _ = std::fs::remove_dir_all(&kb);
+    }
 }
 
 // ---------- SkillHub（阶段 4）：hub 注册表 + 目录 ----------

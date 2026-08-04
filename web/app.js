@@ -1719,6 +1719,31 @@
     'window.addEventListener("keydown",function(e){if(e.key==="Escape"){window.parent.postMessage({type:"escape"},"*");}});' +
     'window.addEventListener("error",function(e){window.parent.postMessage({type:"view-error",msg:(e&&e.message)||"视图脚本错误"},"*");});' +
     'window.addEventListener("unhandledrejection",function(e){var r=e&&e.reason;window.parent.postMessage({type:"view-error",msg:(r&&r.message)||String(r)},"*");});' +
+    // App 状态持久化（方案 A）：沙箱无 allow-same-origin → localStorage 不可用。
+    // 注入内存+持久化代理：同步读写内存，防抖 500ms 经 /api/apps/<id>/data 落盘 kb/apps/<id>/data/localstorage.json。
+    // 变量名 __appId（不被 replace 匹配）、值占位符 __APP_ID__（app 视图由 openView 全局替换为真实 id）；
+    // 内置面板保留占位符字面量 → 仅内存、不落盘。
+    'window.__appId="__APP_ID__";' +
+    '(function(){var __ls={};' +
+    'if(window.__appId&&window.__appId.indexOf("__APP")!==0){' +
+    'window.hostApi("/api/apps/"+window.__appId+"/data").then(function(d){' +
+    'if(d&&d.data&&typeof d.data==="object"){for(var k in d.data){if(!(k in __ls))__ls[k]=d.data[k];}}' + // 启动竞态兜底：本地已设键不被旧数据覆盖
+    '}).catch(function(){});' +
+    '}' +
+    'var __lsTimer=null;function __lsFlush(){clearTimeout(__lsTimer);__lsTimer=setTimeout(function(){' +
+    'if(!window.__appId||window.__appId.indexOf("__APP")===0)return;' +
+    'window.hostApi("/api/apps/"+window.__appId+"/data",{method:"POST",body:{data:__ls}}).catch(function(){});' +
+    '},500);}' +
+    'var __lsProxy={' +
+    'getItem:function(k){return Object.prototype.hasOwnProperty.call(__ls,k)?__ls[k]:null;},' +
+    'setItem:function(k,v){__ls[k]=String(v);__lsFlush();},' +
+    'removeItem:function(k){delete __ls[k];__lsFlush();},' +
+    'clear:function(){__ls={};__lsFlush();},' +
+    'key:function(i){var ks=Object.keys(__ls);return i>=0&&i<ks.length?ks[i]:null;},' +
+    'get length(){return Object.keys(__ls).length;}' +
+    '};' +
+    'try{Object.defineProperty(window,"localStorage",{configurable:true,value:__lsProxy});}catch(e){}' +
+    '})();' +
     '<\/script>';
 
   // 视图标签页（多开并存）：每 tab = 标题 + iframe；激活显示，可单个/全部关闭
@@ -1798,7 +1823,7 @@
     viewTabsList.push(tab);
     viewTabs.appendChild(tabEl);
     viewPanes.appendChild(iframe);
-    iframe.srcdoc = BRIDGE + html;
+    iframe.srcdoc = (app ? BRIDGE.replace(/__APP_ID__/g, app.id) : BRIDGE) + html;
     activateView(id);
     saveViewSpecs(); // /view 标签组合记忆
   }
@@ -1902,6 +1927,12 @@
     }
     // 应用市场（阶段 1）权限白名单：app 视图只放行 app.json 声明的权限
     if (tab.appId && tab.perms) {
+      // App 状态持久化（storage）：data 路径的 id 必须等于当前 tab 的 appId（防越权读写其他应用数据）
+      const dataMatch = /^\/api\/apps\/([^/]+)\/data/.exec(msg.path || '');
+      if (dataMatch && dataMatch[1] !== tab.appId) {
+        tab.iframe.contentWindow.postMessage({ id: msg.id, ok: false, error: 'appId 不匹配，禁止访问其他应用数据' }, '*');
+        return;
+      }
       const perm = Core.permForPath(msg.path);
       if (!Core.appCan(msg.path, msg.method || 'GET', tab.perms)) {
         tab.iframe.contentWindow.postMessage({ id: msg.id, ok: false, error: '权限不足：应用未声明「' + (perm || '该') + '」权限' }, '*');

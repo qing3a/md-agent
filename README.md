@@ -205,6 +205,7 @@ cp config.json dist/config.json   # 可选：携带已有 LLM 配置
 | GET/POST | `/api/config` | 本地配置（GET 掩码 api_key） |
 | POST | `/api/llm` | LLM 代理（`stream=true` 走 SSE 流式，否则 JSON 透传） |
 | GET | `/api/apps` | 已安装应用列表（manifest：id/name/version/entry/permissions/source_hub） |
+| GET/POST | `/api/apps/{id}/data` | App 状态持久化（`storage` 权限）：读/写 `kb/apps/{id}/data/localstorage.json`——沙箱无 allow-same-origin → localStorage 不可用，桥层注入内存+防抖落盘代理，app 代码零改动 |
 | GET | `/api/hubs` | 已连接 SkillHub 列表 |
 | POST | `/api/hubs/connect` | 连接 SkillHub（body: `{url}`；拉取校验 skillhub.md 索引入库，返回 hub 与可用应用） |
 | POST | `/api/hubs/refresh` | 刷新 hub 索引（body: `{name}`；失败保留旧索引，降级不丢目录） |
