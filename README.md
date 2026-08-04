@@ -91,6 +91,8 @@ cargo run -- --port 9000 # 自定义端口（默认 8756）
 
 ### 配置 LLM
 
+配置统一存储在 `%APPDATA%\md-agent\config.json`（Windows；其他平台 `$XDG_CONFIG_HOME` 或 `~/.config/md-agent/config.json`）——debug/dist 共享一份不再漂移；旧 exe 旁 config.json 首次启动自动迁移（先到先得）；`MD_AGENT_CONFIG` 可覆盖路径（测试隔离用）。
+
 浏览器打开 `http://127.0.0.1:8756/config.html` 可视化配置，或：
 
 ```bash

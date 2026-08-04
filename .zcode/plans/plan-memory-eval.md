@@ -81,3 +81,27 @@
 - 缺口：写回记忆为**裸文本**（无 `- ` bullet）时进不了 `memory_summary`（只收 bullet 行）——真实写回路径存在潜在丢记忆，待立项修复（写回格式对齐 bullet）
 
 **v2 对比目标**：正确率 ≥ 100%（不下降）且 input_tokens 显著下降 → 采纳；否则回滚（`restore-point-ui-opt`）。
+
+---
+
+## ✅ 评测结果沉淀（2026-08-04）
+
+### v2（工具化 B 半：注入前缀保留 + 工具能力）——他窗口评测，5 样例
+- 正确率 5/5（=基线），编造率 0
+- avg 1812 tokens/问 vs 基线 1745（+3.8%）——成本未改善
+- 结论：**v2 采纳**（工具取用链路实测工作：Q5 完整走 search→file→引用；消除中文启发式提取的脆弱性）；但 token 未省因前缀（L1 规范全文+摘要）仍是 input 大头 → **C 半步是真正落点**
+
+### C 半步（前缀瘦身：L1 全文移出前缀，read_l1/search 按需取）——本会话评测，5 样例同口径 A/B
+| 指标 | 基线（注入式） | C 半步（瘦身+工具） |
+|---|---|---|
+| 正确率 | 5/5 | 5/5 |
+| avg input | 5165 | 2731（**-47%**） |
+| avg total | 6016 | 3195（**-47%**） |
+| cache 率 | 63.9% | 74.1%（+10pt） |
+| 工具行为 | 注入前缀+工具双冗余（read_l1/search/graph 仍被调） | 全部主动调工具取用 |
+
+- 样例：决策·检索引擎（search）/ 规范·沉淀位置（memory_search）/ 事实·托盘架构（memory_search+file）/ 双链·记忆统一模型（graph.linked+backlinks）/ 写回·沉淀表达（read_l1）；全新会话、无 history、真实 DeepSeek
+- 结论：**采纳**——正确率不降 + 成本显著改善（input/total -47%）；cache 率反升（瘦身前缀更稳定）
+- 关键洞察：基线在回答规则「必须先调工具取用」下也会调工具 → 注入前缀 + 工具 = 双冗余；C 半步移除前缀冗余即收益来源
+- 实现：`core.js` buildGuidePrefix 引导语条件化（hasL1，无 L1 段时不输出悬空引导）；`app.js` ask() 两处 buildGuidePrefix 在 llmConfigured 时 guideText/memoryText 传空（正常路径 + fresh-window 降级）
+- 回滚：还原点 `restore-point-interaction-converge`（此前 UI 还原点）之上，本改动在 `restore-point-interaction-converge` 后，若需回滚 git revert 对应 commit 即可
