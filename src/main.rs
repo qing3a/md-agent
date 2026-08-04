@@ -147,6 +147,7 @@ enum UserEvent {
 struct TrayIds {
     open: MenuId,
     market: MenuId,
+    sync: MenuId,
     hb: MenuId,
     key: MenuId,
     quit: MenuId,
@@ -189,6 +190,21 @@ impl ApplicationHandler<UserEvent> for App {
                     open_browser(&self.url);
                 } else if ev.id == self.ids.market {
                     open_browser(&format!("{}?view=market", self.url));
+                } else if ev.id == self.ids.sync {
+                    // 手动全量同步（INDEX + 图谱）：走本地服务端点，与心跳共用 sync_lock 防并发
+                    let url = self.url.clone();
+                    std::thread::spawn(move || {
+                        let rt = match tokio::runtime::Runtime::new() {
+                            Ok(rt) => rt,
+                            Err(_) => return,
+                        };
+                        rt.block_on(async {
+                            let c = reqwest::Client::new();
+                            let _ = c.post(format!("{url}/api/kb/sync")).send().await;
+                            let _ = c.post(format!("{url}/api/graph/sync")).send().await;
+                        });
+                    });
+                    eprintln!("托盘同步: 已触发 INDEX + 图谱重建");
                 } else if ev.id == self.ids.hb {
                     // 勾选翻转：写 config（≤1 个心跳周期生效）；重建菜单反映新勾选态
                     let mut cfg = crate::config::load();
@@ -273,6 +289,7 @@ fn build_menu(kb_root: &Path) -> (Menu, TrayIds) {
     let menu = Menu::new();
     let open_item = MenuItem::new("打开终端", true, None);
     let market_item = MenuItem::new("应用市场", true, None);
+    let sync_item = MenuItem::new("同步", true, None);
     // 复选框 + 文字态双信号：对勾在部分主题下不明显，文字「开/关」保证反馈可见。
     // 注意 with_id 参数顺序：(id, text, enabled, checked, accelerator) —— enabled 恒为 true，
     // 若把 checked 传进 enabled，关态项会被原生置灰而点不动。
@@ -289,6 +306,7 @@ fn build_menu(kb_root: &Path) -> (Menu, TrayIds) {
     // 导航组
     let _ = menu.append(&open_item);
     let _ = menu.append(&market_item);
+    let _ = menu.append(&sync_item);
     // 已安装应用子菜单（动态：kb/apps/*/app.json）
     let apps = crate::kb::list_apps(kb_root);
     if !apps.is_empty() {
@@ -316,6 +334,7 @@ fn build_menu(kb_root: &Path) -> (Menu, TrayIds) {
     let ids = TrayIds {
         open: open_item.id().clone(),
         market: market_item.id().clone(),
+        sync: sync_item.id().clone(),
         hb: hb_item.id().clone(),
         key: key_item.id().clone(),
         quit: quit_item.id().clone(),

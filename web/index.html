@@ -27,16 +27,24 @@
   #quick-btns { display: flex; gap: 6px; padding: 6px 10px; }
   #quick-btns button {
     background: #313244; color: #a6adc8; border: none; border-radius: 5px;
-    padding: 2px 10px; font-size: 12px; cursor: pointer;
+    padding: 2px 10px; font-size: 12px; cursor: pointer; position: relative;
   }
   #quick-btns button:hover { background: #45475a; color: #cdd6f4; }
   #quick-btns button:disabled { opacity: .5; cursor: default; }
+  /* 按钮徽标（待审红 / 审计黄，右上角；与状态行同源，updateBadges 8s 轮询更新） */
+  #quick-btns .badge {
+    position: absolute; top: -5px; right: -6px; min-width: 15px; height: 15px;
+    padding: 0 4px; border-radius: 8px; box-sizing: border-box;
+    background: #f38ba8; color: #11111b; font-size: 10px; font-weight: 700;
+    line-height: 15px; text-align: center;
+  }
+  #quick-btns .badge.warn { background: #f9e2af; }
   /* 输入框上下两条全宽横线（定稿视觉：上边框 + 输入行 + 下边框） */
   /* 命令补全面板：悬浮在输入框上方（absolute 定位，不占布局） */
 
-  /* ---- 速览侧边栏（批次三：Ctrl+K | /side | 快捷按钮唤出的左侧抽屉，非常驻）---- */
+  /* ---- 速览侧边栏（批次三：Ctrl+K | /side | 快捷按钮唤出的左侧抽屉，非常驻；改造后=命令面板 + 状态中心）---- */
   #side-drawer {
-    position: fixed; left: 10px; top: 10px; bottom: 10px; width: 250px;
+    position: fixed; left: 10px; top: 10px; bottom: 10px; width: 320px;
     background: #181825; border: 1px solid #313244; border-radius: 8px;
     z-index: 50; display: flex; flex-direction: column; overflow: hidden;
     box-shadow: 0 6px 24px rgba(0,0,0,.45);
@@ -45,6 +53,17 @@
   #side-drawer header { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid #313244; }
   #side-drawer header span { color: #f5e0dc; font-weight: 600; font-size: 13px; }
   #side-drawer header button { background: #313244; color: #cdd6f4; border: none; border-radius: 5px; padding: 2px 8px; font-size: 12px; cursor: pointer; }
+  /* 命令面板（抽屉上部）：搜索框 + 候选列表；下半为状态中心速览卡 */
+  #side-search-wrap { padding: 8px; border-bottom: 1px solid #313244; display: flex; flex-direction: column; gap: 6px; }
+  #side-search { width: 100%; box-sizing: border-box; background: #1e1e30; color: #cdd6f4;
+    border: 1px solid #313244; border-radius: 6px; padding: 6px 10px; font-size: 12px; outline: none; }
+  #side-search:focus { border-color: #89b4fa; }
+  #side-results { max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+  .side-result { padding: 4px 8px; border-radius: 5px; font-size: 12px; cursor: pointer;
+    display: flex; gap: 8px; align-items: baseline; white-space: nowrap; overflow: hidden; }
+  .side-result.sel { background: #313244; }
+  .side-result .k { color: #89b4fa; flex: none; }
+  .side-result .d { color: #7f849c; font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
   #side-body { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
   .side-sec { background: #1e1e30; border: 1px solid #313244; border-radius: 6px; padding: 8px 10px; cursor: pointer; }
   .side-sec:hover { background: #232338; }
@@ -94,15 +113,14 @@
 <div id="app">
   <div id="terminal"></div>
 
-  <!-- 快捷工具栏（DOM）：输入框/状态栏回流内终端流（贴内容末尾），按钮行保留 -->
+  <!-- 快捷工具栏（DOM）：输入框/状态栏回流内终端流（贴内容末尾），按钮行保留；全导航语义 + 徽标计数 -->
   <div id="input-bar">
     <div id="quick-btns">
-      <button data-cmd="/syncall" title="全量同步：重建 INDEX + 图谱 + 技能注册表">同步</button>
       <button data-cmd="/view graph" title="知识库结构导航（查看图谱）">图谱</button>
-      <button data-cmd="/view pending" title="待审审核面板（批准/拒绝 LLM 写回）">待审</button>
-      <button data-cmd="/digest" title="检索知识库并整理成新笔记（进待审）">整理</button>
-      <button data-cmd="/side" title="速览侧边栏（任务/待审/图谱/审计）">速览</button>
-      <button data-cmd="/help" title="命令列表">帮助</button>
+      <button data-cmd="/view pending" data-badge="pending" title="待审审核面板（批准/拒绝 LLM 写回；红徽标=待审数，点击直达）">待审</button>
+      <button data-cmd="/view audit" data-badge="audit" title="知识库健康审计面板（黄徽标=审计发现数，点击直达）">审计</button>
+      <button data-cmd="/view market" title="应用市场（SkillHub 管理端）">市场</button>
+      <button data-cmd="/side" title="命令面板 + 速览（Ctrl+K）">速览</button>
     </div>
   </div>
 </div>
@@ -117,12 +135,16 @@
   <div id="view-panes"></div>
 </div>
 
-<!-- 速览侧边栏（批次三：Ctrl+K / /side / 快捷按钮唤出的左侧抽屉，非常驻） -->
+<!-- 命令面板 + 状态中心（Ctrl+K / /side / 速览按钮唤出；上部模糊搜索直达视图/命令/@文档，下部实时速览卡） -->
 <div id="side-drawer" class="hidden">
   <header>
-    <span>速览</span>
+    <span>命令面板</span>
     <button id="side-refresh" title="刷新">↻</button>
   </header>
+  <div id="side-search-wrap">
+    <input id="side-search" type="text" placeholder="搜索：视图 / 命令 / @文档（↑↓ 选择 · 回车执行 · Esc 关闭）" autocomplete="off" spellcheck="false">
+    <div id="side-results"></div>
+  </div>
   <div id="side-body"></div>
 </div>
 

@@ -309,7 +309,7 @@ async fn l1_read_handler(State(st): State<AppState>, Query(p): Query<L1ReadParam
         )
             .into_response();
     };
-    let max = p.max.unwrap_or(1200).clamp(100, 20_000);
+    let max = p.max.unwrap_or(1200).min(20_000);
     match crate::kb::read_l1(&st.kb_root, file, p.q.as_deref(), max) {
         Ok(r) => Json(r).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),

@@ -39,6 +39,7 @@
   let L1_TEXT = ''; // 启动时注入的 L1 层全文
   let GUIDE_TEXT = ''; // L1 规范层（KB/FRAMEWORK/RULES）——稳定前缀
   let MEMORY_TEXT = ''; // L1 记忆/索引层（MEMORY/INDEX）——易变
+  let llmConfigured = false; // 上下文组装 v2：LLM 配置（endpoint 非空）时知识取用走「工具化」，否则降级「注入 + 启发式预检索」
   let history = loadHistory(); // 多轮对话记忆（localStorage 持久化，刷新不丢）
   const MAX_HISTORY = 8; // 最近 4 轮
 
@@ -171,10 +172,21 @@
 
   // ---------- 输入与提交 ----------
 
-  // 提交一条命令/问题：流内整行背景块 + 执行；回答期间（busy）忽略
+  // busy（回答/动作进行中）期间仍放行的导航类命令（读操作，静默执行、不污染回答流）
+  const NAV_CMDS = ['/view', '/side', '/help', 'open'];
+  function isNavCmd(t) {
+    return NAV_CMDS.some((c) => t === c || t.startsWith(c + ' '));
+  }
+
+  // 提交一条命令/问题：流内整行背景块 + 执行；回答期间（busy）只放行导航命令（静默执行）
   async function submitCmd(text) {
     const t = String(text || '').trim();
-    if (!t || busy || confirmCb) return;
+    if (!t || confirmCb) return;
+    if (busy && !isNavCmd(t)) return;   // 回答中：非导航命令仍拦截
+    if (busy) {                          // 回答中导航：不动 busy/输入框，回答流继续，视图静默打开
+      try { await run(t); } catch (e) { term.writeln('\x1b[31m' + ((e && e.message) || e) + '\x1b[0m'); }
+      return;
+    }
     line = t;
     submitMsg();      // 流内提交块（边框移除 + 背景色 + 清状态行）
     line = '';
@@ -195,7 +207,8 @@
   }
 
   function setBusyUI() {
-    quickBtns.forEach((b) => (b.disabled = busy));
+    // 按钮行已全导航化（读操作）：busy 期间不禁用，点击走 submitCmd 的导航放行分支
+    quickBtns.forEach((b) => (b.disabled = false));
   }
 
   // xterm 按键扩展：↑↓ 历史、Tab 命令补全、Ctrl+C 中断（流内输入，焦点在终端）
@@ -332,6 +345,7 @@
       const ver = (h && h.version) || '?';
       const kb = (c && c.kb_root) || '-';
       const model = (c && c.llm && c.llm.model) || '未配置';
+      llmConfigured = !!(c && c.llm && c.llm.endpoint); // 上下文组装 v2：有 LLM 配置 → 工具化取用
       const pend = (p && Array.isArray(p.pending)) ? p.pending.length : '-';
       const todo = (t && t.stats) ? (t.stats.todo || 0) + (t.stats.doing || 0) : '-';
       const gs = (g && g.docs) ? (g.docs || 0) + ' 文档 / ' + (g.links || 0) + ' 链接' : '-';
@@ -354,18 +368,22 @@
       const ok = !!(h && h.status === 'ok');
       const model = (c && c.llm && c.llm.model) || '未配置 LLM';
       const kb = (c && c.kb_root) || '-';
+      llmConfigured = !!(c && c.llm && c.llm.endpoint); // 配置页改 endpoint 后 ≤8s 生效（无需重载页面）
       const pend = (p && Array.isArray(p.pending)) ? p.pending.length : '-';
       const todo = (t && t.stats) ? (t.stats.todo || 0) + (t.stats.doing || 0) : '-';
       const gs = (g && g.docs) ? (g.docs || 0) + ' 文档 / ' + (g.links || 0) + ' 链接' : '-';
       const hbTxt = hb ? (hb.enabled ? '心跳开' : '心跳关') : '';
       let auditTxt = '';
+      let auditCount = 0; // 快捷按钮「审计」徽标（与状态行同源）
       if (hb && hb.audit && (hb.audit.orphans || hb.audit.dangling || hb.audit.duplicates || hb.audit.mentions)) {
         const parts = [];
-        if (hb.audit.orphans) parts.push('孤立 ' + hb.audit.orphans);
-        if (hb.audit.dangling) parts.push('悬空 ' + hb.audit.dangling);
-        if (hb.audit.duplicates) parts.push('重复 ' + hb.audit.duplicates);
+        if (hb.audit.orphans) { parts.push('孤立 ' + hb.audit.orphans); auditCount += hb.audit.orphans; }
+        if (hb.audit.dangling) { parts.push('悬空 ' + hb.audit.dangling); auditCount += hb.audit.dangling; }
+        if (hb.audit.duplicates) { parts.push('重复 ' + hb.audit.duplicates); auditCount += hb.audit.duplicates; }
+        if (hb.audit.mentions) auditCount += hb.audit.mentions;
         auditTxt = ' ⚠ 审计：' + parts.join(' · ');
       }
+      updateBadges(typeof pend === 'number' ? pend : 0, auditCount); // 按钮徽标（待审红/审计黄）
       statusLine = truncateW(
         '\x1b[' + (ok ? '32' : '31') + 'm●\x1b[0m ' + (ok ? '服务运行中' : '服务异常') +
         '\x1b[90m · 模型 ' + model + ' · KB ' + kb + ' · 待审 ' + pend +
@@ -378,6 +396,22 @@
   }
   refreshStatus();
   setInterval(refreshStatus, 8000);
+
+  // ---- 快捷按钮徽标（data-badge 按钮：pending 红 / audit 黄；与状态行同源，8s 轮询一起更新）----
+  function setBadge(btn, n, warn) {
+    let b = btn.querySelector('.badge');
+    if (!n) { if (b) b.remove(); return; }
+    if (!b) { b = document.createElement('span'); b.className = 'badge'; btn.appendChild(b); }
+    b.textContent = n > 99 ? '99+' : n;
+    b.classList.toggle('warn', !!warn);
+  }
+  function updateBadges(pend, auditCount) {
+    for (const btn of quickBtns) {
+      const kind = btn.dataset.badge;
+      if (kind === 'pending') setBadge(btn, pend > 0 ? pend : 0, false);
+      else if (kind === 'audit') setBadge(btn, auditCount > 0 ? auditCount : 0, true);
+    }
+  }
 
   // 启动时注入 L1（类 CLAUDE.md：规范 / 记忆 / 索引层）
   (async function loadL1() {
@@ -684,6 +718,7 @@
   const TOOL_API = {
     'search': (a) => api('/api/search?q=' + encodeURIComponent(a.q || '') + '&layer=' + encodeURIComponent(a.layer || 'notes') + (a.ctx ? '&ctx=1' : '')),
     'memory_search': (a) => api('/api/search?q=' + encodeURIComponent(a.q || '') + '&layer=all&ctx=1'),
+    'read_l1': (a) => api('/api/l1/read?file=' + encodeURIComponent(a.file || '') + '&q=' + encodeURIComponent(a.q || '') + '&max=' + (a.max_chars || 1200)),
     'graph.linked': (a) => api('/api/graph/linked?path=' + encodeURIComponent(a.path || '')),
     'graph.backlinks': (a) => api('/api/graph/backlinks?path=' + encodeURIComponent(a.path || '')),
     'fetch': (a) => api('/api/fetch?url=' + encodeURIComponent(a.url || '')),
@@ -706,6 +741,12 @@
       return hits.slice(0, 10).map((h) =>
         '[' + h.file + ':' + h.line + (h.section ? ' 小节:' + h.section : '') + '] ' + (h.context || h.text || '')
       ).join('\n') || '(无命中)';
+    }
+    if (name === 'read_l1') {
+      // L1 原文取用：section=小节原文；section_list=未定位到，给可用小节清单引导下一次调用；head=文件头
+      if (r.mode === 'section') return r.content || '(未命中)';
+      if (r.mode === 'section_list') return '未定位到含该定位词的 ## 小节。可用小节：\n' + (r.sections || []).map((s) => '- ' + s).join('\n');
+      return (r.content || '') + ((r.sections || []).length ? '\n\n小节：' + (r.sections || []).map((s) => '- ' + s).join('\n') : '');
     }
     if (name === 'graph.linked') {
       return (r.linked || []).map((l) => '[[目标]] ' + (l.dst || '') + (l.resolved ? ' → ' + l.dst_path : ' (悬空)')).join('\n') || '(无出链)';
@@ -882,10 +923,14 @@
   }
 
   async function ask(question) {
-    term.writeln('\x1b[90m(Agent: 提取关键词 → 检索 L2 → 调用 LLM)\x1b[0m');
+    // 上下文组装 v2：有 LLM 配置 → 去掉启发式预检索，知识/记忆取用走 LLM 显式调工具（read_l1/search/memory_search）；
+    // 无 LLM 配置 → 降级保留「启发式关键词提取 + 预检索注入」路径（Ollama 本地等场景兜底）
+    term.writeln(llmConfigured
+      ? '\x1b[90m(Agent: 知识取用工具化——LLM 显式调 read_l1/search 取规范/记忆/知识)\x1b[0m'
+      : '\x1b[90m(Agent: 提取关键词 → 检索 L2 → 调用 LLM)\x1b[0m');
     const kws = Core.extractKeywords(question);
 
-    // 1a. @ 文件提及：@路径 直接注入检索目标（全文进上下文；失败仅提示不阻塞）
+    // 1a. @ 文件提及：@路径 直接注入检索目标（用户显式指定，两分支均保留；全文进上下文；失败仅提示不阻塞）
     const atRefs = [...question.matchAll(/(?:^|\s)@([^\s]+)/g)]
       .map((m) => m[1])
       .filter((p) => p && !/^(\/|https?:)/.test(p));
@@ -895,7 +940,7 @@
         const f = await api('/api/file?path=' + encodeURIComponent(p));
         if (f && f.content) {
           atFrag.push('[来源 @' + p + '（指定文档）]\n' + f.content.slice(0, 2000));
-          // 路径关键词并入检索 query（文件名去掉扩展名/目录）
+          // 路径关键词并入检索 query（文件名去掉扩展名/目录；仅降级分支使用）
           const name = p.split('/').pop().replace(/\.md$/i, '').replace(/[-_]/g, ' ');
           for (const w of Core.extractKeywords(name)) kws.push(w);
         }
@@ -904,25 +949,27 @@
       }
     }
 
-    const query = kws.length ? [...new Set(kws)].join(' ') : question;
-    term.writeln('\x1b[90m关键词: ' + (kws.length ? query : '(无，用原文)') + '\x1b[0m');
-
-    // 1. 检索 L2（L1 已在 system 里，不重复检索）
-    let sr;
-    try {
-      sr = await api('/api/search?q=' + encodeURIComponent(query) + '&layer=notes&ctx=1');
-    } catch (e) {
-      term.writeln('\x1b[31m检索失败: ' + e.message + '\x1b[0m');
-      return;
-    }
-    const top = sr.hits.slice(0, 8);
-    if (atFrag.length) {
-      term.writeln('\x1b[90m@ 指定文档 ' + atFrag.length + ' 篇已注入（' + atRefs.join(' ') + '）\x1b[0m');
-    }
-    if (!top.length && !atFrag.length) {
-      term.writeln('\x1b[33m知识库无相关片段（仅靠 L1 规范与模型自身知识回答）\x1b[0m');
-    } else if (top.length) {
-      term.writeln('\x1b[90m命中 ' + sr.file_count + ' 文件 / ' + sr.hit_count + ' 处，注入前 ' + top.length + ' 条\x1b[0m');
+    // 1. 预检索：仅无 LLM 配置时保留（降级）；有 LLM 配置时去掉（检索片段不再注入，由 Agent Loop 里 LLM 显式调工具取用）
+    let top = [];
+    if (!llmConfigured) {
+      const query = kws.length ? [...new Set(kws)].join(' ') : question;
+      term.writeln('\x1b[90m关键词: ' + (kws.length ? query : '(无，用原文)') + '\x1b[0m');
+      let sr;
+      try {
+        sr = await api('/api/search?q=' + encodeURIComponent(query) + '&layer=notes&ctx=1');
+      } catch (e) {
+        term.writeln('\x1b[31m检索失败: ' + e.message + '\x1b[0m');
+        return;
+      }
+      top = sr.hits.slice(0, 8);
+      if (atFrag.length) {
+        term.writeln('\x1b[90m@ 指定文档 ' + atFrag.length + ' 篇已注入（' + atRefs.join(' ') + '）\x1b[0m');
+      }
+      if (!top.length && !atFrag.length) {
+        term.writeln('\x1b[33m知识库无相关片段（仅靠 L1 规范与模型自身知识回答）\x1b[0m');
+      } else if (top.length) {
+        term.writeln('\x1b[90m命中 ' + sr.file_count + ' 文件 / ' + sr.hit_count + ' 处，注入前 ' + top.length + ' 条\x1b[0m');
+      }
     }
 
     // 2. 组装 Prompt（system + 多轮历史 + 当前问题）
@@ -959,12 +1006,13 @@
       }),
       Core.buildSkillTail(skillTxt),
     ].filter(Boolean).join('\n\n');
-    const userMsg = [
-      '问题：' + question,
-      '',
-      '知识库检索片段（L2）：',
-      frag || '(无片段)',
-    ].join('\n');
+    // 上下文组装 v2：有 LLM 配置 → userMsg 只含「问题」+ @ 指定文档（检索片段不再预注入，由 LLM 显式调工具取用）；
+    // 无 LLM 配置 → 降级注入启发式预检索片段
+    const userMsg = llmConfigured
+      ? ['问题：' + question]
+          .concat(atFrag.length ? ['', '指定文档（用户 @ 提及，据此回答）：'].concat(atFrag) : [])
+          .join('\n')
+      : ['问题：' + question, '', '知识库检索片段（L2）：', frag || '(无片段)'].join('\n');
     const messages = [
       { role: 'system', content: system },
       ...history,
@@ -1688,6 +1736,7 @@
   }
 
   function closeView(id) {
+    let allClosed = false;
     if (id) {
       // 关闭单个 tab；激活相邻 tab（优先右侧，否则左侧），无则整体隐藏
       const i = viewTabsList.findIndex((t) => t.id === id);
@@ -1697,7 +1746,7 @@
       viewTabsList.splice(i, 1);
       if (activeViewId === id) {
         if (viewTabsList.length) activateView(viewTabsList[Math.min(i, viewTabsList.length - 1)].id);
-        else { activeViewId = null; viewOverlay.classList.add('hidden'); }
+        else { activeViewId = null; viewOverlay.classList.add('hidden'); allClosed = true; }
       }
     } else {
       // 关闭全部
@@ -1705,10 +1754,13 @@
       viewTabsList = [];
       activeViewId = null;
       viewOverlay.classList.add('hidden');
+      allClosed = true;
     }
+    saveViewSpecs(); // /view 标签组合记忆（恢复时按 kind/arg 重新拉取）
+    if (allClosed) term.focus(); // 视图层全部关闭 → 焦点归还终端（修复：每次面板往返都要点一下终端才能继续打字）
   }
 
-  function openView(title, html, app) {
+  function openView(title, html, app, spec) {
     const id = 'v' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
     // 应用市场（阶段 1）：app 视图注入 <base href="/apps/<id>/">（相对 vendor/ 等资源正确解析）
     if (app) {
@@ -1735,7 +1787,7 @@
     tabEl.appendChild(x);
     tabEl.addEventListener('click', () => activateView(id));
     x.addEventListener('click', (e) => { e.stopPropagation(); closeView(id); });
-    const tab = { id, title, iframe, tabEl, loaded: false, busy: false, err: null, appId: app ? app.id : null, perms: app ? app.permissions : null };
+    const tab = { id, title, iframe, tabEl, loaded: false, busy: false, err: null, appId: app ? app.id : null, perms: app ? app.permissions : null, specKind: spec ? spec.kind : null, specArg: spec ? spec.arg : null };
     // 加载状态跟踪：iframe load 确认加载完成（移除角标）；10s 未加载且无桥请求 → 标黄提示
     iframe.addEventListener('load', () => { tab.loaded = true; tabEl.classList.remove('warn'); ld.remove(); });
     setTimeout(() => {
@@ -1746,6 +1798,47 @@
     viewPanes.appendChild(iframe);
     iframe.srcdoc = BRIDGE + html;
     activateView(id);
+    saveViewSpecs(); // /view 标签组合记忆
+  }
+
+  // /view 标签组合记忆：localStorage 存当前打开的视图规格（kind/arg/title + 活动下标），启动时恢复（浏览器式）
+  const VIEW_SPECS_KEY = 'md-agent-view-specs';
+  function saveViewSpecs() {
+    try {
+      const specs = viewTabsList.map((t) => ({ kind: t.specKind, arg: t.specArg, title: t.title }));
+      const active = viewTabsList.findIndex((t) => t.id === activeViewId);
+      localStorage.setItem(VIEW_SPECS_KEY, JSON.stringify({ specs, active }));
+    } catch (e) { /* 存储失败忽略 */ }
+  }
+  async function restoreViews() {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(VIEW_SPECS_KEY) || 'null'); } catch (e) { /* 忽略 */ }
+    const specs = (saved && Array.isArray(saved.specs)) ? saved.specs : [];
+    if (!specs.length) return;
+    for (const s of specs) {
+      if (!s || !s.arg) continue;
+      try {
+        if (s.kind === 'builtin') {
+          const r = await fetch('/views/' + s.arg + '.html');
+          if (r.ok) openView(s.title || s.arg, await r.text(), null, { kind: 'builtin', arg: s.arg });
+        } else if (s.kind === 'app') {
+          const apps = await getApps();
+          const app = apps.find((a) => a.id === s.arg);
+          if (app) {
+            const rr = await api('/api/file?path=apps/' + app.id + '/' + encodeURIComponent(app.entry));
+            openView(app.name, rr.content, { id: app.id, permissions: app.permissions }, { kind: 'app', arg: app.id });
+          }
+        } else if (s.kind === 'file') {
+          const rr = await api('/api/file?path=' + encodeURIComponent(s.arg));
+          openView(rr.path, rr.content, null, { kind: 'file', arg: s.arg });
+        }
+      } catch (e) { /* 单个视图恢复失败忽略 */ }
+    }
+    if (viewTabsList.length) {
+      const active = (saved && typeof saved.active === 'number' && saved.active >= 0 && saved.active < viewTabsList.length) ? saved.active : viewTabsList.length - 1;
+      activateView(viewTabsList[active].id);
+      term.focus(); // 恢复后焦点还终端（用户 Esc 关或直接操作）
+    }
   }
 
   document.getElementById('view-close').addEventListener('click', () => closeView(activeViewId));
@@ -1821,7 +1914,7 @@
       const r = await fetch('/views/' + name);
       if (!r.ok) throw new Error('内置视图加载失败: HTTP ' + r.status);
       const titles = { graph: '知识库结构导航', board: '任务看板', pending: '待审审核', audit: '知识库健康审计', market: '应用市场' };
-      openView(titles[arg], await r.text());
+      openView(titles[arg], await r.text(), null, { kind: 'builtin', arg });
       return;
     }
     // 应用市场（阶段 1）：/view <app-id> 打开已安装应用（manifest 权限白名单）
@@ -1829,17 +1922,18 @@
     const app = apps.find((a) => a.id === arg);
     if (app) {
       const r = await api('/api/file?path=apps/' + app.id + '/' + encodeURIComponent(app.entry));
-      openView(app.name, r.content, { id: app.id, permissions: app.permissions });
+      openView(app.name, r.content, { id: app.id, permissions: app.permissions }, { kind: 'app', arg: app.id });
       return;
     }
     const r = await api('/api/file?path=' + encodeURIComponent(arg));
-    openView(r.path, r.content);
+    openView(r.path, r.content, null, { kind: 'file', arg });
   }
 
-  // 应用市场（阶段 3）：URL ?view=<id> 自动打开面板/应用（托盘「应用市场/已安装应用」入口用）
+  // 应用市场（阶段 3）：URL ?view=<id> 自动打开面板/应用（托盘「应用市场/已安装应用」入口用）；否则恢复上次 /view 标签组合
   (async function autoView() {
     const v = new URLSearchParams(location.search).get('view');
-    if (v) { try { await viewCmd(v); } catch (e) { term.writeln('\x1b[31m自动打开失败: ' + e.message + '\x1b[0m'); } }
+    if (v) { try { await viewCmd(v); } catch (e) { term.writeln('\x1b[31m自动打开失败: ' + e.message + '\x1b[0m'); } return; }
+    try { await restoreViews(); } catch (e) { /* 恢复失败不打扰 */ }
   })();
 
   // ---------- 应用市场（阶段 2）：/market list | import <路径> | uninstall <id> | update <id> <路径> ----------
@@ -1996,16 +2090,112 @@
     term.writeln('/market 子命令：\n  list                    已安装应用\n  connect <url>          连接第三方 SkillHub（如 skillhub.cn/install/skillhub.md）\n  hubs                    已连接 hub 列表\n  catalog                 已连接 hub 目录\n  install <id>            从目录安装（人审确认）\n  refresh <name>          刷新 hub 索引\n  disconnect <name>       断开 hub（已装应用不受影响）\n  import <路径>           从本地目录安装（人审确认，手动导入兜底）\n  uninstall <id>          卸载\n  update <id> <路径>       更新（本地新版本目录）');
   }
 
-  // ---------- 速览侧边栏（批次三：任务/待审/图谱/审计速览；Ctrl+K | /side | 快捷按钮唤出，非常驻抽屉） ----------
+  // ---------- 命令面板 + 状态中心（Ctrl+K | /side | 速览按钮唤出；上部模糊搜索直达视图/命令/@文档，下部实时速览卡） ----------
 
   const sideDrawer = document.getElementById('side-drawer');
   const sideBody = document.getElementById('side-body');
+  const sideSearch = document.getElementById('side-search');
+  const sideResults = document.getElementById('side-results');
 
-  function toggleSide() {
-    if (sideDrawer.classList.contains('hidden')) { sideDrawer.classList.remove('hidden'); loadSide(); }
-    else sideDrawer.classList.add('hidden');
+  // 命令面板候选：内置视图 + / 命令 + @KB 文档 + 已装应用（均以「可执行的命令串」为 run）
+  const VIEW_TARGETS = [
+    { k: '图谱', d: '知识库结构导航', run: '/view graph' },
+    { k: '待审', d: '待审审核面板（批准/拒绝写回）', run: '/view pending' },
+    { k: '审计', d: '知识库健康审计', run: '/view audit' },
+    { k: '看板', d: '任务看板', run: '/view board' },
+    { k: '市场', d: '应用市场（SkillHub 管理端）', run: '/view market' },
+  ];
+  let sideTimer = null;   // 状态中心 8s 轮询（与状态行同源数据）
+  let sideSel = -1;       // 候选选中下标
+  let sideItems = [];     // 当前候选 [{k, d, run}]
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   }
-  function closeSide() { sideDrawer.classList.add('hidden'); }
+
+  async function toggleSide() {
+    if (sideDrawer.classList.contains('hidden')) {
+      sideDrawer.classList.remove('hidden');
+      loadSide();
+      sideSearch.value = '';
+      renderSideItems(await filterSide(''));
+      clearInterval(sideTimer);
+      sideTimer = setInterval(loadSide, 8000); // 打开期间状态中心自动刷新（与状态行同源）
+      sideSearch.focus();
+    } else closeSide();
+  }
+  function closeSide() {
+    sideDrawer.classList.add('hidden');
+    clearInterval(sideTimer);
+    sideTimer = null;
+  }
+
+  // ---- 命令面板：候选过滤（视图/命令同步匹配；@ 前缀进文档模式；应用异步加载） ----
+  async function filterSide(q) {
+    const ql = (q || '').trim().toLowerCase();
+    const items = [];
+    if (!ql) {
+      // 空查询：视图目标 + 已装应用（简洁首页，可滚动）
+      for (const v of VIEW_TARGETS) items.push({ k: v.k, d: v.d, run: v.run });
+      try { for (const a of await getApps()) items.push({ k: a.name, d: a.id + ' v' + a.version + '（应用）', run: '/view ' + a.id }); } catch (e) { /* 应用列表不可用则忽略 */ }
+      return items;
+    }
+    if (ql.startsWith('@')) {
+      const kw = ql.slice(1);
+      for (const p of await loadAtDocs()) {
+        if (p.toLowerCase().includes(kw)) items.push({ k: '@' + p, d: 'KB 文档（open 全文）', run: 'open ' + p });
+      }
+      return items;
+    }
+    for (const v of VIEW_TARGETS) {
+      if (v.k.toLowerCase().includes(ql) || v.d.toLowerCase().includes(ql) || v.run.includes(ql)) items.push({ k: v.k, d: v.d, run: v.run });
+    }
+    for (const [c, d] of COMMANDS) {
+      if (c.toLowerCase().includes(ql) || d.toLowerCase().includes(ql)) items.push({ k: c, d, run: c });
+    }
+    try {
+      for (const a of await getApps()) {
+        if (a.name.toLowerCase().includes(ql) || a.id.toLowerCase().includes(ql)) items.push({ k: a.name, d: a.id + ' v' + a.version + '（应用）', run: '/view ' + a.id });
+      }
+    } catch (e) { /* 忽略 */ }
+    return items;
+  }
+  function renderSideItems(items) {
+    sideItems = items;
+    sideSel = items.length ? 0 : -1;
+    if (!items.length) { sideResults.innerHTML = '<div class="side-result" style="color:#7f849c">(无匹配)</div>'; return; }
+    sideResults.innerHTML = items.map((it, i) =>
+      '<div class="side-result' + (i === sideSel ? ' sel' : '') + '" data-i="' + i + '">' +
+      '<span class="k">' + escapeHtml(it.k) + '</span><span class="d">' + escapeHtml(it.d || '') + '</span></div>'
+    ).join('');
+  }
+
+  // 搜索输入防抖过滤；↑↓ 选择、Enter 执行、Esc 关闭（输入框内键盘不经过 xterm）
+  let sideSearchTimer = null;
+  sideSearch.addEventListener('input', () => {
+    clearTimeout(sideSearchTimer);
+    sideSearchTimer = setTimeout(async () => { renderSideItems(await filterSide(sideSearch.value)); }, 80);
+  });
+  sideSearch.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); closeSide(); term.focus(); return; }
+    if (e.key === 'ArrowDown' && sideItems.length) { e.preventDefault(); sideSel = (sideSel + 1) % sideItems.length; renderSideItems(sideItems); return; }
+    if (e.key === 'ArrowUp' && sideItems.length) { e.preventDefault(); sideSel = (sideSel - 1 + sideItems.length) % sideItems.length; renderSideItems(sideItems); return; }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const it = sideItems[sideSel >= 0 ? sideSel : 0];
+      if (it) runSideItem(it);
+    }
+  });
+  function runSideItem(it) {
+    closeSide();
+    submitCmd(it.run);
+  }
+  sideResults.addEventListener('click', (e) => {
+    const el = e.target.closest('.side-result');
+    if (!el || !el.dataset.i) return;
+    const it = sideItems[parseInt(el.dataset.i, 10)];
+    if (it) runSideItem(it);
+  });
 
   function sideSec(title, cmd, body, hint) {
     return '<div class="side-sec" data-cmd="' + cmd + '">' +
