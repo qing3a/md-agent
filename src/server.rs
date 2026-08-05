@@ -622,6 +622,13 @@ fn extract_json_from_text(text: &str) -> Option<Value> {
     serde_json::from_str(&inner[start..start + end]).ok()
 }
 
+/// 提案文件名片段：rel 转安全文件名并去掉尾部 .md（避免 xxx.md.md 双扩展名）
+fn rel_to_safe(rel: &str) -> String {
+    rel.replace(['/', '\\'], "_")
+        .trim_end_matches(".md")
+        .to_string()
+}
+
 /// B2 后台任务：LLM 分析热文档 + 同目录相关文档（矛盾/盲区/整合）→ 提案进 pending/notes/自组织/
 async fn analyze_hot_doc(root: &Path, rel: &str) {
     let Some(fb) = crate::kb::resolve_in_kb(root, rel) else { return };
@@ -674,7 +681,7 @@ async fn analyze_hot_doc(root: &Path, rel: &str) {
         return;
     }
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let safe = rel.replace(['/', '\\'], "_");
+    let safe = rel_to_safe(rel);
     let ppath = format!("pending/notes/自组织/推理建议-{}-{}.md", date, safe);
     let dst = root.join(&ppath);
     if dst.exists() {
@@ -754,7 +761,7 @@ fn apply_memory_touch(root: &Path, paths: &[String]) -> (Value, Vec<String>) {
                         let links: Vec<_> = links.into_iter().filter(|l| l.path != rel).collect();
                         if !links.is_empty() {
                             let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-                            let safe = rel.replace(['/', '\\'], "_");
+                            let safe = rel_to_safe(rel);
                             let ppath = format!("pending/notes/自组织/补链建议-{}-{}.md", date, safe);
                             let dst = root.join(&ppath);
                             if !dst.exists() {
@@ -1950,6 +1957,13 @@ mod app_data_tests {
             }
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rel_to_safe_strips_md_once() {
+        assert_eq!(rel_to_safe("notes/架构/托盘应用.md"), "notes_架构_托盘应用");
+        assert_eq!(rel_to_safe("notes/rag/无向量库检索.md"), "notes_rag_无向量库检索");
+        assert_eq!(rel_to_safe("notes/无后缀"), "notes_无后缀");
     }
 }
 
