@@ -750,6 +750,8 @@ fn apply_memory_touch(root: &Path, paths: &[String]) -> (Value, Vec<String>) {
             if let Some(fb) = crate::kb::resolve_in_kb(root, rel) {
                 if let Ok(content) = std::fs::read_to_string(&fb) {
                     if let Ok(links) = crate::search::suggest_links(root, &content, 3) {
+                        // 过滤自链（文档内容提及自身文件名属正常，非补链目标）
+                        let links: Vec<_> = links.into_iter().filter(|l| l.path != rel).collect();
                         if !links.is_empty() {
                             let date = chrono::Local::now().format("%Y-%m-%d").to_string();
                             let safe = rel.replace(['/', '\\'], "_");
@@ -1926,6 +1928,28 @@ mod app_data_tests {
         assert!(files[1].1.contains("console.log"));
         // 空提案
         assert!(parse_code_patch("---\ntype: code-patch\n---\n\n无文件").is_empty());
+    }
+
+    #[test]
+    fn link_suggestion_excludes_self() {
+        let root = temp_root("selflink");
+        crate::kb::ensure_layout(&root).unwrap();
+        let notes = root.join("notes").join("架构");
+        std::fs::create_dir_all(&notes).unwrap();
+        // 文档内容提及自身文件名（应被过滤）和其他文档（应保留）
+        std::fs::write(notes.join("甲文档.md"), "# 甲文档\n\n甲文档 与 乙文档 相关。\n").unwrap();
+        std::fs::write(notes.join("乙文档.md"), "# 乙文档\n\n内容。\n").unwrap();
+        let path = "notes/架构/甲文档.md".to_string();
+        for _ in 0..3 {
+            let (heat, created) = apply_memory_touch(&root, &[path.clone()]);
+            save_heat(&root, &heat).unwrap();
+            if !created.is_empty() {
+                let body = std::fs::read_to_string(root.join(&created[0])).unwrap();
+                assert!(body.contains("[[notes/架构/乙文档.md]]"), "应保留非自链目标");
+                assert!(!body.contains("[[notes/架构/甲文档.md]]"), "不应包含自链");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
