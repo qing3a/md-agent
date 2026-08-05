@@ -631,6 +631,54 @@ pub fn approve_pending(root: &Path, rel: &str, edited: Option<&str>) -> Result<(
         fs::write(&dst, body).map_err(|e| format!("写入目标失败: {e}"))?;
         fs::remove_file(&src_canon).map_err(|e| e.to_string())?;
         Ok((target.to_string(), Some("巩固提案已替换目标文件".to_string())))
+    } else if stripped.starts_with("DECISION.") {
+        // 未决决策提案（B3）→ 明细落 notes/决策/未决.md + L1 MEMORY 决策待定指针（幂等）
+        let content = match edited {
+            Some(c) => c.to_string(),
+            None => fs::read_to_string(&src_canon).map_err(|e| e.to_string())?,
+        };
+        let (meta, body) = parse_frontmatter(&content);
+        let date = meta
+            .get("date")
+            .cloned()
+            .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
+        let first_line = body
+            .lines()
+            .next()
+            .unwrap_or("未决议题")
+            .trim()
+            .trim_start_matches("## ")
+            .to_string();
+        // 1) notes/决策/未决.md 追加明细（每议题一节；body 首行「## 议题」已并入日期头，跳过避免重复）
+        let dec_dir = root.join("notes").join("决策");
+        fs::create_dir_all(&dec_dir).map_err(|e| e.to_string())?;
+        let dec_file = dec_dir.join("未决.md");
+        let old_dec = fs::read_to_string(&dec_file).unwrap_or_default();
+        let body_rest = {
+            let mut lines = body.lines();
+            lines.next();
+            lines.collect::<Vec<_>>().join("\n")
+        };
+        let entry = format!("\n\n## [{date}] {first_line}\n{}\n", body_rest.trim());
+        fs::write(&dec_file, format!("{}{}", old_dec.trim_end(), entry)).map_err(|e| e.to_string())?;
+        // 2) L1 MEMORY 决策待定指针（已有小节则追加 bullet，否则新建小节）
+        let mem_path = root.join("MEMORY.md");
+        let old_mem = fs::read_to_string(&mem_path).unwrap_or_default();
+        let bullet = format!("- [{date}] {first_line}（未决）：见 [[notes/决策/未决.md]]");
+        if let Some(hdr) = old_mem.find("## 决策待定") {
+            let after_hdr = &old_mem[hdr..];
+            let nl = after_hdr.find('\n').map(|i| hdr + i + 1).unwrap_or(old_mem.len());
+            let new_mem = format!("{}{}\n{}", &old_mem[..nl], bullet, &old_mem[nl..]);
+            fs::write(&mem_path, new_mem).map_err(|e| e.to_string())?;
+        } else {
+            let new_mem = format!("{}{}\n\n## 决策待定\n{}\n", old_mem.trim_end(), "", bullet);
+            fs::write(&mem_path, new_mem).map_err(|e| e.to_string())?;
+        }
+        fs::remove_file(&src_canon).map_err(|e| e.to_string())?;
+        Ok((
+            "notes/决策/未决.md".to_string(),
+            Some("未决决策已登记（MEMORY 决策待定 + notes/决策/未决.md）".to_string()),
+        ))
     } else {
         // 新笔记 → 移动到目标路径（保留 pending/ 后的相对结构）；edited 覆盖内容
         let dst = root.join(&stripped);
@@ -724,6 +772,15 @@ pub fn preview_pending(root: &Path, rel: &str) -> Result<PendingPreview, String>
             target: "MEMORY.md".to_string(),
             kind: "memory".to_string(),
             added,
+        })
+    } else if stripped.starts_with("DECISION.") {
+        // 未决决策提案（B3）：预览 = 将写入 notes/决策/未决.md 的明细
+        let (_, body) = parse_frontmatter(&content);
+        Ok(PendingPreview {
+            path: rel.to_string(),
+            target: "notes/决策/未决.md".to_string(),
+            kind: "decision".to_string(),
+            added: body.trim().to_string(),
         })
     } else {
         Ok(PendingPreview {
@@ -856,6 +913,33 @@ mod tests {
         let (t2, _) = approve_pending(&root, "pending/MEMORY.t.md", None).unwrap();
         assert_eq!(t2, "MEMORY.md");
         assert!(fs::read_to_string(root.join("MEMORY.md")).unwrap().contains("条目"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn approve_decision_writes_undecided_and_memory_pointer() {
+        let root = test_root("decis");
+        ensure_layout(&root).unwrap();
+        write(&root, "pending/DECISION.s1-1.md",
+            "---\ntype: decision\nsource: sessions/s1.md\ndate: 2026-08-05\n---\n## 议题：是否做 MCP\n上次方案：先做工具链，MCP 后置\n");
+        // 幂等性：先批准一次（新建小节），再批准第二次（追加 bullet 不重复建节）
+        let (t1, _) = approve_pending(&root, "pending/DECISION.s1-1.md", None).unwrap();
+        assert_eq!(t1, "notes/决策/未决.md");
+        write(&root, "pending/DECISION.s1-2.md",
+            "---\ntype: decision\nsource: sessions/s1.md\ndate: 2026-08-05\n---\n## 议题：第二个议题\n上次方案：方案 B\n");
+        let (_, _) = approve_pending(&root, "pending/DECISION.s1-2.md", None).unwrap();
+        // 明细落 notes/决策/未决.md（两节）
+        let dec = fs::read_to_string(root.join("notes/决策/未决.md")).unwrap();
+        assert!(dec.contains("是否做 MCP") && dec.contains("第二个议题"));
+        // MEMORY 决策待定小节只有一个 ##，含两条 bullet
+        let mem = fs::read_to_string(root.join("MEMORY.md")).unwrap();
+        assert_eq!(mem.matches("## 决策待定").count(), 1);
+        assert_eq!(mem.matches("（未决）：见 [[notes/决策/未决.md]]").count(), 2);
+        // preview kind=decision
+        write(&root, "pending/DECISION.s2-1.md", "---\ntype: decision\ndate: 2026-08-05\n---\n## 议题：X\n上次方案：Y\n");
+        let pv = preview_pending(&root, "pending/DECISION.s2-1.md").unwrap();
+        assert_eq!(pv.kind, "decision");
+        assert_eq!(pv.target, "notes/决策/未决.md");
         fs::remove_dir_all(&root).unwrap();
     }
 

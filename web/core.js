@@ -208,6 +208,22 @@
     return skillTxt ? '相关技能（命中触发词，按技能步骤执行）：' + skillTxt : '';
   };
 
+  // ---------- 会话管理（A3）：解析 kb/sessions/<id>.md → [{q, a}] ----------
+  // 格式：frontmatter + `## Q: <q>\nA: <a>`（条目间 \n\n 分隔）；兼容缺 frontmatter 的旧文件
+  Core.parseSessionFile = function (content) {
+    const txt = String(content || '');
+    const parts = txt.split(/^## Q: /m);
+    const out = [];
+    for (let i = 1; i < parts.length; i++) {
+      const lines = parts[i].split('\n');
+      const q = (lines.shift() || '').trim();
+      let a = lines.join('\n').trim();
+      if (a.startsWith('A: ')) a = a.slice(3).trim();
+      if (q) out.push({ q, a });
+    }
+    return out;
+  };
+
   // CE 双模式：上下文超限错误识别（fresh-window 降级重试触发条件）
   Core.isOverflowError = function (msg) {
     const m = msg || '';

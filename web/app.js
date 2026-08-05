@@ -63,25 +63,162 @@
     const p = (n) => String(n).padStart(2, '0');
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
   }
-  function writeL0Snapshot() {
+  // A4 会话收尾归档：writeSessionFile(archived) 写快照（archived=true → status=archived）；
+  // writeL0Snapshot 保持 fire-and-forget（20s 防抖 / beforeunload 尽力写）
+  async function writeSessionFile(archived) {
     if (!sessionLog.length || sessionLog.length === 0) return;
     if (!sessionFile) sessionFile = 'sessions/' + sessionStamp() + '.md';
     const body = sessionLog.map((s) =>
       '## Q: ' + String(s.q || '').slice(0, 300) + '\nA: ' + String(s.a || '(无回答/中断)').slice(0, 3000)
     ).join('\n\n');
-    const content = '---\ntype: session\ndate: ' + localToday() + '\n---\n\n# 会话记录\n\n' + body + '\n';
-    api('/api/file', {
+    // A1 会话实体化：frontmatter 元数据（title=首问截断 30 字 / status / count）——/api/sessions lite 枚举数据源
+    const title = String((sessionLog[0] && sessionLog[0].q) || '').slice(0, 30);
+    const content = '---\ntype: session\ndate: ' + localToday() + '\ntitle: ' + title + '\nstatus: ' + (archived ? 'archived' : 'active') + '\ncount: ' + sessionLog.length + '\n---\n\n# 会话记录\n\n' + body + '\n';
+    return api('/api/file', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: sessionFile, content }),
-    }).catch(() => { /* L0 落盘失败不打扰用户 */ });
+    });
+  }
+  function writeL0Snapshot() {
+    writeSessionFile(false).catch(() => { /* L0 落盘失败不打扰用户 */ });
   }
   function scheduleL0Snapshot() {
     clearTimeout(l0Timer);
     l0Timer = setTimeout(writeL0Snapshot, 20000); // 20s 无新问答 → 落盘
   }
-  // 会话关闭前尽力写一次（best-effort，不 await）
-  window.addEventListener('beforeunload', writeL0Snapshot);
-  window.addEventListener('pagehide', writeL0Snapshot);
+  // 会话关闭前尽力写一次（best-effort，不 await；标记 archived，摘要/未决检测走 idle 或 /clear 路径）
+  window.addEventListener('beforeunload', () => { writeSessionFile(true).catch(() => {}); });
+  window.addEventListener('pagehide', () => { writeSessionFile(true).catch(() => {}); });
+
+  // ---------- 会话管理（A2 列表 / A3 恢复） ----------
+  async function sessionsCmd() {
+    const r = await api('/api/sessions').catch(() => null);
+    if (!r || !r.sessions || !r.sessions.length) {
+      term.writeln('\x1b[33m暂无历史会话（问答防抖落盘 kb/sessions/，/clear 或关闭页面时归档）\x1b[0m');
+      return;
+    }
+    term.writeln('\x1b[1;36m──── 历史会话（' + r.total + '）────\x1b[0m');
+    for (const s of r.sessions) {
+      const st = s.status === 'active' ? '\x1b[32m●\x1b[0m' : '\x1b[90m○\x1b[0m';
+      const d = s.date || (s.mtime ? new Date(s.mtime * 1000).toISOString().slice(0, 10) : '-');
+      term.writeln(' ' + st + ' ' + s.id + '  ' + (s.title || '(无标题)') + '\x1b[90m  [' + s.count + ' 轮 · ' + d + ']\x1b[0m');
+    }
+    term.writeln('\x1b[90m恢复: /resume <id 或标题关键词> · 面板: /view sessions\x1b[0m');
+  }
+
+  async function resumeCmd(arg) {
+    if (!arg) {
+      term.writeln('\x1b[33m用法: /resume <会话 id 或标题关键词>\x1b[0m（先 /sessions 查看列表）');
+      return;
+    }
+    const r = await api('/api/sessions').catch(() => null);
+    const list = (r && r.sessions) || [];
+    const hit = list.find((s) => s.id === arg) || list.find((s) => s.title && s.title.includes(arg));
+    if (!hit) {
+      term.writeln('\x1b[33m未找到会话: ' + arg + '\x1b[0m（/sessions 查看列表）');
+      return;
+    }
+    const f = await api('/api/file?path=sessions/' + encodeURIComponent(hit.id + '.md'));
+    const parsed = Core.parseSessionFile((f && f.content) || '');
+    if (!parsed.length) {
+      term.writeln('\x1b[33m会话文件无有效问答对: ' + hit.id + '\x1b[0m');
+      return;
+    }
+    // A3 恢复=新会话语义：载入 history（工作窗口内）+ 重置分节缓存（方向 3 memo 不沿用旧值）
+    history = [];
+    for (const p of parsed) {
+      history.push({ role: 'user', content: p.q });
+      if (p.a) history.push({ role: 'assistant', content: p.a });
+    }
+    history = history.slice(-MAX_HISTORY);
+    Core.resetSectionCache();
+    saveHistory();
+    term.writeln('\x1b[32m✓ 已恢复会话 ' + hit.id + '（' + parsed.length + ' 轮 → 载入最近 ' + Math.floor(history.length / 2) + ' 轮）\x1b[0m');
+    term.writeln('\x1b[90m继续提问即引用前文；/clear 退出恢复态\x1b[0m');
+  }
+
+  // ---------- 会话收尾归档（A4 自动归档 + B3 未决决策，合并落地） ----------
+  // 触发器：30min 空闲 / /clear（beforeunload 只标记 archived，不生成摘要）
+  const SESSION_IDLE_MS = 30 * 60 * 1000;
+  let lastActivityAt = Date.now();
+  let sessionArchived = false;
+  function touchActivity() { lastActivityAt = Date.now(); }
+  setInterval(() => {
+    if (!sessionArchived && sessionLog.length && Date.now() - lastActivityAt > SESSION_IDLE_MS) {
+      term.writeln('\x1b[90m(30 分钟无操作 → 会话收尾归档)\x1b[0m');
+      archiveSession();
+    }
+  }, 60000);
+
+  // 未决规则粗筛（零 LLM，B3 降级）：回答含建议/方案类措辞 → 候选未决
+  function ruleDetectUndecided(log) {
+    const KW = /建议|方案|可选|推荐|可以考虑/;
+    const out = [];
+    for (const s of log) {
+      if (KW.test(s.a || '')) out.push({ topic: String(s.q || '').slice(0, 60), advice: String(s.a || '').slice(0, 200) });
+    }
+    return out;
+  }
+
+  // 收尾归档：1) 快照 status=archived  2) 摘要落 notes/会话归档/（进可检索层）  3) 未决提案进 pending/
+  async function archiveSession() {
+    if (sessionArchived || !sessionLog.length) return;
+    sessionArchived = true;
+    const id = (sessionFile || ('sessions/' + sessionStamp() + '.md')).replace('sessions/', '').replace(/\.md$/, '');
+    const title = String((sessionLog[0] && sessionLog[0].q) || '').slice(0, 30);
+    try {
+      await writeSessionFile(true); // status=archived
+      const qa = sessionLog.map((s) => 'Q: ' + String(s.q).slice(0, 200) + '\nA: ' + String(s.a || '(无回答)').slice(0, 1500)).join('\n\n').slice(0, 8000);
+      // LLM 一次收尾调用（摘要 + 未决检测）；失败/未配置 → 规则降级
+      let summary = null;
+      let undecided = [];
+      if (llmConfigured) {
+        try {
+          const r = await fetch('/api/llm', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              messages: [{
+                role: 'user',
+                content: '请对以下会话做收尾归档，只输出 JSON（不要其它文字）：\n' +
+                  '{"summary":"会话要点（3-5 条，含关键决策与已沉淀记忆的 [[双链]]）","undecided":[{"topic":"议题","advice":"上次给出的方案/建议"}]}\n' +
+                  'undecided 为空数组表示无未决议题；只有「给了建议但用户未拍板」的才列入。\n\n' + qa,
+              }],
+              stream: false,
+            }),
+            signal: AbortSignal.timeout(120000),
+          });
+          const body = await r.json();
+          const full = (body.choices && body.choices[0] && body.choices[0].message && body.choices[0].message.content) || '';
+          const j = Core.extractJsonObjects(full)[0];
+          if (j) { summary = j.summary ? String(j.summary) : null; undecided = Array.isArray(j.undecided) ? j.undecided : []; }
+        } catch (e) { /* LLM 失败 → 规则降级 */ }
+      }
+      if (!summary) summary = sessionLog.map((s) => '- ' + String(s.q).slice(0, 40)).join('\n');
+      if (!undecided.length && !llmConfigured) undecided = ruleDetectUndecided(sessionLog);
+      // 摘要落 notes/会话归档/<date>-<id>.md（派生产物自动落盘，进可检索层，无人审）
+      const ar = 'notes/会话归档/' + localToday() + '-' + id + '.md';
+      await api('/api/file', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: ar, content: '---\ntype: session-archive\ndate: ' + localToday() + '\nsource: sessions/' + id + '.md\n---\n\n# 会话归档：' + title + '\n\n' + summary + '\n' }),
+      });
+      // 未决提案进 pending/DECISION.<id>-<n>.md（待审人审；审批路由见后端 DECISION. 分支）
+      let n = 0;
+      for (const u of undecided.slice(0, 3)) {
+        const topic = String(u.topic || '').trim();
+        if (!topic) continue;
+        n++;
+        const content = '---\ntype: decision\nsource: sessions/' + id + '.md\ndate: ' + localToday() + '\n---\n\n## 议题：' + topic + '\n上次方案：' + String(u.advice || '').slice(0, 300) + '\n';
+        await api('/api/file', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: 'pending/DECISION.' + id + '-' + n + '.md', content }),
+        }).catch(() => {});
+      }
+      term.writeln('\x1b[90m(已归档 → ' + ar + (n ? ' · 未决提案 ' + n + ' 条进待审' : '') + ')\x1b[0m');
+    } catch (e) {
+      term.writeln('\x1b[33m归档失败: ' + ((e && e.message) || e) + '\x1b[0m');
+    }
+    sessionLog = [];
+  }
 
   function loadHistory() {
     try {
@@ -492,6 +629,7 @@
 
   // 终端键盘：confirm 分支 + 流内输入（回车提交/退格/追加式）
   term.onData((data) => {
+    touchActivity(); // A4 收尾归档：任意输入 = 活动（30min 空闲判定）
     const code = data.charCodeAt(0);
     // 终端确认机制（写操作人审：y/n）
     if (confirmCb) {
@@ -640,7 +778,7 @@
       case '/config': await cfg(); break;
       case '/remember': await remember(rest); break;
       case '/digest': await digest(rest.join(' ')); break;
-      case '/clear': history = []; saveHistory(); Core.resetSectionCache(); term.writeln('多轮记忆已清空（系统提示词分节缓存已重置）'); break;
+      case '/clear': if (sessionLog.length && !sessionArchived) archiveSession(); history = []; saveHistory(); Core.resetSectionCache(); term.writeln('多轮记忆已清空（系统提示词分节缓存已重置）'); break;
       case '/link-all': await linkAll(); break;
       case '/fetch': await fetchCmd(rest); break;
       case '/page': await pageCmd(rest); break;
@@ -664,6 +802,8 @@
       case '/diff': await diffCmd(rest[0], rest[1]); break;
       case '/link': await linkCmd(rest[0], rest[1]); break;
       case '/suggest': await suggest(rest.join(' ')); break;
+      case '/sessions': await sessionsCmd(); break;
+      case '/resume': await resumeCmd(rest[0]); break;
       case '/health': await health(); break;
       case '/heartbeat': await heartbeatCmd(rest); break;
       case 'clear': term.clear(); break;
@@ -696,6 +836,8 @@
     term.writeln('  /side                  速览侧边栏（任务/待审/图谱/审计，Ctrl+K 或快捷按钮同样唤出）');
     term.writeln('  /consolidate [llm]     巩固器：v1 规则（MEMORY 去重/重复标题提示）；llm 参数用 LLM 生成整合版');
     term.writeln('  /skills                列出技能注册表（Agent 技能提案经 /approve 安装）');
+    term.writeln('  /sessions               历史会话列表（kb/sessions/ 全量归档，/view sessions 面板）');
+    term.writeln('  /resume <id|标题>       恢复历史会话到当前对话（载入最近 4 轮，重置前缀缓存）');
     term.writeln('  /audit                知识库健康审计（盲区/冲突/补链接建议）');
     term.writeln('  /conflicts             冲突检查（重复标题/悬空链接）   /diff <A> <B> 行级对比');
     term.writeln('  /link <源> <目标>      补链接（在源文档追加 [[目标]]，人工确认）');
@@ -2054,13 +2196,13 @@
       closeView();
       return;
     }
-    if (arg === 'graph' || arg === 'board' || arg === 'pending' || arg === 'audit' || arg === 'market' || arg === 'home') {
+    if (arg === 'graph' || arg === 'board' || arg === 'pending' || arg === 'audit' || arg === 'market' || arg === 'home' || arg === 'sessions') {
       const dup = findView('builtin', arg);
       if (dup) { activateView(dup.id); return; }
       const name = arg + '.html';
       const r = await fetch('/views/' + name);
       if (!r.ok) throw new Error('内置视图加载失败: HTTP ' + r.status);
-      const titles = { graph: '知识库结构导航', board: '任务看板', pending: '待审审核', audit: '知识库健康审计', market: '应用市场', home: '功能首页' };
+      const titles = { graph: '知识库结构导航', board: '任务看板', pending: '待审审核', audit: '知识库健康审计', market: '应用市场', home: '功能首页', sessions: '历史会话' };
       openView(titles[arg], await r.text(), null, { kind: 'builtin', arg });
       return;
     }

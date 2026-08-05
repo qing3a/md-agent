@@ -80,6 +80,15 @@ t('fresh 最小上下文（可丢 memory）', !Core.buildGuidePrefix({ guideText
 const f2 = freshPrefix({ guideText: '', memoryText: '', toolsTxt: 'T', today: 'x' });
 t('frc 指令节在稳定前缀内', f2.includes('重新调用该工具') && f2.includes('截断摘要'));
 
+console.log('== 会话管理（A3 parseSessionFile） ==');
+const sf = '---\ntype: session\ndate: 2026-08-05\ntitle: 测试\nstatus: active\ncount: 2\n---\n\n# 会话记录\n\n## Q: 问题一\nA: 回答一\n\n## Q: 问题二\nA: 回答二\n';
+const sp = Core.parseSessionFile(sf);
+t('解析条数', sp.length === 2);
+t('解析 q/a', sp[0].q === '问题一' && sp[0].a === '回答一' && sp[1].q === '问题二' && sp[1].a === '回答二');
+t('旧格式无 frontmatter 可解析', Core.parseSessionFile('# 会话记录\n\n## Q: 旧问题\nA: 旧回答\n').length === 1);
+t('空内容返回空', Core.parseSessionFile('').length === 0);
+t('回答含多行保留', Core.parseSessionFile('## Q: q\nA: 第一行\n第二行\n').length === 1);
+
 console.log('== CE isOverflowError（fresh-window 降级触发） ==');
 t('maximum context 命中', Core.isOverflowError('This model\'s maximum context length is 128000 tokens'));
 t('token 超限命中', Core.isOverflowError('reduce the length of the messages or completion'));

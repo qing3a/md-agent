@@ -49,6 +49,7 @@ pub async fn serve(
         .route("/api/l1/read", get(l1_read_handler))
         .route("/api/file", get(file_read))
         .route("/api/file", post(file_write))
+        .route("/api/sessions", get(sessions_list))
         .route("/api/kb/sync", post(kb_sync))
         .route("/api/kb/pending", get(kb_pending_list))
         .route("/api/kb/pending/preview", get(kb_pending_preview))
@@ -371,6 +372,83 @@ async fn file_write(State(st): State<AppState>, Json(body): Json<FileWriteBody>)
         )
             .into_response(),
     }
+}
+
+// ---------- 会话管理（A2）：lite 枚举 kb/sessions/（frontmatter 元数据，不读全文） ----------
+// 列表/恢复是"实体层"操作；sessions 流水本身仍三排除（不入图谱/检索/指纹）
+async fn sessions_list(State(st): State<AppState>) -> Response {
+    let dir = st.kb_root.join("sessions");
+    let mut items: Vec<Value> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let path = e.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("md") {
+                continue;
+            }
+            let id = path
+                .file_stem()
+                .and_then(|x| x.to_str())
+                .unwrap_or("")
+                .to_string();
+            let mtime = e
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            // 只读文件头 2KB（frontmatter 区），不读全文
+            let head = std::fs::read(&path)
+                .ok()
+                .map(|b| {
+                    let n = b.len().min(2048);
+                    String::from_utf8_lossy(&b[..n]).to_string()
+                })
+                .unwrap_or_default();
+            let (title, status, count, date) = parse_session_frontmatter(&head, &id);
+            items.push(json!({
+                "id": id,
+                "title": title,
+                "status": status,
+                "count": count,
+                "date": date,
+                "mtime": mtime,
+            }));
+        }
+    }
+    items.sort_by(|a, b| b["mtime"].as_u64().unwrap_or(0).cmp(&a["mtime"].as_u64().unwrap_or(0)));
+    Json(json!({ "sessions": items, "total": items.len() })).into_response()
+}
+
+/// 解析会话文件头 frontmatter（title/status/count/date）；旧文件缺字段容错。
+/// title 缺省回退：首条 `## Q:` 截断 30 字 → 仍空则用文件名；status 缺省 archived（历史会话）
+fn parse_session_frontmatter(head: &str, id: &str) -> (String, String, u64, String) {
+    let mut title = String::new();
+    let mut status = "archived".to_string();
+    let mut count = 0u64;
+    let mut date = String::new();
+    let fm = head.split("---").nth(1).unwrap_or("");
+    for line in fm.lines() {
+        if let Some((k, v)) = line.split_once(':') {
+            match k.trim() {
+                "title" => title = v.trim().to_string(),
+                "status" => status = v.trim().to_string(),
+                "count" => count = v.trim().parse().unwrap_or(0),
+                "date" => date = v.trim().to_string(),
+                _ => {}
+            }
+        }
+    }
+    if title.is_empty() {
+        if let Some(qi) = head.find("## Q:") {
+            let rest = head[qi + 5..].trim_start();
+            title = rest.lines().next().unwrap_or("").chars().take(30).collect();
+        }
+        if title.is_empty() {
+            title = id.to_string();
+        }
+    }
+    (title, status, count, date)
 }
 
 async fn kb_sync(State(st): State<AppState>) -> Response {
@@ -1095,6 +1173,27 @@ mod app_data_tests {
         assert_eq!(b.get("system"), Some(&2));
         assert_eq!(b.get("skills"), Some(&1));
         assert_eq!(b.len(), 4);
+    }
+
+    #[test]
+    fn session_frontmatter_parse() {
+        // 新格式：完整 frontmatter
+        let head = "---\ntype: session\ndate: 2026-08-05\ntitle: 如何配置 LLM？\nstatus: active\ncount: 3\n---\n\n# 会话记录\n\n## Q: 如何配置 LLM？\nA: 打开 config.html\n";
+        let (t, s, c, d) = parse_session_frontmatter(head, "2026-08-05-120000");
+        assert_eq!(t, "如何配置 LLM？");
+        assert_eq!(s, "active");
+        assert_eq!(c, 3);
+        assert_eq!(d, "2026-08-05");
+        // 旧格式：无 frontmatter → title 回退首条 ## Q:（截断 30 字），status 缺省 archived
+        let old = "# 会话记录\n\n## Q: 这是一条很长的问题用来验证标题截断逻辑是否正确生效啊啊啊啊啊啊啊啊\nA: 回答\n";
+        let (t2, s2, c2, _d2) = parse_session_frontmatter(old, "2026-08-04-154440");
+        assert_eq!(s2, "archived");
+        assert_eq!(c2, 0);
+        assert_eq!(t2.chars().count(), 30);
+        // 空文件 → title 回退文件名
+        let (t3, s3, _, _) = parse_session_frontmatter("", "2026-08-04-154440");
+        assert_eq!(t3, "2026-08-04-154440");
+        assert_eq!(s3, "archived");
     }
 }
 
