@@ -830,6 +830,17 @@ pub fn preview_pending(root: &Path, rel: &str) -> Result<PendingPreview, String>
             kind: "decision".to_string(),
             added: body.trim().to_string(),
         })
+    } else if stripped.starts_with("code/") {
+        // 代码提案（C3）：预览 = 提案摘要 + 修改文件清单（应用走 /dev apply）
+        let (meta, body) = parse_frontmatter(&content);
+        let reason = meta.get("reason").cloned().unwrap_or_default();
+        let files = meta.get("files").cloned().unwrap_or_default();
+        Ok(PendingPreview {
+            path: rel.to_string(),
+            target: "项目源码（/dev apply 应用）".to_string(),
+            kind: "code-patch".to_string(),
+            added: format!("代码提案：{reason}\n修改文件：{files}\n\n（/dev apply {rel} 应用 + cargo build 验证，失败自动回滚）\n\n{body}"),
+        })
     } else if stripped.starts_with("EXPERIENCE.") {
         // 经验提案（C2）：预览 = 正文 + 目标按类型
         let (_, body) = parse_frontmatter(&content);

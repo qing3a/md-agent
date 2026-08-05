@@ -220,6 +220,25 @@
     sessionLog = [];
   }
 
+  // ---------- C3 代码提案应用（/dev apply） ----------
+  async function devCmd(rest) {
+    const [sub, ...args] = rest;
+    if (sub === 'apply') {
+      if (!args[0]) { term.writeln('\x1b[33m用法: /dev apply <提案路径>（如 pending/code/xxx.md，先 /pending 查看）\x1b[0m'); return; }
+      term.writeln('\x1b[90m(应用代码提案 + cargo build 验证，失败自动回滚...)\x1b[0m');
+      const r = await api('/api/dev/apply', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: args[0] }),
+      });
+      if (r.ok) term.writeln('\x1b[32m✓ 已应用 ' + (r.applied || []).join(', ') + '，构建验证通过\x1b[0m');
+      else term.writeln('\x1b[31m应用失败已回滚: ' + (r.error || r.build || '未知') + '\x1b[0m');
+    } else if (sub === 'patch') {
+      term.writeln('\x1b[90m/dev patch 由 LLM 工具调用（dev.patch）生成提案；/dev apply <路径> 应用\x1b[0m');
+    } else {
+      term.writeln('\x1b[90m/dev apply <提案路径>  应用代码提案 + cargo build 验证（失败自动回滚）\x1b[0m');
+    }
+  }
+
   function loadHistory() {
     try {
       const h = JSON.parse(localStorage.getItem('md-agent-history') || '[]');
@@ -808,6 +827,7 @@
       case '/suggest': await suggest(rest.join(' ')); break;
       case '/sessions': await sessionsCmd(); break;
       case '/resume': await resumeCmd(rest[0]); break;
+      case '/dev': await devCmd(rest); break;
       case '/health': await health(); break;
       case '/heartbeat': await heartbeatCmd(rest); break;
       case 'clear': term.clear(); break;
@@ -928,6 +948,15 @@
     'dev.read': (a) => api('/api/dev/read?path=' + encodeURIComponent(a.path || '')),
     'dev.status': () => api('/api/dev/status'),
     'dev.diff': (a) => api('/api/dev/diff' + (a.path ? '?path=' + encodeURIComponent(a.path) : '')),
+    // C3 代码提案通道（生成提案进待审 / 应用+构建验证）
+    'dev.patch': (a) => api('/api/dev/patch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: a.reason || '', files: Array.isArray(a.files) ? a.files : [] }),
+    }),
+    'dev.apply': (a) => api('/api/dev/apply', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: a.path || '' }),
+    }),
   };
 
   // 工具结果格式化（截断防超长；片段标注来源便于 LLM 引用）
@@ -990,6 +1019,11 @@
     }
     if (name === 'dev.read') return String(r.content || '(空文件)').slice(0, 3000) + (r.path ? '\n[来源 ' + r.path + ']' : '');
     if (name === 'dev.status' || name === 'dev.diff') return String(r.output || '(无改动/无输出)');
+    if (name === 'dev.patch') return '代码提案已生成: ' + (r.path || '') + '（' + (r.files || 0) + ' 个文件）——待审人审后 /dev apply 应用';
+    if (name === 'dev.apply') {
+      if (r.ok) return '已应用 ' + ((r.applied || []).join(', ')) + '，构建验证通过';
+      return '应用失败已回滚: ' + String(r.error || r.build || '未知');
+    }
     return JSON.stringify(r).slice(0, 3000);
   }
 

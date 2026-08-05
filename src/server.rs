@@ -56,6 +56,8 @@ pub async fn serve(
         .route("/api/dev/read", get(dev_read))
         .route("/api/dev/status", get(dev_status))
         .route("/api/dev/diff", get(dev_diff))
+        .route("/api/dev/patch", post(dev_patch))
+        .route("/api/dev/apply", post(dev_apply))
         .route("/api/kb/sync", post(kb_sync))
         .route("/api/kb/pending", get(kb_pending_list))
         .route("/api/kb/pending/preview", get(kb_pending_preview))
@@ -217,6 +219,23 @@ fn tools_json() -> Value {
                 {"name": "path", "type": "string", "required": false, "desc": "限定文件路径，如 src/server.rs；空=全部"}
             ],
             "example": "{\"path\":\"src/server.rs\"}"
+        },
+        {
+            "name": "dev.patch",
+            "desc": "提交代码修改提案（进待审人审）：指定要修改的文件路径与完整新内容——发现问题需要改代码时，生成提案而非直接改动",
+            "params": [
+                {"name": "reason", "type": "string", "required": true, "desc": "修改原因"},
+                {"name": "files", "type": "array", "required": true, "desc": "文件列表：[{path: 项目根相对路径, content: 新内容全文}]"}
+            ],
+            "example": "{\"reason\":\"修复 xx\",\"files\":[{\"path\":\"src/server.rs\",\"content\":\"...\"}]}"
+        },
+        {
+            "name": "dev.apply",
+            "desc": "应用代码提案并构建验证（dev.patch 生成的提案）：备份→写入→cargo build→失败自动回滚",
+            "params": [
+                {"name": "path", "type": "string", "required": true, "desc": "待审提案路径，如 pending/code/20260805-120000.md"}
+            ],
+            "example": "{\"path\":\"pending/code/20260805-120000.md\"}"
         }
     ])
 }
@@ -922,6 +941,171 @@ async fn dev_diff(Query(q): Query<DevDiffParams>) -> Response {
     match git_capture(&args_ref) {
         Ok(out) => Json(json!({ "ok": true, "output": out })).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+// ---------- C3 代码提案通道：dev.patch 生成提案（进 pending/code/）→ 人审 → dev.apply 应用+构建验证+回滚 ----------
+// 务实调整：plan 的"先验证再送审"（临时副本 build）对单用户开销大；改为 apply 时验证 + 备份回滚（能力等价，成本低）
+
+#[derive(Deserialize)]
+struct DevPatchFile {
+    path: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct DevPatchBody {
+    reason: Option<String>,
+    files: Option<Vec<DevPatchFile>>,
+}
+
+async fn dev_patch(State(st): State<AppState>, Json(b): Json<DevPatchBody>) -> Response {
+    let files = b.files.unwrap_or_default();
+    if files.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺 files" }))).into_response();
+    }
+    for f in &files {
+        let rel = f.path.trim().trim_start_matches(['/', '\\']);
+        if !is_dev_allowed(rel) {
+            return (StatusCode::FORBIDDEN, Json(json!({ "error": format!("路径不在 dev 白名单内: {}", f.path) }))).into_response();
+        }
+    }
+    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let ppath = format!("pending/code/{ts}.md");
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let mut content = format!(
+        "---\ntype: code-patch\nreason: {}\nfiles: {}\ndate: {date}\n---\n\n# 代码提案（{date} {ts}）\n\n修改文件：{}\n\n> 应用：/dev apply {ppath}（先备份，构建失败自动回滚）\n",
+        b.reason.unwrap_or_default(),
+        files.iter().map(|f| f.path.clone()).collect::<Vec<_>>().join(" | "),
+        files.iter().map(|f| format!("- `{}`", f.path)).collect::<Vec<_>>().join("\n")
+    );
+    for f in &files {
+        content.push_str(&format!("\n### FILE: {}\n{}\n", f.path, f.content));
+    }
+    let dst = st.kb_root.join(&ppath);
+    if let Some(parent) = dst.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::write(&dst, content) {
+        Ok(()) => Json(json!({ "ok": true, "path": ppath, "files": files.len(), "hint": "/dev apply 应用+构建验证" })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// 解析代码提案：frontmatter files + 正文 `### FILE: <path>` 块 → Vec<(path, content)>
+fn parse_code_patch(content: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let body_start = content.find("---\n\n").map(|i| i + 4).unwrap_or(0);
+    let body = &content[body_start..];
+    let mut cur: Option<(String, String)> = None;
+    for line in body.lines() {
+        if let Some(rest) = line.strip_prefix("### FILE: ") {
+            if let Some((p, c)) = cur.take() {
+                out.push((p, c.trim_end().to_string()));
+            }
+            cur = Some((rest.trim().to_string(), String::new()));
+        } else if let Some((_, acc)) = cur.as_mut() {
+            acc.push_str(line);
+            acc.push('\n');
+        }
+    }
+    if let Some((p, c)) = cur {
+        out.push((p, c.trim_end().to_string()));
+    }
+    out
+}
+
+#[derive(Deserialize)]
+struct DevApplyBody {
+    path: String,
+}
+
+async fn dev_apply(State(st): State<AppState>, Json(b): Json<DevApplyBody>) -> Response {
+    let Some(proj) = dev_project_root() else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "无法定位项目根" }))).into_response();
+    };
+    let rel = b.path.trim().trim_start_matches(['/', '\\']);
+    let pb = match crate::kb::resolve_in_kb(&st.kb_root, rel) {
+        Some(p) if p.is_file() => p,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({ "error": "提案不存在" }))).into_response(),
+    };
+    let content = match std::fs::read_to_string(&pb) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    };
+    let files = parse_code_patch(&content);
+    if files.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "提案无可应用文件" }))).into_response();
+    }
+    // 白名单校验（防提案逃逸）
+    for (path, _) in &files {
+        let rel2 = path.trim().trim_start_matches(['/', '\\']);
+        if !is_dev_allowed(rel2) {
+            return (StatusCode::FORBIDDEN, Json(json!({ "error": format!("路径不在 dev 白名单内: {path}") }))).into_response();
+        }
+    }
+    // 备份（写 .dev-bak-<ts> 到同目录）
+    let ts = chrono::Local::now().format("%Y%m%d%H%M%S").to_string();
+    let mut backups: Vec<(String, PathBuf)> = Vec::new();
+    for (path, _) in &files {
+        let rel2 = path.trim().trim_start_matches(['/', '\\']);
+        let target = proj.join(rel2);
+        let bak = target.with_file_name(format!(
+            "{}.dev-bak-{ts}",
+            target.file_name().and_then(|x| x.to_str()).unwrap_or("file")
+        ));
+        if target.exists() {
+            let _ = std::fs::copy(&target, &bak);
+        }
+        backups.push((rel2.to_string(), bak));
+    }
+    // 写新内容
+    let mut applied: Vec<String> = Vec::new();
+    for (path, new_content) in &files {
+        let rel2 = path.trim().trim_start_matches(['/', '\\']);
+        let target = proj.join(rel2);
+        if let Some(parent) = target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&target, new_content) {
+            restore_backups(&proj, &backups);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("写入 {rel2} 失败: {e}（已回滚）") }))).into_response();
+        }
+        applied.push(rel2.to_string());
+    }
+    // 编译验证（cargo check：只编译不链接，避开运行实例 exe 锁；冷缓存首次可能 1-3 分钟，超时 300s）
+    let build = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        tokio::process::Command::new("cargo").arg("check").current_dir(&proj).output(),
+    )
+    .await;
+    match build {
+        Ok(Ok(out)) if out.status.success() => {
+            // 成功：清理备份
+            for (_, bak) in &backups {
+                let _ = std::fs::remove_file(bak);
+            }
+            Json(json!({ "ok": true, "applied": applied, "build": "ok" })).into_response()
+        }
+        Ok(Ok(out)) => {
+            let log = String::from_utf8_lossy(&out.stderr).chars().take(1500).collect::<String>();
+            restore_backups(&proj, &backups);
+            Json(json!({ "ok": false, "applied": [], "build": "failed", "rolled_back": true, "error": log })).into_response()
+        }
+        _ => {
+            restore_backups(&proj, &backups);
+            Json(json!({ "ok": false, "applied": [], "build": "timeout/error", "rolled_back": true })).into_response()
+        }
+    }
+}
+
+fn restore_backups(proj: &Path, backups: &[(String, PathBuf)]) {
+    for (rel2, bak) in backups {
+        let target = proj.join(rel2);
+        if bak.is_file() {
+            let _ = std::fs::copy(bak, &target);
+        }
+        let _ = std::fs::remove_file(bak);
     }
 }
 
@@ -1729,6 +1913,19 @@ mod app_data_tests {
         let j3 = extract_json_from_text("分析结果：{\"merges\":[{\"docs\":[\"a.md\"]}]} 完毕").unwrap();
         assert_eq!(j3["merges"][0]["docs"][0], "a.md");
         assert!(extract_json_from_text("无发现").is_none());
+    }
+
+    #[test]
+    fn code_patch_parse() {
+        let content = "---\ntype: code-patch\nreason: 修复\nfiles: src/a.rs|web/b.js\ndate: 2026-08-05\n---\n\n# 代码提案\n\n### FILE: src/a.rs\nfn main() {}\n\n### FILE: web/b.js\nconsole.log('x');\n";
+        let files = parse_code_patch(content);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].0, "src/a.rs");
+        assert!(files[0].1.contains("fn main() {}"));
+        assert_eq!(files[1].0, "web/b.js");
+        assert!(files[1].1.contains("console.log"));
+        // 空提案
+        assert!(parse_code_patch("---\ntype: code-patch\n---\n\n无文件").is_empty());
     }
 }
 
