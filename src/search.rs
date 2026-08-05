@@ -285,15 +285,48 @@ const LINK_STOPWORDS: &[&str] = &[
     "已经", "需要", "应该", "相关", "之后", "之前", "比如", "例如", "如果", "问题", "内容",
 ];
 
+/// 提取文本内已有的 [[双链]] 目标（归一化到文件名：去路径 / #小节 / .md 后缀）。
+/// 供调用方（补链建议/自动应用）排除"源文档已链接的目标"。
+pub(crate) fn existing_links(content: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut i = 0;
+    while let Some(rel) = content[i..].find("[[") {
+        let start = i + rel + 2;
+        let Some(end_rel) = content[start..].find("]]") else { break };
+        let target = content[start..start + end_rel].trim();
+        let name = target
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .split('/')
+            .last()
+            .unwrap_or("")
+            .trim_end_matches(".md");
+        if !name.is_empty() {
+            out.insert(name.to_string());
+        }
+        i = start + end_rel + 2;
+    }
+    out
+}
+
 /// 记忆关联建议：给定记忆条目文本，从 L2 notes/ 找相关文档（词重叠评分）。
 /// ASCII 词(≥3 含字母) + CJK 二元组（去停用词）做检索词；每文档统计「命中词数」与
 /// 总命中数，按命中词数降序、再按总命中降序；优先命中词数 ≥2 的文档（防通用词噪声），
-/// 不足再用 ≥1 的补到 limit。返回 top N——供写回 MEMORY 时生成「相关：[[双链]]」建议。
-pub fn suggest_links(root: &Path, content: &str, limit: usize) -> Result<Vec<SuggestLink>, String> {
+/// 不足再用 ≥1 的补到 limit。**截断前排除**：`exclude`（自链等）与源文本已含的 [[双链]]
+/// 目标——否则自链/已链接文档占掉 top N 名额，真相关文档被挤出。
+/// 返回 top N——供写回 MEMORY 时生成「相关：[[双链]]」建议。
+pub fn suggest_links(
+    root: &Path,
+    content: &str,
+    limit: usize,
+    exclude: &[String],
+) -> Result<Vec<SuggestLink>, String> {
     let terms = link_terms(content);
     if terms.is_empty() {
         return Ok(Vec::new());
     }
+    let existing = existing_links(content);
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     let notes = root.join("notes");
     // (路径, 命中词集合, 总命中数)
@@ -331,7 +364,16 @@ pub fn suggest_links(root: &Path, content: &str, limit: usize) -> Result<Vec<Sug
                 }
             }
             if !matched.is_empty() {
-                scored.push((rel, matched, hits));
+                let stem = std::path::Path::new(&rel)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&rel)
+                    .to_string();
+                if !exclude.iter().any(|e| e == &rel)
+                    && !existing.contains(&stem)
+                {
+                    scored.push((rel, matched, hits));
+                }
             }
         }
     }
@@ -428,7 +470,7 @@ mod tests {
         let root = tmp("links");
         std::fs::write(root.join("notes/架构/托盘应用.md"), "# 托盘应用\n托盘心跳 双链 CheckMenuItem 参数\n").unwrap();
         std::fs::write(root.join("notes/其它文档.md"), "# 其它\n无相关内容\n").unwrap();
-        let out = suggest_links(&root, "修了托盘心跳 CheckMenuItem 参数 bug", 3).unwrap();
+        let out = suggest_links(&root, "修了托盘心跳 CheckMenuItem 参数 bug", 3, &[]).unwrap();
         assert_eq!(out.len(), 1, "只应命中相关文档");
         assert!(out[0].path.ends_with("托盘应用.md"));
         assert!(out[0].matched.len() >= 2, "强关联应命中多个词");
@@ -439,8 +481,24 @@ mod tests {
     fn suggest_links_empty_on_no_match() {
         let root = tmp("links2");
         std::fs::write(root.join("notes/文档.md"), "# 文档\n只有不相关内容\n").unwrap();
-        let out = suggest_links(&root, "跟库里完全无关的话题讨论", 3).unwrap();
+        let out = suggest_links(&root, "跟库里完全无关的话题讨论", 3, &[]).unwrap();
         assert!(out.is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn suggest_links_excludes_before_truncate() {
+        let root = tmp("prex");
+        // 源内容提及甲/乙/丙；甲、乙 已链接，丙 未链接——且自链（源文档自身）存在
+        let content = "甲文档 相关 乙文档 相关 丙文档";
+        std::fs::write(root.join("notes/架构/甲文档.md"), "# 甲文档\n甲文档 乙文档 丙文档\n").unwrap();
+        std::fs::write(root.join("notes/架构/乙文档.md"), "# 乙文档\n乙文档 内容\n").unwrap();
+        std::fs::write(root.join("notes/丙文档.md"), "# 丙文档\n丙文档 内容\n").unwrap();
+        // 源内容自带 [[乙文档]]（已链接）；limit=1 时若排除发生在截断后，乙文档会占掉名额
+        let content_with_link = format!("{content} 见 [[乙文档]]。");
+        let out = suggest_links(&root, &content_with_link, 1, &["notes/架构/甲文档.md".to_string()]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out[0].path.ends_with("丙文档.md"), "排除应在截断前: {:?}", out[0].path);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -451,6 +509,13 @@ mod tests {
         assert!(!t.iter().any(|s| s.contains('？')), "不得含全角标点: {t:?}");
         assert!(t.iter().any(|s| s == "checkmenuitem" || s == "bug"), "ASCII 词应保留");
         assert!(t.iter().any(|s| s == "文档"), "中文二元组应保留");
+    }
+
+    #[test]
+    fn existing_links_parses_forms() {
+        let e = existing_links("看 [[甲]] 和 [[notes/架构/乙.md]]，还有 [[丙#小节]]。");
+        assert!(e.contains("甲") && e.contains("乙") && e.contains("丙"), "{e:?}");
+        assert_eq!(e.len(), 3, "不得混入多余目标: {e:?}");
     }
 
     #[test]

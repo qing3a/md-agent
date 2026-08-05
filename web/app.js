@@ -960,13 +960,20 @@
   };
 
   // 工具结果格式化（截断防超长；片段标注来源便于 LLM 引用）
-  // B1 读时整理旁路（fire-and-forget，不阻塞回答）：runTool 成功后上报读取路径 → 热度记账 + 规则层
+  // B1 读时整理旁路（fire-and-forget，不阻塞回答）：runTool 成功后上报读取路径 → 热度记账 + 规则层自动补链
   function touchMemory(query, paths) {
     if (!paths || !paths.length) return;
     fetch('/api/memory/touch', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query: query || '', paths: paths.slice(0, 5) }),
-    }).catch(() => {});
+    })
+      .then((r) => r.json())
+      .then((j) => {
+        if (j && j.applied && j.applied.length) {
+          term.writeln('\x1b[90m自组织：自动补链 ' + j.applied.length + ' 条（' + j.applied.join('、') + '）\x1b[0m');
+        }
+      })
+      .catch(() => {});
   }
 
   // 经验闭环 C1（审视层）：触发信号 → 后端 LLM 审视 → 经验提案进待审（fire-and-forget，零 token 触发）

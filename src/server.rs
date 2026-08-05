@@ -537,7 +537,10 @@ struct MemoryTouchBody {
 
 async fn memory_touch(State(st): State<AppState>, Json(b): Json<MemoryTouchBody>) -> Response {
     let paths = b.paths.unwrap_or_default();
-    let (mut heat, created) = apply_memory_touch(&st.kb_root, &paths);
+    // 自动补链会写文档，与 /api/link 共用互斥
+    let _guard = st.sync_lock.lock().await;
+    let (mut heat, created, applied) = apply_memory_touch(&st.kb_root, &paths);
+    drop(_guard);
     // B2 LLM 推理层（阈值 5 + 已配置 + 未做过）：后台分析热文档 → 矛盾/盲区/整合提案
     let cfg = crate::config::load();
     if !cfg.llm.endpoint.trim().is_empty() {
@@ -559,7 +562,7 @@ async fn memory_touch(State(st): State<AppState>, Json(b): Json<MemoryTouchBody>
         }
     }
     let _ = save_heat(&st.kb_root, &heat);
-    Json(json!({ "ok": true, "touched": paths.len(), "created": created })).into_response()
+    Json(json!({ "ok": true, "touched": paths.len(), "created": created, "applied": applied })).into_response()
 }
 
 /// B2 触发条件（纯函数）：notes/ 内容层 + 读满阈值 + 内容指纹未分析过
@@ -729,10 +732,35 @@ async fn analyze_hot_doc(root: &Path, rel: &str) {
     let _ = std::fs::write(&dst, body_text);
 }
 
-/// 纯逻辑：热度 +1、阈值触发规则层（补链建议进 pending）。返回更新后的 heat 与新建提案路径。
-fn apply_memory_touch(root: &Path, paths: &[String]) -> (Value, Vec<String>) {
+/// 纯同步：给 src_rel 文档追加 [[dst_stem]] 双链（已存在则跳过）。返回 Ok(Some(link_line)) 或 Ok(None)。
+/// 供 /api/link（人工）与读时整理规则层（自动补链）共用；调用方负责同步 INDEX/图谱与并发锁。
+fn apply_link_to_doc(root: &Path, src_rel: &str, dst_rel: &str) -> Result<Option<String>, String> {
+    let file = root.join(src_rel);
+    let mut content = std::fs::read_to_string(&file).map_err(|e| format!("读取源文档失败: {e}"))?;
+    // 双链约定用文件名（如 [[托盘应用]]），不用完整路径
+    let dst_stem = std::path::Path::new(dst_rel)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(dst_rel)
+        .to_string();
+    let link_line = format!("- 关联：[[{dst_stem}]]");
+    if content.contains(&link_line)
+        || content.contains(&format!("[[{dst_stem}]]"))
+        || content.contains(&format!("[[{dst_stem}.md]]"))
+    {
+        return Ok(None);
+    }
+    content = format!("{}\n\n{}", content.trim_end(), link_line);
+    std::fs::write(&file, content).map_err(|e| format!("写入失败: {e}"))?;
+    Ok(Some(link_line))
+}
+
+/// 纯逻辑：热度 +1、阈值触发规则层（补链建议**自动应用**，免人工确认——零语义元数据变更）。
+/// 返回 (更新后的 heat, 新建提案路径[恒空，规则层已自动化], 自动应用的双链行)。
+fn apply_memory_touch(root: &Path, paths: &[String]) -> (Value, Vec<String>, Vec<String>) {
     let mut heat = load_heat(root);
     let mut created: Vec<String> = Vec::new();
+    let mut applied: Vec<String> = Vec::new();
     let now = chrono::Local::now().timestamp();
     for p in paths {
         let rel = p.trim().trim_start_matches('/');
@@ -749,32 +777,27 @@ fn apply_memory_touch(root: &Path, paths: &[String]) -> (Value, Vec<String>) {
                 e["fp"] = json!(simple_fp(&c));
             }
         }
-        // 规则层（仅 L2 内容层 notes/，且读满阈值 + 内容指纹变化）：补链建议进 pending（人工 /link 应用）
+        // 规则层（仅 L2 内容层 notes/，且读满阈值 + 内容指纹变化）：自动补链（排除自链与已有双链）
         let count = e["read_count"].as_u64().unwrap_or(0);
         let cur_fp = e["fp"].as_str().unwrap_or("").to_string();
         let organized_fp = e.get("organized_fp").and_then(Value::as_str).unwrap_or("");
         if count >= HEAT_THRESHOLD && organized_fp != cur_fp && rel.starts_with("notes/") {
             if let Some(fb) = crate::kb::resolve_in_kb(root, rel) {
                 if let Ok(content) = std::fs::read_to_string(&fb) {
-                    if let Ok(links) = crate::search::suggest_links(root, &content, 3) {
-                        // 过滤自链（文档内容提及自身文件名属正常，非补链目标）
-                        let links: Vec<_> = links.into_iter().filter(|l| l.path != rel).collect();
-                        if !links.is_empty() {
-                            let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-                            let safe = rel_to_safe(rel);
-                            let ppath = format!("pending/notes/自组织/补链建议-{}-{}.md", date, safe);
-                            let dst = root.join(&ppath);
-                            if !dst.exists() {
-                                let body = format!(
-                                    "---\ntype: link-suggestion\nsource: {rel}\ndate: {date}\n---\n\n# 补链建议\n\n检测到 `{rel}` 被频繁读取（{count} 次），建议补链：\n\n{}\n\n（人工用 /link <源> <目标> 应用，或 /link-all 一键应用）\n",
-                                    links.iter().map(|l| format!("- [[{}]]", l.path)).collect::<Vec<_>>().join("\n")
-                                );
-                                if let Some(parent) = dst.parent() {
-                                    let _ = std::fs::create_dir_all(parent);
-                                }
-                                if std::fs::write(&dst, body).is_ok() {
-                                    created.push(ppath);
-                                }
+                    // 截断前排除自链与已有双链（suggest_links 内部），不占 top N 名额
+                    if let Ok(links) = crate::search::suggest_links(root, &content, 3, &[rel.to_string()]) {
+                        for l in links {
+                            if let Ok(Some(link)) = apply_link_to_doc(root, rel, &l.path) {
+                                applied.push(link);
+                            }
+                        }
+                        if !applied.is_empty() {
+                            e["auto_linked"] = json!(now); // 审计：heat 条目标记最近自动补链
+                            let _ = crate::kb::sync_index(root);
+                            let _ = crate::graph::sync_graph(root);
+                            // organized_fp 用应用后的新指纹，防下次 touch 立即重跑
+                            if let Ok(new_c) = std::fs::read_to_string(&fb) {
+                                e["organized_fp"] = json!(simple_fp(&new_c));
                             }
                         }
                     }
@@ -784,7 +807,7 @@ fn apply_memory_touch(root: &Path, paths: &[String]) -> (Value, Vec<String>) {
         }
         heat["paths"][rel] = e;
     }
-    (heat, created)
+    (heat, created, applied)
 }
 
 async fn memory_heat(State(st): State<AppState>) -> Json<Value> {
@@ -1250,7 +1273,17 @@ async fn audit_report(State(st): State<AppState>) -> Response {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
     }
     match crate::graph::audit(&st.kb_root) {
-        Ok(r) => Json(r).into_response(),
+        Ok(r) => {
+            let mut v = serde_json::to_value(&r).unwrap_or_else(|_| json!({}));
+            // 自组织审计：最近被自动补链的文档数（读时整理规则层标记，前端审计徽标可见）
+            let heat = load_heat(&st.kb_root);
+            let n = heat["paths"]
+                .as_object()
+                .map(|m| m.values().filter(|x| x.get("auto_linked").is_some()).count())
+                .unwrap_or(0);
+            v["auto_links"] = json!(n);
+            Json(v).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
 }
@@ -1294,30 +1327,20 @@ async fn link_add(State(st): State<AppState>, Json(body): Json<LinkBody>) -> Res
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "不能链接到自身" }))).into_response();
     }
 
-    let file = st.kb_root.join(&src);
-    let Ok(mut content) = tokio::fs::read_to_string(&file).await else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "读取源文档失败" }))).into_response();
-    };
-    // 双链约定用文件名（如 [[托盘应用]]），不用完整路径
-    let dst_stem = std::path::Path::new(&dst)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(&dst)
-        .to_string();
-    let link_line = format!("- 关联：[[{dst_stem}]]");
-    if content.contains(&link_line)
-        || content.contains(&format!("[[{dst_stem}]]"))
-        || content.contains(&format!("[[{dst_stem}.md]]"))
-    {
-        return Json(json!({ "ok": false, "note": "链接已存在", "src": src, "dst": dst })).into_response();
+    // 写文档复用公共函数（人工 /link 与读时整理自动补链同一条写路径）
+    match apply_link_to_doc(&st.kb_root, &src, &dst) {
+        Ok(Some(link_line)) => {
+            let _ = crate::kb::sync_index(&st.kb_root);
+            let _ = crate::graph::sync_graph(&st.kb_root);
+            Json(json!({ "ok": true, "src": src, "dst": dst, "link": link_line })).into_response()
+        }
+        Ok(None) => Json(json!({ "ok": false, "note": "链接已存在", "src": src, "dst": dst })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        )
+            .into_response(),
     }
-    content = format!("{}\n\n{}", content.trim_end(), link_line);
-    if let Err(e) = tokio::fs::write(&file, content).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
-    }
-    let _ = crate::kb::sync_index(&st.kb_root);
-    let _ = crate::graph::sync_graph(&st.kb_root);
-    Json(json!({ "ok": true, "src": src, "dst": dst, "link": link_line })).into_response()
 }
 
 /// 记忆关联建议（记忆断链修复 B）：给定记忆条目文本，返回相关 L2 文档（词重叠评分，
@@ -1328,7 +1351,7 @@ struct LinkSuggestBody {
 }
 
 async fn link_suggest(State(st): State<AppState>, Json(body): Json<LinkSuggestBody>) -> Response {
-    match crate::search::suggest_links(&st.kb_root, &body.content, 3) {
+    match crate::search::suggest_links(&st.kb_root, &body.content, 3, &[]) {
         Ok(links) => Json(json!({ "ok": true, "links": links })).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1867,34 +1890,37 @@ mod app_data_tests {
     fn memory_touch_heat_and_rule_threshold() {
         let root = temp_root("heatt");
         crate::kb::ensure_layout(&root).unwrap();
-        // 两个文档：A 提及 B 的标题但未链接 → suggest_links 应给出建议
+        // 三个文档：A 提及 B 和 C 但未链接 → 规则层自动补链（不再写 pending 提案）
         let notes = root.join("notes").join("架构");
         std::fs::create_dir_all(&notes).unwrap();
-        std::fs::write(notes.join("托盘应用.md"), "# 托盘应用\n\n托盘是 Rust 常驻 + Axum。").unwrap();
-        std::fs::write(notes.join("记忆统一模型.md"), "# 记忆统一模型\n\n双链是记忆的签名。").unwrap();
+        std::fs::write(notes.join("托盘应用.md"), "# 托盘应用\n\n托盘是 Rust 常驻应用 + Axum。").unwrap();
+        std::fs::write(notes.join("记忆统一模型.md"), "# 记忆统一模型\n\n双链是记忆的签名，统一模型。").unwrap();
         std::fs::write(notes.join("无向量库检索.md"), "# 无向量库检索\n\n托盘应用 与 记忆统一模型 相关。").unwrap();
         let path = "notes/架构/无向量库检索.md".to_string();
-        // 3 次 touch → 热度 3 + 触发规则层（补链建议进 pending）；每次保存（模拟 handler 行为）
+        // 3 次 touch → 热度 3 + 触发规则层（自动补链）；每次保存（模拟 handler 行为）
         for i in 0..3 {
-            let (heat, created) = apply_memory_touch(&root, &[path.clone()]);
+            let (heat, created, applied) = apply_memory_touch(&root, &[path.clone()]);
             save_heat(&root, &heat).unwrap();
             assert_eq!(heat["paths"][&path]["read_count"].as_u64().unwrap(), i as u64 + 1);
             if i == 2 {
-                // 第 3 次触发阈值：suggest_links 有命中 → 提案；无命中（无提及未链接）→ organized_fp 已设
-                if created.is_empty() {
-                    assert!(heat["paths"][&path].get("organized_fp").is_some());
-                } else {
-                    assert!(!created.is_empty());
-                }
+                // 第 3 次触发阈值：自动应用补链；organized_fp 已设（应用后指纹防重跑）
+                assert!(!applied.is_empty(), "应自动补链: {applied:?}");
+                assert!(created.is_empty(), "规则层不再写提案");
+                assert!(heat["paths"][&path].get("organized_fp").is_some());
+                assert!(heat["paths"][&path].get("auto_linked").is_some(), "应有审计标记");
             }
         }
-        // 第 4 次 touch（内容未变）→ 不重复提案
-        let (_, created4) = apply_memory_touch(&root, &[path.clone()]);
-        assert!(created4.is_empty());
+        // 文档已被自动补链
+        let content = std::fs::read_to_string(notes.join("无向量库检索.md")).unwrap();
+        assert!(content.contains("[[托盘应用]]"), "应自动补链托盘应用");
+        assert!(content.contains("[[记忆统一模型]]"), "应自动补链记忆统一模型");
+        // 第 4 次 touch（内容未变）→ 不重复应用（organized_fp 已同步）
+        let (_, _, applied4) = apply_memory_touch(&root, &[path.clone()]);
+        assert!(applied4.is_empty(), "幂等：不得重复应用: {applied4:?}");
         // 非 notes/ 路径（L1）只记热度不触发规则层
-        let (heat2, created2) = apply_memory_touch(&root, &["MEMORY.md".to_string()]);
+        let (heat2, created2, applied2) = apply_memory_touch(&root, &["MEMORY.md".to_string()]);
         assert_eq!(heat2["paths"]["MEMORY.md"]["read_count"].as_u64().unwrap(), 1);
-        assert!(created2.is_empty());
+        assert!(created2.is_empty() && applied2.is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1938,24 +1964,28 @@ mod app_data_tests {
     }
 
     #[test]
-    fn link_suggestion_excludes_self() {
+    fn auto_link_excludes_self_is_idempotent() {
         let root = temp_root("selflink");
         crate::kb::ensure_layout(&root).unwrap();
         let notes = root.join("notes").join("架构");
         std::fs::create_dir_all(&notes).unwrap();
-        // 文档内容提及自身文件名（应被过滤）和其他文档（应保留）
+        // 文档内容提及自身文件名（应被过滤）和其他文档（应保留且自动应用）
         std::fs::write(notes.join("甲文档.md"), "# 甲文档\n\n甲文档 与 乙文档 相关。\n").unwrap();
-        std::fs::write(notes.join("乙文档.md"), "# 乙文档\n\n内容。\n").unwrap();
+        std::fs::write(notes.join("乙文档.md"), "# 乙文档\n\n乙文档 内容。\n").unwrap();
         let path = "notes/架构/甲文档.md".to_string();
-        for _ in 0..3 {
-            let (heat, created) = apply_memory_touch(&root, &[path.clone()]);
+        let mut total_applied = 0;
+        for i in 0..4 {
+            let (heat, _, applied) = apply_memory_touch(&root, &[path.clone()]);
             save_heat(&root, &heat).unwrap();
-            if !created.is_empty() {
-                let body = std::fs::read_to_string(root.join(&created[0])).unwrap();
-                assert!(body.contains("[[notes/架构/乙文档.md]]"), "应保留非自链目标");
-                assert!(!body.contains("[[notes/架构/甲文档.md]]"), "不应包含自链");
+            total_applied += applied.len();
+            if i >= 3 {
+                assert!(applied.is_empty(), "幂等：第 4 次不得重复应用: {applied:?}");
             }
         }
+        assert_eq!(total_applied, 1, "应只自动应用一次");
+        let content = std::fs::read_to_string(notes.join("甲文档.md")).unwrap();
+        assert!(content.contains("[[乙文档]]"), "应自动补链乙文档");
+        assert!(!content.contains("[[甲文档]]"), "不应包含自链");
         let _ = std::fs::remove_dir_all(&root);
     }
 
