@@ -7,7 +7,7 @@ use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,6 +50,12 @@ pub async fn serve(
         .route("/api/file", get(file_read))
         .route("/api/file", post(file_write))
         .route("/api/sessions", get(sessions_list))
+        .route("/api/memory/touch", post(memory_touch))
+        .route("/api/memory/heat", get(memory_heat))
+        .route("/api/experience/propose", post(experience_propose))
+        .route("/api/dev/read", get(dev_read))
+        .route("/api/dev/status", get(dev_status))
+        .route("/api/dev/diff", get(dev_diff))
         .route("/api/kb/sync", post(kb_sync))
         .route("/api/kb/pending", get(kb_pending_list))
         .route("/api/kb/pending/preview", get(kb_pending_preview))
@@ -189,6 +195,28 @@ fn tools_json() -> Value {
                 {"name": "hub_url", "type": "string", "required": true, "desc": "hub 索引 URL，如 https://skillhub.cn/install/skillhub.md"}
             ],
             "example": "{\"hub_url\":\"https://skillhub.cn/install/skillhub.md\"}"
+        },
+        {
+            "name": "dev.read",
+            "desc": "读取项目自身源码（src/web/scripts/Cargo.toml/README.md/.zcode/plans，白名单内）——回答涉及本项目代码实现、需要查阅自身源码时使用",
+            "params": [
+                {"name": "path", "type": "string", "required": true, "desc": "项目根相对路径，如 src/server.rs 或 web/app.js"}
+            ],
+            "example": "{\"path\":\"src/server.rs\"}"
+        },
+        {
+            "name": "dev.status",
+            "desc": "查看项目 git 工作区状态（git status --short，只读）",
+            "params": [],
+            "example": "{}"
+        },
+        {
+            "name": "dev.diff",
+            "desc": "查看项目未提交改动 diff（git diff，只读；可选 path 限定单文件）",
+            "params": [
+                {"name": "path", "type": "string", "required": false, "desc": "限定文件路径，如 src/server.rs；空=全部"}
+            ],
+            "example": "{\"path\":\"src/server.rs\"}"
         }
     ])
 }
@@ -449,6 +477,447 @@ fn parse_session_frontmatter(head: &str, id: &str) -> (String, String, u64, Stri
         }
     }
     (title, status, count, date)
+}
+
+// ---------- 读时整理（B1）：热度 + 规则层（零 LLM，fire-and-forget 旁路） ----------
+// kb/.memory-heat.json 三排除：json 非 md，天然不入图谱/检索/指纹。
+// 触发：前端 runTool 成功后旁路 touch；规则层只在「读满阈值且内容指纹变化」时跑一次（防噪音/防重复）
+const HEAT_THRESHOLD: u64 = 3;
+const LLM_HEAT_THRESHOLD: u64 = 5; // B2：读满 5 次 → LLM 推理层（矛盾/盲区/整合）
+
+fn heat_path(root: &Path) -> PathBuf {
+    root.join(".memory-heat.json")
+}
+
+fn load_heat(root: &Path) -> Value {
+    std::fs::read_to_string(heat_path(root))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({ "paths": {} }))
+}
+
+fn save_heat(root: &Path, v: &Value) -> Result<(), String> {
+    std::fs::write(heat_path(root), serde_json::to_string_pretty(v).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
+}
+
+/// djb2 内容指纹（与前端 fpOf 同构；规则层"内容变了才重新整理"的判据）
+fn simple_fp(s: &str) -> String {
+    let mut h: u64 = 5381;
+    for b in s.bytes() {
+        h = (h.wrapping_mul(33)).wrapping_add(b as u64);
+    }
+    format!("{:x}", h)
+}
+
+#[derive(Deserialize)]
+struct MemoryTouchBody {
+    query: Option<String>,
+    paths: Option<Vec<String>>,
+}
+
+async fn memory_touch(State(st): State<AppState>, Json(b): Json<MemoryTouchBody>) -> Response {
+    let paths = b.paths.unwrap_or_default();
+    let (mut heat, created) = apply_memory_touch(&st.kb_root, &paths);
+    // B2 LLM 推理层（阈值 5 + 已配置 + 未做过）：后台分析热文档 → 矛盾/盲区/整合提案
+    let cfg = crate::config::load();
+    if !cfg.llm.endpoint.trim().is_empty() {
+        for p in &paths {
+            let rel = p.trim().trim_start_matches('/');
+            if rel.is_empty() || !rel.starts_with("notes/") {
+                continue;
+            }
+            let e = heat["paths"].get(rel).cloned().unwrap_or_default();
+            let count = e["read_count"].as_u64().unwrap_or(0);
+            let fp = e["fp"].as_str().unwrap_or("").to_string();
+            if should_run_llm_analysis(&heat, rel, count, &fp) {
+                // 先标记防重复（后台任务只写提案，不再动 heat）
+                heat["paths"][rel]["organized_llm_fp"] = json!(fp);
+                let root = st.kb_root.clone();
+                let rel2 = rel.to_string();
+                tokio::spawn(async move { analyze_hot_doc(&root, &rel2).await });
+            }
+        }
+    }
+    let _ = save_heat(&st.kb_root, &heat);
+    Json(json!({ "ok": true, "touched": paths.len(), "created": created })).into_response()
+}
+
+/// B2 触发条件（纯函数）：notes/ 内容层 + 读满阈值 + 内容指纹未分析过
+fn should_run_llm_analysis(heat: &Value, rel: &str, count: u64, fp: &str) -> bool {
+    if !rel.starts_with("notes/") || count < LLM_HEAT_THRESHOLD {
+        return false;
+    }
+    let done = heat["paths"].get(rel).and_then(|v| v.get("organized_llm_fp")).and_then(Value::as_str).unwrap_or("");
+    done != fp
+}
+
+/// 从 LLM 输出提取 JSON（容忍 ```json 包裹、前后文字；括号配对截取）
+fn extract_json_from_text(text: &str) -> Option<Value> {
+    let t = text.trim();
+    let inner = if t.starts_with("```") {
+        t.trim_start_matches("```")
+            .trim_start_matches("json")
+            .trim()
+            .trim_end_matches("```")
+            .trim()
+    } else {
+        t
+    };
+    let start = inner.find('{')?;
+    // 括号配对：找到匹配的 }（跳过字符串内的括号）
+    let bytes = inner[start..].as_bytes();
+    let mut depth = 0i32;
+    let mut end = 0usize;
+    let mut in_str = false;
+    let mut esc = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if esc {
+            esc = false;
+            continue;
+        }
+        if b == b'\\' && in_str {
+            esc = true;
+            continue;
+        }
+        if b == b'"' {
+            in_str = !in_str;
+            continue;
+        }
+        if in_str {
+            continue;
+        }
+        if b == b'{' {
+            depth += 1;
+        } else if b == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                end = i + 1;
+                break;
+            }
+        }
+    }
+    if end == 0 {
+        return None;
+    }
+    serde_json::from_str(&inner[start..start + end]).ok()
+}
+
+/// B2 后台任务：LLM 分析热文档 + 同目录相关文档（矛盾/盲区/整合）→ 提案进 pending/notes/自组织/
+async fn analyze_hot_doc(root: &Path, rel: &str) {
+    let Some(fb) = crate::kb::resolve_in_kb(root, rel) else { return };
+    let Ok(main) = std::fs::read_to_string(&fb) else { return };
+    // 相关文档：同目录 .md（排除自身，最多 3 个，各取 2000 字符）
+    let mut related = String::new();
+    if let Some(parent) = fb.parent() {
+        if let Ok(rd) = std::fs::read_dir(parent) {
+            let mut n = 0;
+            for e in rd.flatten() {
+                if n >= 3 {
+                    break;
+                }
+                let p = e.path();
+                if p == fb || p.extension().and_then(|x| x.to_str()) != Some("md") {
+                    continue;
+                }
+                if let Ok(c) = std::fs::read_to_string(&p) {
+                    if let Some(name) = p.file_name().and_then(|x| x.to_str()) {
+                        related.push_str(&format!("### {name}\n{}\n\n", c.chars().take(2000).collect::<String>()));
+                        n += 1;
+                    }
+                }
+            }
+        }
+    }
+    let cfg = crate::config::load();
+    let system = "你是知识库自组织分析器。分析主文档及其同目录相关文档，找出：\n\
+        1. conflicts：文档间互相冲突的表述\n\
+        2. gaps：该主题明显缺失、值得补充的知识点\n\
+        3. merges：重复/碎片可合并的文档\n\
+        只输出 JSON（不要其它文字）：{\"conflicts\":[{\"a\":\"文档A\",\"b\":\"文档B\",\"note\":\"冲突说明\"}],\"gaps\":[{\"topic\":\"缺什么\",\"why\":\"为什么值得补\"}],\"merges\":[{\"docs\":[\"a.md\",\"b.md\"],\"why\":\"合并理由\"}]}\n\
+        没有发现则对应数组为空。";
+    let user = format!(
+        "### 主文档 {rel}\n{}\n\n### 相关文档\n{}",
+        main.chars().take(4000).collect::<String>(),
+        related
+    );
+    let body = serde_json::json!({ "messages": [
+        { "role": "system", "content": system },
+        { "role": "user", "content": user },
+    ]});
+    let Ok(resp) = crate::llm::chat(&cfg.llm.endpoint, &cfg.llm.model, &cfg.llm.api_key, body).await else { return };
+    let full = resp["choices"][0]["message"]["content"].as_str().unwrap_or("");
+    let Some(v) = extract_json_from_text(full) else { return };
+    let conflicts: Vec<Value> = v["conflicts"].as_array().cloned().unwrap_or_default();
+    let gaps: Vec<Value> = v["gaps"].as_array().cloned().unwrap_or_default();
+    let merges: Vec<Value> = v["merges"].as_array().cloned().unwrap_or_default();
+    if conflicts.is_empty() && gaps.is_empty() && merges.is_empty() {
+        return;
+    }
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let safe = rel.replace(['/', '\\'], "_");
+    let ppath = format!("pending/notes/自组织/推理建议-{}-{}.md", date, safe);
+    let dst = root.join(&ppath);
+    if dst.exists() {
+        return;
+    }
+    let mut body_text = format!("# 读时推理建议\n\n> 来源：`{rel}` 被高频读取触发的 LLM 分析（派生产物，人工核对）\n\n");
+    if !conflicts.is_empty() {
+        body_text.push_str("\n## 矛盾\n");
+        for c in &conflicts {
+            body_text.push_str(&format!(
+                "- **{}** vs **{}**：{}\n",
+                c["a"].as_str().unwrap_or("?"),
+                c["b"].as_str().unwrap_or("?"),
+                c["note"].as_str().unwrap_or("")
+            ));
+        }
+    }
+    if !gaps.is_empty() {
+        body_text.push_str("\n## 盲区\n");
+        for g in &gaps {
+            body_text.push_str(&format!(
+                "- **{}**：{}\n",
+                g["topic"].as_str().unwrap_or("?"),
+                g["why"].as_str().unwrap_or("")
+            ));
+        }
+    }
+    if !merges.is_empty() {
+        body_text.push_str("\n## 整合建议\n");
+        for m in &merges {
+            let docs = m["docs"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .map(|d| d.as_str().unwrap_or("?").to_string())
+                .collect::<Vec<_>>()
+                .join("、");
+            body_text.push_str(&format!("- `{docs}`：{}\n", m["why"].as_str().unwrap_or("")));
+        }
+    }
+    if let Some(parent) = dst.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&dst, body_text);
+}
+
+/// 纯逻辑：热度 +1、阈值触发规则层（补链建议进 pending）。返回更新后的 heat 与新建提案路径。
+fn apply_memory_touch(root: &Path, paths: &[String]) -> (Value, Vec<String>) {
+    let mut heat = load_heat(root);
+    let mut created: Vec<String> = Vec::new();
+    let now = chrono::Local::now().timestamp();
+    for p in paths {
+        let rel = p.trim().trim_start_matches('/');
+        if rel.is_empty() {
+            continue;
+        }
+        let mut e = heat["paths"].get(rel).cloned().unwrap_or_else(|| {
+            json!({ "read_count": 0, "last_read": 0, "fp": "" })
+        });
+        e["read_count"] = json!(e["read_count"].as_u64().unwrap_or(0) + 1);
+        e["last_read"] = json!(now);
+        if let Some(fb) = crate::kb::resolve_in_kb(root, rel) {
+            if let Ok(c) = std::fs::read_to_string(&fb) {
+                e["fp"] = json!(simple_fp(&c));
+            }
+        }
+        // 规则层（仅 L2 内容层 notes/，且读满阈值 + 内容指纹变化）：补链建议进 pending（人工 /link 应用）
+        let count = e["read_count"].as_u64().unwrap_or(0);
+        let cur_fp = e["fp"].as_str().unwrap_or("").to_string();
+        let organized_fp = e.get("organized_fp").and_then(Value::as_str).unwrap_or("");
+        if count >= HEAT_THRESHOLD && organized_fp != cur_fp && rel.starts_with("notes/") {
+            if let Some(fb) = crate::kb::resolve_in_kb(root, rel) {
+                if let Ok(content) = std::fs::read_to_string(&fb) {
+                    if let Ok(links) = crate::search::suggest_links(root, &content, 3) {
+                        if !links.is_empty() {
+                            let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+                            let safe = rel.replace(['/', '\\'], "_");
+                            let ppath = format!("pending/notes/自组织/补链建议-{}-{}.md", date, safe);
+                            let dst = root.join(&ppath);
+                            if !dst.exists() {
+                                let body = format!(
+                                    "---\ntype: link-suggestion\nsource: {rel}\ndate: {date}\n---\n\n# 补链建议\n\n检测到 `{rel}` 被频繁读取（{count} 次），建议补链：\n\n{}\n\n（人工用 /link <源> <目标> 应用，或 /link-all 一键应用）\n",
+                                    links.iter().map(|l| format!("- [[{}]]", l.path)).collect::<Vec<_>>().join("\n")
+                                );
+                                if let Some(parent) = dst.parent() {
+                                    let _ = std::fs::create_dir_all(parent);
+                                }
+                                if std::fs::write(&dst, body).is_ok() {
+                                    created.push(ppath);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            e["organized_fp"] = json!(cur_fp);
+        }
+        heat["paths"][rel] = e;
+    }
+    (heat, created)
+}
+
+async fn memory_heat(State(st): State<AppState>) -> Json<Value> {
+    Json(load_heat(&st.kb_root))
+}
+
+// ---------- 经验闭环 C1（审视层）：触发信号 → LLM 审视 → 经验提案进 pending ----------
+// 信号源：前端纠错关键词（correction）/ 工具失败（tool_failure）；零 token 触发，LLM 只在信号出现时调用一次
+
+#[derive(Deserialize)]
+struct ExperienceProposeBody {
+    signal: Option<String>,
+    context: Option<String>,
+}
+
+async fn experience_propose(State(st): State<AppState>, Json(b): Json<ExperienceProposeBody>) -> Response {
+    let signal = b.signal.unwrap_or_default();
+    let context = b.context.unwrap_or_default();
+    if signal.is_empty() || context.is_empty() {
+        return Json(json!({ "ok": false, "error": "缺 signal/context" })).into_response();
+    }
+    // 防刷：同信号高频忽略（简单记录，不重复提案）
+    let cfg = crate::config::load();
+    if cfg.llm.endpoint.trim().is_empty() {
+        // 无 LLM：规则占位提案（信号本身即记录）
+        let created = write_experience_proposal(&st.kb_root, &signal, &context, None);
+        return Json(json!({ "ok": true, "created": created })).into_response();
+    }
+    let root = st.kb_root.clone();
+    let signal2 = signal.clone();
+    let context2 = context.clone();
+    tokio::spawn(async move {
+        let system = "你是经验审视器。基于以下摩擦信号判断是否值得沉淀为经验，只输出 JSON：\
+            {\"worth\":true或false,\"type\":\"memory|behavior|code\",\"problem\":\"问题描述（≤80字）\",\"improve\":\"改进建议（≤120字）\"}\n\
+            只有真实摩擦（用户纠错/工具失败/反复踩坑）才 worth=true；泛泛的抱怨不算。";
+        let user = format!("信号：{signal2}\n上下文：{context2}");
+        let body = serde_json::json!({ "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": user },
+        ]});
+        if let Ok(resp) = crate::llm::chat(&cfg.llm.endpoint, &cfg.llm.model, &cfg.llm.api_key, body).await {
+            let full = resp["choices"][0]["message"]["content"].as_str().unwrap_or("");
+            if let Some(v) = extract_json_from_text(full) {
+                if v["worth"].as_bool().unwrap_or(false) {
+                    let _ = write_experience_proposal(&root, &signal2, &context2, Some(&v));
+                }
+            }
+        }
+    });
+    Json(json!({ "ok": true, "created": 0, "async": true })).into_response()
+}
+
+/// 写经验提案：LLM 审视结果（Some）或规则占位（None）。返回提案路径（空=未写）
+fn write_experience_proposal(root: &Path, signal: &str, context: &str, review: Option<&Value>) -> Option<String> {
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let safe = format!("{}-{}", date, simple_fp(&format!("{signal}:{context}")).chars().take(8).collect::<String>());
+    let ppath = format!("pending/notes/自组织/经验-{safe}.md");
+    let dst = root.join(&ppath);
+    if dst.exists() {
+        return None;
+    }
+    let (typ, problem, improve) = match review {
+        Some(v) => (
+            v["type"].as_str().unwrap_or("behavior").to_string(),
+            v["problem"].as_str().unwrap_or("").to_string(),
+            v["improve"].as_str().unwrap_or("").to_string(),
+        ),
+        None => ("behavior".to_string(), "疑似摩擦信号（未配置 LLM，规则占位）".to_string(), "待人工判断".to_string()),
+    };
+    let body = format!(
+        "---\ntype: experience\nsignal: {signal}\ndate: {date}\n---\n\n# 经验提案\n\n- 类型：{typ}\n- 信号：{signal}\n- 问题：{problem}\n- 改进：{improve}\n- 上下文：{context}\n"
+    );
+    if let Some(parent) = dst.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::write(&dst, body).is_ok() {
+        Some(ppath)
+    } else {
+        None
+    }
+}
+
+// ---------- C0 dev 工具链（自我开发执行层：让 agent 能读自己代码） ----------
+// 项目根 = 服务进程 CWD（cargo run 从项目根启动）；dev.read 白名单目录 + 路径规范化防逃逸（复用 resolve_in_kb 锚定项目根）
+fn dev_project_root() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    if cwd.join("Cargo.toml").is_file() {
+        Some(cwd)
+    } else {
+        // exe 旁（release dist/ 场景，向上找 Cargo.toml 到项目根）
+        let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+        let mut cur = Some(exe_dir.as_path());
+        while let Some(d) = cur {
+            if d.join("Cargo.toml").is_file() {
+                return Some(d.to_path_buf());
+            }
+            cur = d.parent();
+        }
+        None
+    }
+}
+
+fn is_dev_allowed(rel: &str) -> bool {
+    rel == "Cargo.toml" || rel == "README.md" || rel == ".gitignore"
+        || rel.starts_with("src/") || rel.starts_with("web/") || rel.starts_with("scripts/")
+        || rel.starts_with(".zcode/plans/")
+}
+
+async fn dev_read(Query(p): Query<FileParams>) -> Response {
+    let Some(root) = dev_project_root() else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "无法定位项目根" }))).into_response();
+    };
+    let rel = p.path.trim().trim_start_matches(['/', '\\']);
+    if !is_dev_allowed(rel) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": "路径不在 dev 白名单内（src/web/scripts/Cargo.toml/README.md/.zcode/plans）" }))).into_response();
+    }
+    match crate::kb::resolve_in_kb(&root, rel) {
+        Some(pb) if pb.is_file() => match tokio::fs::read_to_string(&pb).await {
+            Ok(content) => Json(json!({ "path": rel, "content": content })).into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        },
+        _ => (StatusCode::NOT_FOUND, Json(json!({ "error": "文件不存在或超出项目根" }))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct DevDiffParams {
+    #[serde(default)]
+    path: String,
+}
+
+fn git_capture(args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .output()
+        .map_err(|e| format!("git 执行失败: {e}"))?;
+    let mut s = String::from_utf8_lossy(&out.stdout).to_string();
+    if !out.stderr.is_empty() {
+        s.push_str(&String::from_utf8_lossy(&out.stderr));
+    }
+    Ok(s)
+}
+
+async fn dev_status() -> Response {
+    match git_capture(&["status", "--short"]) {
+        Ok(out) => Json(json!({ "ok": true, "output": out })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+async fn dev_diff(Query(q): Query<DevDiffParams>) -> Response {
+    let args: Vec<String> = if q.path.trim().is_empty() {
+        vec!["diff".to_string()]
+    } else {
+        vec!["diff".to_string(), "--".to_string(), q.path.trim().to_string()]
+    };
+    let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+    match git_capture(&args_ref) {
+        Ok(out) => Json(json!({ "ok": true, "output": out })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
 }
 
 async fn kb_sync(State(st): State<AppState>) -> Response {
@@ -1195,6 +1664,71 @@ mod app_data_tests {
         assert_eq!(t3, "2026-08-04-154440");
         assert_eq!(s3, "archived");
     }
+
+    #[test]
+    fn memory_touch_heat_and_rule_threshold() {
+        let root = temp_root("heatt");
+        crate::kb::ensure_layout(&root).unwrap();
+        // 两个文档：A 提及 B 的标题但未链接 → suggest_links 应给出建议
+        let notes = root.join("notes").join("架构");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::write(notes.join("托盘应用.md"), "# 托盘应用\n\n托盘是 Rust 常驻 + Axum。").unwrap();
+        std::fs::write(notes.join("记忆统一模型.md"), "# 记忆统一模型\n\n双链是记忆的签名。").unwrap();
+        std::fs::write(notes.join("无向量库检索.md"), "# 无向量库检索\n\n托盘应用 与 记忆统一模型 相关。").unwrap();
+        let path = "notes/架构/无向量库检索.md".to_string();
+        // 3 次 touch → 热度 3 + 触发规则层（补链建议进 pending）；每次保存（模拟 handler 行为）
+        for i in 0..3 {
+            let (heat, created) = apply_memory_touch(&root, &[path.clone()]);
+            save_heat(&root, &heat).unwrap();
+            assert_eq!(heat["paths"][&path]["read_count"].as_u64().unwrap(), i as u64 + 1);
+            if i == 2 {
+                // 第 3 次触发阈值：suggest_links 有命中 → 提案；无命中（无提及未链接）→ organized_fp 已设
+                if created.is_empty() {
+                    assert!(heat["paths"][&path].get("organized_fp").is_some());
+                } else {
+                    assert!(!created.is_empty());
+                }
+            }
+        }
+        // 第 4 次 touch（内容未变）→ 不重复提案
+        let (_, created4) = apply_memory_touch(&root, &[path.clone()]);
+        assert!(created4.is_empty());
+        // 非 notes/ 路径（L1）只记热度不触发规则层
+        let (heat2, created2) = apply_memory_touch(&root, &["MEMORY.md".to_string()]);
+        assert_eq!(heat2["paths"]["MEMORY.md"]["read_count"].as_u64().unwrap(), 1);
+        assert!(created2.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn llm_analysis_trigger_and_json_extract() {
+        // should_run_llm_analysis：阈值 + notes/ + organized_llm_fp 防重复
+        let heat = serde_json::json!({
+            "paths": {
+                "notes/a.md": { "read_count": 5, "fp": "f1", "organized_llm_fp": "f1" },
+                "notes/b.md": { "read_count": 5, "fp": "f2" },
+                "notes/c.md": { "read_count": 3, "fp": "f3" },
+                "MEMORY.md": { "read_count": 9, "fp": "f4" },
+            }
+        });
+        assert!(!should_run_llm_analysis(&heat, "notes/a.md", 5, "f1")); // 已分析（同 fp）
+        assert!(should_run_llm_analysis(&heat, "notes/b.md", 5, "f2")); // 未分析
+        assert!(!should_run_llm_analysis(&heat, "notes/b.md", 4, "f2")); // 未达阈值
+        assert!(!should_run_llm_analysis(&heat, "notes/c.md", 3, "f3")); // 阈值 5
+        assert!(!should_run_llm_analysis(&heat, "MEMORY.md", 9, "f4")); // 非 notes/
+        // extract_json_from_text：纯 JSON / ```json 包裹 / 前后文字
+        let j1 = extract_json_from_text(r#"{"conflicts":[],"gaps":[],"merges":[]}"#).unwrap();
+        assert_eq!(j1["conflicts"].as_array().unwrap().len(), 0);
+        let j2 = extract_json_from_text("```json\n{\"gaps\":[{\"topic\":\"x\"}]}\n```").unwrap();
+        assert_eq!(j2["gaps"][0]["topic"], "x");
+        let j3 = extract_json_from_text("分析结果：{\"merges\":[{\"docs\":[\"a.md\"]}]} 完毕").unwrap();
+        assert_eq!(j3["merges"][0]["docs"][0], "a.md");
+        assert!(extract_json_from_text("无发现").is_none());
+    }
+}
+
+fn temp_root(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("md-agent-srv-{}-{}", name, std::process::id()))
 }
 
 // ---------- SkillHub（阶段 4）：hub 注册表 + 目录 ----------

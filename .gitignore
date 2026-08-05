@@ -6,5 +6,7 @@ kb/.md-graph.db
 kb/.md-graph.db-*
 kb/.tasks.db
 kb/.context-log.jsonl
+kb/.memory-heat.json
 config.json
 .zcode/
+/.build

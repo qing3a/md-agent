@@ -338,6 +338,10 @@
     line = '';
     clearDraft();     // 已提交，清草稿
     pushHistory(t);
+    // C1 审视层触发：非命令输入含纠错措辞（用户纠正上轮回答 = 强信号，零 token 检测）
+    if (!t.startsWith('/') && /不对|错了|不是这样|你错了|不是的/.test(t)) {
+      touchExperience('correction', t);
+    }
     busy = true;
     setBusyUI();
     try {
@@ -920,13 +924,41 @@
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url: a.hub_url || '' }),
     }),
+    // C0 dev 工具链（自我开发执行层：让 agent 读自己代码）
+    'dev.read': (a) => api('/api/dev/read?path=' + encodeURIComponent(a.path || '')),
+    'dev.status': () => api('/api/dev/status'),
+    'dev.diff': (a) => api('/api/dev/diff' + (a.path ? '?path=' + encodeURIComponent(a.path) : '')),
   };
 
   // 工具结果格式化（截断防超长；片段标注来源便于 LLM 引用）
+  // B1 读时整理旁路（fire-and-forget，不阻塞回答）：runTool 成功后上报读取路径 → 热度记账 + 规则层
+  function touchMemory(query, paths) {
+    if (!paths || !paths.length) return;
+    fetch('/api/memory/touch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: query || '', paths: paths.slice(0, 5) }),
+    }).catch(() => {});
+  }
+
+  // 经验闭环 C1（审视层）：触发信号 → 后端 LLM 审视 → 经验提案进待审（fire-and-forget，零 token 触发）
+  function touchExperience(signal, context) {
+    fetch('/api/experience/propose', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ signal, context: String(context || '').slice(0, 500) }),
+    }).catch(() => {});
+  }
+
   async function runTool(name, args) {
     const fn = TOOL_API[name];
     if (!fn) throw new Error('未知工具: ' + name);
     const r = await fn(args || {});
+    // B1 读时整理：收集本次读取的 KB 路径（read_l1/file/graph/search 类）
+    const readPaths = [];
+    if (name === 'read_l1') { if (args.file) readPaths.push(args.file); }
+    else if (name === 'file') { if (args.path) readPaths.push(args.path); }
+    else if (name === 'graph.linked' || name === 'graph.backlinks') { if (args.path) readPaths.push(args.path); }
+    else if (name === 'search' || name === 'memory_search') { (r.hits || []).forEach((h) => { if (h.file) readPaths.push(h.file); }); }
+    if (readPaths.length) touchMemory(args.q || '', readPaths);
     if (name === 'search' || name === 'memory_search') {
       // 方向 4：命中 10→8、单条上下文截断 200——摘要注入，模型可重查（frc 指令节背书）
       const hits = r.hits || [];
@@ -956,6 +988,8 @@
       const apps = (h.apps || []).map((a) => a.id + ' v' + a.version + ' [' + (a.permissions || []).join(',') + '] ' + a.name).join('\n');
       return '已连接 SkillHub「' + h.name + '」（' + (h.apps || []).length + ' 个应用）：\n' + apps;
     }
+    if (name === 'dev.read') return String(r.content || '(空文件)').slice(0, 3000) + (r.path ? '\n[来源 ' + r.path + ']' : '');
+    if (name === 'dev.status' || name === 'dev.diff') return String(r.output || '(无改动/无输出)');
     return JSON.stringify(r).slice(0, 3000);
   }
 
@@ -1255,7 +1289,7 @@
       term.writeln('\x1b[36m🛠 调用 ' + tj.tool + '(' + JSON.stringify(tj.args || {}) + ')\x1b[0m');
       let result;
       try { result = await runTool(tj.tool, tj.args); }
-      catch (e) { result = '工具调用失败: ' + ((e && e.message) || e); }
+      catch (e) { result = '工具调用失败: ' + ((e && e.message) || e); touchExperience('tool_failure', tj.tool + ': ' + ((e && e.message) || e)); }
       messages.push({ role: 'assistant', content: r.full });
       messages.push({ role: 'user', content: '工具 ' + tj.tool + ' 返回（基于它直接回答；仍缺关键信息才可再调用工具，引用标注 [工具:' + tj.tool + ']）：\n' + String(result).slice(0, 3000) }); // 方向 4：4000→3000 摘要注入
       full = ''; // 工具轮内容不渲染
