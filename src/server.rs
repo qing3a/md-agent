@@ -809,15 +809,10 @@ async fn experience_propose(State(st): State<AppState>, Json(b): Json<Experience
     Json(json!({ "ok": true, "created": 0, "async": true })).into_response()
 }
 
-/// 写经验提案：LLM 审视结果（Some）或规则占位（None）。返回提案路径（空=未写）
+/// 写经验提案（C2 三分通道）：文件名前缀 EXPERIENCE.<TYPE> 供审批路由（MEMORY 进记忆 / BEHAVIOR 落行为建议 / CODE 落代码 backlog）
 fn write_experience_proposal(root: &Path, signal: &str, context: &str, review: Option<&Value>) -> Option<String> {
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
     let safe = format!("{}-{}", date, simple_fp(&format!("{signal}:{context}")).chars().take(8).collect::<String>());
-    let ppath = format!("pending/notes/自组织/经验-{safe}.md");
-    let dst = root.join(&ppath);
-    if dst.exists() {
-        return None;
-    }
     let (typ, problem, improve) = match review {
         Some(v) => (
             v["type"].as_str().unwrap_or("behavior").to_string(),
@@ -826,6 +821,16 @@ fn write_experience_proposal(root: &Path, signal: &str, context: &str, review: O
         ),
         None => ("behavior".to_string(), "疑似摩擦信号（未配置 LLM，规则占位）".to_string(), "待人工判断".to_string()),
     };
+    let typ_up = match typ.as_str() {
+        "memory" => "MEMORY",
+        "code" => "CODE",
+        _ => "BEHAVIOR",
+    };
+    let ppath = format!("pending/EXPERIENCE.{typ_up}.{safe}.md");
+    let dst = root.join(&ppath);
+    if dst.exists() {
+        return None;
+    }
     let body = format!(
         "---\ntype: experience\nsignal: {signal}\ndate: {date}\n---\n\n# 经验提案\n\n- 类型：{typ}\n- 信号：{signal}\n- 问题：{problem}\n- 改进：{improve}\n- 上下文：{context}\n"
     );

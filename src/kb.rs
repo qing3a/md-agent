@@ -679,6 +679,54 @@ pub fn approve_pending(root: &Path, rel: &str, edited: Option<&str>) -> Result<(
             "notes/决策/未决.md".to_string(),
             Some("未决决策已登记（MEMORY 决策待定 + notes/决策/未决.md）".to_string()),
         ))
+    } else if stripped.starts_with("EXPERIENCE.") {
+        // 经验提案（C2 三分通道）：EXPERIENCE.MEMORY.* → 记忆；EXPERIENCE.BEHAVIOR.* → 行为建议；EXPERIENCE.CODE.* → 代码 backlog
+        let content = match edited {
+            Some(c) => c.to_string(),
+            None => fs::read_to_string(&src_canon).map_err(|e| e.to_string())?,
+        };
+        let (_, body) = parse_frontmatter(&content);
+        let sub = stripped
+            .strip_prefix("EXPERIENCE.")
+            .unwrap_or("BEHAVIOR")
+            .split('.')
+            .next()
+            .unwrap_or("BEHAVIOR")
+            .to_string();
+        match sub.as_str() {
+            "MEMORY" => {
+                // 经验教训 → 合并进 MEMORY.md（可检索；body 为 # 开头，append_memory_entry 转 bullet 进当日小节）
+                append_memory_entry(&root, &body).map_err(|e| e.to_string())?;
+                fs::remove_file(&src_canon).map_err(|e| e.to_string())?;
+                Ok(("MEMORY.md".to_string(), Some("经验已并入 MEMORY.md（可检索）".to_string())))
+            }
+            "CODE" => {
+                // 代码类经验 → 落 backlog（占位，待 C3 验证管线处理）
+                let name = stripped.strip_prefix("EXPERIENCE.CODE.").unwrap_or("proposal");
+                let dst = root.join("notes").join("自组织").join("代码提案").join(name);
+                if let Some(parent) = dst.parent() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                fs::write(&dst, &body).map_err(|e| format!("写入失败: {e}"))?;
+                fs::remove_file(&src_canon).map_err(|e| e.to_string())?;
+                Ok(("notes/自组织/代码提案/".to_string(), Some("代码类经验已入 backlog（待 C3 验证管线）".to_string())))
+            }
+            _ => {
+                // 行为类（默认）→ 落行为建议记录
+                let name = stripped
+                    .strip_prefix("EXPERIENCE.")
+                    .unwrap_or("proposal")
+                    .strip_prefix("BEHAVIOR.")
+                    .unwrap_or("proposal");
+                let dst = root.join("notes").join("自组织").join("行为建议").join(name);
+                if let Some(parent) = dst.parent() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                fs::write(&dst, &body).map_err(|e| format!("写入失败: {e}"))?;
+                fs::remove_file(&src_canon).map_err(|e| e.to_string())?;
+                Ok(("notes/自组织/行为建议/".to_string(), Some("行为类经验已落行为建议（可人工应用）".to_string())))
+            }
+        }
     } else {
         // 新笔记 → 移动到目标路径（保留 pending/ 后的相对结构）；edited 覆盖内容
         let dst = root.join(&stripped);
@@ -780,6 +828,26 @@ pub fn preview_pending(root: &Path, rel: &str) -> Result<PendingPreview, String>
             path: rel.to_string(),
             target: "notes/决策/未决.md".to_string(),
             kind: "decision".to_string(),
+            added: body.trim().to_string(),
+        })
+    } else if stripped.starts_with("EXPERIENCE.") {
+        // 经验提案（C2）：预览 = 正文 + 目标按类型
+        let (_, body) = parse_frontmatter(&content);
+        let sub = stripped
+            .strip_prefix("EXPERIENCE.")
+            .unwrap_or("BEHAVIOR")
+            .split('.')
+            .next()
+            .unwrap_or("BEHAVIOR");
+        let target = match sub {
+            "MEMORY" => "MEMORY.md".to_string(),
+            "CODE" => "notes/自组织/代码提案/".to_string(),
+            _ => "notes/自组织/行为建议/".to_string(),
+        };
+        Ok(PendingPreview {
+            path: rel.to_string(),
+            target,
+            kind: "experience".to_string(),
             added: body.trim().to_string(),
         })
     } else {
@@ -913,6 +981,37 @@ mod tests {
         let (t2, _) = approve_pending(&root, "pending/MEMORY.t.md", None).unwrap();
         assert_eq!(t2, "MEMORY.md");
         assert!(fs::read_to_string(root.join("MEMORY.md")).unwrap().contains("条目"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn approve_experience_routes_by_type() {
+        let root = test_root("exp");
+        ensure_layout(&root).unwrap();
+        // MEMORY 型 → 并入 MEMORY.md
+        write(&root, "pending/EXPERIENCE.MEMORY.abc.md",
+            "---\ntype: experience\nsignal: correction\ndate: 2026-08-05\n---\n\n# 经验提案\n\n- 类型：memory\n- 问题：答错命令\n- 改进：记住 /rescan\n");
+        let (t1, _) = approve_pending(&root, "pending/EXPERIENCE.MEMORY.abc.md", None).unwrap();
+        assert_eq!(t1, "MEMORY.md");
+        let mem = fs::read_to_string(root.join("MEMORY.md")).unwrap();
+        assert!(mem.contains("/rescan") && mem.contains("答错命令"));
+        // BEHAVIOR 型（默认）→ 落行为建议
+        write(&root, "pending/EXPERIENCE.BEHAVIOR.def.md",
+            "---\ntype: experience\nsignal: tool_failure\ndate: 2026-08-05\n---\n\n# 经验提案\n\n- 类型：behavior\n- 问题：x\n- 改进：y\n");
+        let (t2, _) = approve_pending(&root, "pending/EXPERIENCE.BEHAVIOR.def.md", None).unwrap();
+        assert!(t2.starts_with("notes/自组织/行为建议"));
+        assert!(root.join("notes/自组织/行为建议").join("def.md").is_file());
+        // CODE 型 → 落代码 backlog
+        write(&root, "pending/EXPERIENCE.CODE.ghi.md",
+            "---\ntype: experience\nsignal: correction\ndate: 2026-08-05\n---\n\n# 经验提案\n\n- 类型：code\n- 问题：z\n- 改进：w\n");
+        let (t3, _) = approve_pending(&root, "pending/EXPERIENCE.CODE.ghi.md", None).unwrap();
+        assert!(t3.starts_with("notes/自组织/代码提案"));
+        assert!(root.join("notes/自组织/代码提案").join("ghi.md").is_file());
+        // preview kind=experience
+        write(&root, "pending/EXPERIENCE.MEMORY.jkl.md", "---\ntype: experience\n---\n# 经验提案\n- 改进：m\n");
+        let pv = preview_pending(&root, "pending/EXPERIENCE.MEMORY.jkl.md").unwrap();
+        assert_eq!(pv.kind, "experience");
+        assert_eq!(pv.target, "MEMORY.md");
         fs::remove_dir_all(&root).unwrap();
     }
 
