@@ -1,11 +1,12 @@
 //! 检索引擎：ignore 遍历 + grep crate 匹配（内嵌 ripgrep 内核）。
 //! 纯文本、无向量库；多关键词任一命中 + 智能大小写（全小写查询视为不区分大小写）。
 
+use grep::matcher::Matcher;
 use grep::regex::RegexMatcher;
 use grep::searcher::sinks::UTF8;
 use grep::searcher::Searcher;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize)]
@@ -18,6 +19,8 @@ pub struct Hit {
     pub section: Option<String>,
     /// 命中行前后上下文片段（仅 ctx=true 时填充）
     pub context: String,
+    /// 相关性评分（行内命中数/文件密度/热度/标题加权；分高在前）
+    pub score: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,6 +66,8 @@ pub fn search(root: &Path, query: &str, layer: &str, ctx: bool) -> Result<Search
 
     let mut hits: Vec<Hit> = Vec::new();
     let mut files_seen: HashSet<String> = HashSet::new();
+    // 文件级统计（密度评分用）：rel -> (命中行数, 总行数)
+    let mut file_stats: HashMap<String, (usize, usize)> = HashMap::new();
 
     if dir.exists() {
         let mut walker = ignore::WalkBuilder::new(&dir)
@@ -110,12 +115,23 @@ pub fn search(root: &Path, query: &str, layer: &str, ctx: bool) -> Result<Search
                 matcher.clone(),
                 path,
                 UTF8(|line_number, line| -> std::io::Result<bool> {
+                    // 行内命中词数（整词 vs 双字噪声天然区分：含整词的行命中多次，噪声双字行通常 1 次）
+                    let mut in_line = 0usize;
+                    let mut rest: &[u8] = line.as_bytes();
+                    while let Ok(Some(m)) = matcher.find(rest) {
+                        in_line += 1;
+                        if m.end() == m.start() {
+                            break; // 空匹配防死循环（关键词非空时不会发生）
+                        }
+                        rest = &rest[m.end()..];
+                    }
                     file_hits.push(Hit {
                         file: rel.clone(),
                         line: line_number,
                         text: line.trim_end().to_string(),
                         section: None,
                         context: String::new(),
+                        score: in_line as f64,
                     });
                     Ok(true)
                 }),
@@ -125,6 +141,7 @@ pub fn search(root: &Path, query: &str, layer: &str, ctx: bool) -> Result<Search
                 // 行级小节上下文（替代解析器；整篇只读一次，按行切分）
                 if let Ok(content) = std::fs::read_to_string(path) {
                     let lines: Vec<&str> = content.lines().collect();
+                    file_stats.insert(rel.clone(), (file_hits.len(), lines.len()));
                     for h in &mut file_hits {
                         h.section = section_of(&lines, h.line);
                         if ctx {
@@ -137,8 +154,8 @@ pub fn search(root: &Path, query: &str, layer: &str, ctx: bool) -> Result<Search
         }
     }
 
-    hits.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
-    let hit_count = hits.len();
+    let hit_count = hits.len(); // 全量命中数（截断前；前端"N 处"语义不变）
+    rank_hits(&mut hits, &file_stats, &root);
     let file_count = files_seen.len();
     Ok(SearchResult {
         query: query.to_string(),
@@ -147,6 +164,72 @@ pub fn search(root: &Path, query: &str, layer: &str, ctx: bool) -> Result<Search
         file_count,
         hits,
     })
+}
+
+// ---------- 相关性评分（v1 轻量评分器：行内命中/文件密度/热度/标题加权，全在 grep 结果上算） ----------
+const W_IN_LINE: f64 = 1.0;
+const W_FILE_DENSITY: f64 = 0.5;
+const W_HEAT: f64 = 0.3;
+const W_TITLE: f64 = 1.0;
+/// 每文件最多保留的相关行数（截断后 hit_count 仍报告全量）
+const TOP_PER_FILE: usize = 3;
+/// 全库最多返回的相关行数
+const TOP_TOTAL: usize = 20;
+
+/// 热度表：rel -> read_count（.memory-heat.json 缺失/损坏 → 空表，检索不 panic）
+fn load_heat_for_rank(root: &Path) -> HashMap<String, u64> {
+    let mut out = HashMap::new();
+    let Ok(s) = std::fs::read_to_string(root.join(".memory-heat.json")) else { return out };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else { return out };
+    let Some(paths) = v.get("paths").and_then(|p| p.as_object()) else { return out };
+    for (rel, e) in paths {
+        if let Some(rc) = e.get("read_count").and_then(|r| r.as_u64()) {
+            out.insert(rel.clone(), rc);
+        }
+    }
+    out
+}
+
+/// 评分 + 按分降序（稳定排序，分数相同退回 file+line 序）+ 截断（每文件 top N 行、全库 top M 行）
+fn rank_hits(hits: &mut Vec<Hit>, file_stats: &HashMap<String, (usize, usize)>, root: &Path) {
+    if hits.is_empty() {
+        return;
+    }
+    let heat = load_heat_for_rank(root);
+    for h in hits.iter_mut() {
+        let density = file_stats
+            .get(&h.file)
+            .map(|(nh, nl)| *nh as f64 / (*nl as f64).max(1.0).sqrt())
+            .unwrap_or(0.0);
+        let heat_norm = (heat.get(&h.file).copied().unwrap_or(0).min(10) as f64) / 10.0;
+        let is_title = h.text.trim_start().starts_with('#');
+        h.score = W_IN_LINE * h.score
+            + W_FILE_DENSITY * density
+            + W_HEAT * heat_norm
+            + W_TITLE * if is_title { 1.0 } else { 0.0 };
+    }
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.file.cmp(&b.file))
+            .then(a.line.cmp(&b.line))
+    });
+    // 按分数序遍历：每文件保留前 TOP_PER_FILE 行，全库保留前 TOP_TOTAL 行（无条件截断，返回集可预期）
+    let mut per_file: HashMap<String, usize> = HashMap::new();
+    let mut kept: Vec<Hit> = Vec::with_capacity(hits.len().min(TOP_TOTAL));
+    for h in hits.drain(..) {
+        let n = per_file.entry(h.file.clone()).or_insert(0);
+        if *n >= TOP_PER_FILE {
+            continue;
+        }
+        *n += 1;
+        kept.push(h);
+        if kept.len() >= TOP_TOTAL {
+            break;
+        }
+    }
+    *hits = kept;
 }
 
 /// 命中行（1-based）所属小节：向上找最近的一个 `#` 标题行
@@ -368,5 +451,51 @@ mod tests {
         assert!(!t.iter().any(|s| s.contains('？')), "不得含全角标点: {t:?}");
         assert!(t.iter().any(|s| s == "checkmenuitem" || s == "bug"), "ASCII 词应保留");
         assert!(t.iter().any(|s| s == "文档"), "中文二元组应保留");
+    }
+
+    #[test]
+    fn search_ranks_relevant_first() {
+        let root = tmp("rank");
+        // 相关文档：多行命中 + 行内含多词（整词命中，in_line 高）
+        std::fs::write(
+            root.join("notes/架构/记忆统一模型.md"),
+            "# 记忆统一模型\n记忆 分片\n记忆 分片 组装\n记忆 分片 组装 检索\n",
+        )
+        .unwrap();
+        // 不相关文档：仅 1 词命中 1 行
+        std::fs::write(root.join("notes/杂项.md"), "# 杂项\n完全无关的记忆\n").unwrap();
+        let out = search(&root, "记忆 分片", "notes", false).unwrap();
+        assert_eq!(out.file_count, 2, "两文件都应命中");
+        assert!(
+            out.hits[0].file.ends_with("记忆统一模型.md"),
+            "相关文档应排前: {}",
+            out.hits[0].file
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn search_heat_missing_ok() {
+        let root = tmp("norankheat");
+        std::fs::write(root.join("notes/文档.md"), "# 文档\n记忆 分片 内容\n").unwrap();
+        // 无 .memory-heat.json：不 panic，正常返回
+        let out = search(&root, "记忆 分片", "notes", false).unwrap();
+        assert_eq!(out.hit_count, 1);
+        assert!(out.hits[0].score > 0.0, "行内命中应得分: {}", out.hits[0].score);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn search_truncates_per_file_and_total() {
+        let root = tmp("trunc");
+        let mut doc = String::from("# 长文档\n");
+        for _ in 0..5 {
+            doc.push_str("记忆 分片 组装 检索\n");
+        }
+        std::fs::write(root.join("notes/长文档.md"), doc).unwrap();
+        let out = search(&root, "记忆 分片 组装 检索", "notes", false).unwrap();
+        assert_eq!(out.hit_count, 5, "hit_count 应报告全量命中");
+        assert!(out.hits.len() <= 3, "每文件应截断到 3 行: {}", out.hits.len());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
