@@ -674,7 +674,8 @@ async fn analyze_hot_doc(root: &Path, rel: &str) {
         { "role": "system", "content": system },
         { "role": "user", "content": user },
     ]});
-    let Ok(resp) = crate::llm::chat(&cfg.llm.endpoint, &cfg.llm.model, &cfg.llm.api_key, body).await else { return };
+    // 联网通道：盲区/矛盾分析允许联网查证（服务端 web_search；返回已归一化，解析路径与 chat 一致）
+    let Ok(resp) = crate::llm::chat_responses(&cfg.llm.endpoint, &cfg.llm.model, &cfg.llm.api_key, &body).await else { return };
     let full = resp["choices"][0]["message"]["content"].as_str().unwrap_or("");
     let Some(v) = extract_json_from_text(full) else { return };
     let conflicts: Vec<Value> = v["conflicts"].as_array().cloned().unwrap_or_default();
@@ -848,7 +849,8 @@ async fn experience_propose(State(st): State<AppState>, Json(b): Json<Experience
             { "role": "system", "content": system },
             { "role": "user", "content": user },
         ]});
-        if let Ok(resp) = crate::llm::chat(&cfg.llm.endpoint, &cfg.llm.model, &cfg.llm.api_key, body).await {
+        // 联网通道：经验审视允许联网检索"有没有更好的方案"（服务端 web_search；归一化返回）
+        if let Ok(resp) = crate::llm::chat_responses(&cfg.llm.endpoint, &cfg.llm.model, &cfg.llm.api_key, &body).await {
             let full = resp["choices"][0]["message"]["content"].as_str().unwrap_or("");
             if let Some(v) = extract_json_from_text(full) {
                 if v["worth"].as_bool().unwrap_or(false) {
