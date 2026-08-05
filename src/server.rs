@@ -1661,9 +1661,17 @@ async fn llm_chat(Json(body): Json<serde_json::Value>) -> Response {
             .into_response();
     }
     let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let web = body.get("web").and_then(Value::as_bool).unwrap_or(false);
     let ep = cfg.llm.endpoint.clone();
     let model = cfg.llm.model.clone();
     let key = cfg.llm.api_key.clone();
+    // 联网通道：web=true → Responses API（tools=[web_search]，服务端执行）；返回已归一化
+    if web {
+        return match crate::llm::chat_responses(&ep, &model, &key, &body).await {
+            Ok(v) => Json(v).into_response(),
+            Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
+        };
+    }
     if stream {
         match crate::llm::chat_stream(&ep, &model, &key, body).await {
             Ok(r) => r.into_response(),

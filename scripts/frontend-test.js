@@ -19,6 +19,13 @@ t('英文大小写归一', Core.extractKeywords('RAG System')[0] === 'rag');
 t('全角标点剥离（，。！）', JSON.stringify(Core.extractKeywords('向量，检索。完成！')).includes('向量') && JSON.stringify(Core.extractKeywords('向量，检索。完成！')).includes('检索'));
 t('全角括号不混入短语', Core.extractKeywords('知识库（整理）').includes('知识库') && Core.extractKeywords('知识库（整理）').includes('整理'));
 
+console.log('== webTrigger（联网通道触发词） ==');
+t('触发词命中（搜一下）', Core.webTrigger('帮我搜一下最新的 Rust 版本'));
+t('触发词命中（联网）', Core.webTrigger('联网查一下 DeepSeek 定价'));
+t('触发词命中（最新）', Core.webTrigger('最新的 md-agent 版本是什么'));
+t('普通问题不触发', !Core.webTrigger('记忆统一模型怎么设计'));
+t('空输入不触发', !Core.webTrigger(''));
+
 console.log('== extractJsonObjects ==');
 t('单对象', Core.extractJsonObjects('{"a":1}').length === 1);
 t('嵌套 args', Core.extractJsonObjects('{"tool":"x","args":{"q":"a{b}c"}}').length === 1);

@@ -41,6 +41,15 @@
     return [...kw];
   };
 
+  // ---------- 联网检索触发（web_search 服务端通道） ----------
+  // 命中触发词 → ask() 首轮带 web:true（Responses API）；供 ask() 与测试共用
+  const WEB_TRIGGERS = ['搜一下', '搜索一下', '联网', '网上', '查一下', '最新', 'websearch', '网上查', '实时'];
+  Core.webTrigger = function (q) {
+    if (!q) return false;
+    const lq = q.toLowerCase();
+    return WEB_TRIGGERS.some((w) => lq.includes(w));
+  };
+
   // ---------- 工具调用 JSON 解析（Phase 3-C Step 1） ----------
 
   // 栈扫描提取顶层 JSON 对象（正确处理嵌套 args 与字符串内大括号）

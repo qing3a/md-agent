@@ -1036,7 +1036,8 @@
 
   // 单次 LLM 流式调用（Agent Loop 一轮）：正常回答流式渲染；首个 content 以 { 开头 → 工具模式只收集不渲染
   // 返回 { full, reasoning, reasoningStartAt, firstContentAt, lastUsage, toolJson }；中断/失败返回 null
-  async function llmStreamOnce(messages) {
+  // web=true → 联网通道（Responses API + 服务端 web_search，非流式；返回已归一化为 chat 结构）
+  async function llmStreamOnce(messages, web) {
     const reasoningStartAt = Date.now();
     let full = '';
     let saveSeen = false;
@@ -1053,7 +1054,9 @@
       const res = await fetch('/api/llm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages, stream: true, stream_options: { include_usage: true } }),
+        body: JSON.stringify(web
+          ? { messages, web: true, stream: false }
+          : { messages, stream: true, stream_options: { include_usage: true } }),
         signal: currentAbort.signal,
       });
       if (!res.ok) {
@@ -1298,22 +1301,24 @@
     let lastUsage = null;
     const MAX_TOOL = 3;
     let toolCount = 0;
+    // 联网通道开关：触发词首轮开启；知识检索 0 命中时自动开启（让模型在知识库不足时走服务端 web_search）
+    let web = Core.webTrigger(question);
     // CE 双模式（fresh-window 默认）：上下文超限 → 降级最小上下文重试（只保留引导前缀 + 当前问题）
     const llmOnceWithFresh = async (msgs) => {
-      const r = await llmStreamOnce(msgs);
+      const r = await llmStreamOnce(msgs, web);
       if (!r || !r.overflow) return r;
       term.writeln('\x1b[33m(上下文超限 → 降级最小上下文重试)\x1b[0m');
       const fresh = [
         { role: 'system', content: Core.buildGuidePrefix({ guideText: llmConfigured ? '' : (GUIDE_TEXT || L1_TEXT), memoryText: '', toolsTxt, today: localToday() }, { fresh: true }) },
         { role: 'user', content: '问题：' + question },
       ];
-      const r2 = await llmStreamOnce(fresh);
+      const r2 = await llmStreamOnce(fresh, web);
       if (r2 && r2.overflow) return null;
       if (r2 && !r2.toolJson) term.writeln('\x1b[90m(已丢失历史与检索片段，基于最小上下文回答)\x1b[0m');
       return r2;
     };
     for (;;) {
-      term.writeln('\x1b[90m(' + (toolCount ? '继续' : '回答中') + '...)\x1b[0m');
+      term.writeln('\x1b[90m(' + (toolCount ? '继续' : '回答中') + (web ? '·联网' : '') + '...)\x1b[0m');
       const r = await llmOnceWithFresh(messages);
       if (!r) return; // 中断/失败（内部已提示）
       if (!r.toolJson) {
@@ -1331,6 +1336,11 @@
       let result;
       try { result = await runTool(tj.tool, tj.args); }
       catch (e) { result = '工具调用失败: ' + ((e && e.message) || e); touchExperience('tool_failure', tj.tool + ': ' + ((e && e.message) || e)); }
+      // 知识检索 0 命中 → 下一轮开启联网通道（服务端 web_search），让模型在知识库不足时能搜到外部信息
+      if (!web && /无命中|未命中|未定位|无片段|未找到/.test(String(result))) {
+        web = true;
+        term.writeln('\x1b[33m(知识库检索不足 → 已开启联网检索)\x1b[0m');
+      }
       messages.push({ role: 'assistant', content: r.full });
       messages.push({ role: 'user', content: '工具 ' + tj.tool + ' 返回（基于它直接回答；仍缺关键信息才可再调用工具，引用标注 [工具:' + tj.tool + ']）：\n' + String(result).slice(0, 3000) }); // 方向 4：4000→3000 摘要注入
       full = ''; // 工具轮内容不渲染
