@@ -1,0 +1,10 @@
+{
+  "id": "ow-recruit",
+  "name": "Ow Recruit 招聘工作台",
+  "version": "0.1.0",
+  "entry": "index.html",
+  "permissions": [
+    "storage"
+  ],
+  "description": "PM 招聘需求建模 + 猎头招聘执行一体化工作台（候选人/职位/面试/协作/招聘漏斗）"
+}
