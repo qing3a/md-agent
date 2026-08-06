@@ -9,6 +9,7 @@ kb/.tasks.db
 kb/.context-log.jsonl
 kb/.memory-heat.json
 kb/memory_summary.md
+kb/.activity.db
 config.json
 .zcode/
 /.build
