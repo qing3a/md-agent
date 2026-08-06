@@ -280,6 +280,7 @@ Phase 4  生态化（可选，与"轻量"定位有张力，个人场景可长期
 - 关键词提取为启发式（无真分词），英文/数字效果好于中文长句
 - 终端表格不做对齐（避免 CJK 宽度计算与流式缓冲），需要整齐表格可 `open` 后用支持表格的编辑器查看原 markdown
 - `/page` 依赖本机 Edge/Chrome（headless CDP），个别站点（如被网络环境拦截的域名）可能读到空正文；写侧目前是显式 selector 动作（/page act），LLM 自主决策尚未实现
+- `/api/ingest` 文档摄入（anydoc）对扫描件/图片型 PDF 明确不支持（无 OCR）；复杂排版（分栏/表格/嵌入字体）的 PDF 可能丢部分结构，坏样本可收集后评估 pdfium/mupdf 兜底
 
 ## 与同类产品的定位差异
 
@@ -291,6 +292,16 @@ Phase 4  生态化（可选，与"轻量"定位有张力，个人场景可长期
 | WebUI（OpenWebUI 等） | 本架构做本地文件原生治理与多项目隔离；缺其模型管理 |
 
 ## 开发测试
+
+测试 = harness 代码层的"人审闭环"：人审保护记忆不被 LLM 污染，测试保护 harness 不被改动破坏（同一哲学）。**隔离铁律：所有测试用临时目录，绝不碰主 kb。**
+
+```
+bash scripts/test.sh          # 一键回归：Rust 单测 + 前端逻辑测试 + E2E 四型审批链路
+cargo test                    # Rust 单测（kb/graph/task/search/heartbeat/consolidate/config/…）
+node scripts/frontend-test.js # 前端纯逻辑测试（core.js，66 断言，零 DOM）
+node --test tests/web/        # 前端 node:test 套件（core.test.js，15 组）
+python scripts/e2e.py         # E2E：隔离 kb 起服务，跑待审四型审批链路
+```
 
 `scripts/mock_llm.py`：OpenAI 兼容 mock（默认 11434 端口），支持流式；最后一条用户消息含「记住/沉淀」时返回写回块，便于验证沉淀链路。
 
@@ -307,6 +318,7 @@ src/server.rs     Axum 路由与接口
 src/search.rs     检索（ignore 遍历 + grep crate，多关键词/智能大小写/小节上下文）
 src/graph.rs      知识图谱（SQLite documents/links、[[链接]] 解析、反链/孤立/标签/项目查询）
 src/llm.rs        LLM 代理（非流式 JSON + 流式 SSE 透传）
+src/ingest.rs     文档摄入（anydoc 转 GFM：PDF/DOCX/PPT/XLS/CSV/EPUB → notes/）
 src/fetch.rs      /fetch 静态网页抓取（HTTP + HTML 文本提取）
 src/page.rs       /page 动态网页 + /page act 动作执行（chromiumoxide + 系统 Edge/Chrome headless CDP）
 src/heartbeat.rs  心跳自动同步（指纹检测 / 状态结构）
@@ -315,7 +327,8 @@ src/kb.rs         双层记忆布局 / frontmatter 解析 / INDEX 自动生成 /
 src/config.rs     本地配置
 web/              xterm.js 终端前端（Agent 回路 + 管理命令）+ config.html 配置页
 web/views/        内置面板视图（graph.html 结构导航 / board.html 任务看板）
+tests/web/        前端 node:test 纯逻辑测试（core.test.js）
 kb/               L1 规范层 + L2 内容层（首次运行自动补齐模板）
-scripts/          mock_llm.py 开发测试工具
+scripts/          mock_llm.py / frontend-test.js / e2e.py / test.sh
 dist/             release 打包产物（双击即用）
 ```
