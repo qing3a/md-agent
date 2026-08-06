@@ -563,4 +563,29 @@ mod tests {
         assert!(out.hits.len() <= 3, "每文件应截断到 3 行: {}", out.hits.len());
         std::fs::remove_dir_all(&root).unwrap();
     }
+
+    #[test]
+    fn search_chinese_multi_keyword_any_hit() {
+        let root = tmp("zh");
+        std::fs::write(root.join("notes/双链约定.md"), "# 双链约定\n用 [[双向链接]] 关联文档\n").unwrap();
+        std::fs::write(root.join("notes/无关联.md"), "# 无关联\n纯文本内容\n").unwrap();
+        // 多关键词任一命中（"双链"或"约定"都算命中）
+        let out = search(&root, "双链 约定", "notes", false).unwrap();
+        assert_eq!(out.file_count, 1, "只有双链约定.md 命中");
+        assert!(out.hits[0].file.ends_with("双链约定.md"));
+        // 上下文模式返回小节标题
+        let ctx = search(&root, "双向链接", "notes", true).unwrap();
+        assert_eq!(ctx.hit_count, 1);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn search_smart_case_ascii() {
+        let root = tmp("case");
+        std::fs::write(root.join("notes/rag方案.md"), "# RAG 方案\nRag 与 ripgrep 对比\n").unwrap();
+        // 智能大小写：大写查询命中（小写内容也命中）
+        let out = search(&root, "RAG", "notes", false).unwrap();
+        assert!(out.hit_count >= 1, "大写查询应命中小写内容");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

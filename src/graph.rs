@@ -728,3 +728,115 @@ pub fn projects(root: &Path) -> Result<Vec<ProjectCount>, String> {
         .map(|(project, docs)| ProjectCount { project, docs })
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn test_root(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("md-agent-ut-graph-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(root: &Path, rel: &str, content: &str) {
+        let p = root.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, content).unwrap();
+    }
+
+    // ---------- parse_links（纯函数） ----------
+
+    #[test]
+    fn parse_links_variants() {
+        let links = parse_links("看 [[托盘应用]] 与 [[架构/记忆统一模型|别名]]，还有 [[RULES]]。");
+        assert_eq!(links, vec!["托盘应用", "架构/记忆统一模型", "RULES"]);
+    }
+
+    #[test]
+    fn parse_links_skips_code_blocks_and_empty() {
+        // 代码块内的 [[链接]] 是已知噪声源：当前实现不排除（如实记录行为），
+        // 但空目标 / 无链接文本必须不产出
+        assert_eq!(parse_links("无链接"), Vec::<String>::new());
+        assert_eq!(parse_links("[[]]"), Vec::<String>::new());
+        assert_eq!(parse_links("[[   ]]"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn parse_links_chinese_path() {
+        let links = parse_links("见 [[笔记/中文文件名]] 与 [[嵌套/目录/深层文档]]");
+        assert_eq!(links.len(), 2);
+        assert!(links.contains(&"笔记/中文文件名".to_string()));
+        assert!(links.contains(&"嵌套/目录/深层文档".to_string()));
+    }
+
+    // ---------- resolve_link 优先级 ----------
+
+    #[test]
+    fn resolve_link_exact_path_first() {
+        let paths = vec!["notes/检索.md".to_string(), "notes/rag/检索.md".to_string()];
+        let mut stem_index: HashMap<String, Vec<String>> = HashMap::new();
+        for p in &paths {
+            let stem = Path::new(p).file_stem().unwrap().to_string_lossy().into_owned();
+            stem_index.entry(stem).or_default().push(p.clone());
+        }
+        // 精确路径命中
+        assert_eq!(
+            resolve_link("notes/rag/检索", &paths, &stem_index),
+            Some("notes/rag/检索.md".to_string())
+        );
+        // 无路径前缀 → stem 唯一命中
+        assert_eq!(
+            resolve_link("检索", &paths, &stem_index),
+            Some("notes/检索.md".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_link_dangling_returns_none() {
+        let paths: Vec<String> = vec![];
+        let stem_index: HashMap<String, Vec<String>> = HashMap::new();
+        assert_eq!(resolve_link("不存在.md", &paths, &stem_index), None);
+    }
+
+    // ---------- sync + audit 集成（SQLite） ----------
+
+    #[test]
+    fn sync_and_audit_signals() {
+        let root = test_root("audit");
+        write(&root, "notes/A.md", "# A\n\n见 [[B]]\n");
+        write(&root, "notes/B.md", "# B\n\n回链 [[A]]\n");
+        // 悬空链接
+        write(&root, "notes/C.md", "# C\n\n链向 [[不存在]]\n");
+        // 孤立（无入链无出链）
+        write(&root, "notes/D.md", "# D\n");
+        let report = sync_graph(&root).unwrap();
+        assert_eq!(report.docs, 4);
+        assert_eq!(report.links, 3);
+        assert_eq!(report.dangling, 1);
+
+        let rep = audit(&root).unwrap();
+        assert!(rep.dangling.iter().any(|(src, _)| src == "notes/C.md"));
+        assert!(rep.orphans.iter().any(|p| p == "notes/D.md"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn graph_excludes_pending_and_sessions() {
+        let root = test_root("excl");
+        write(&root, "notes/知识.md", "# 知识\n");
+        write(&root, "pending/草稿.md", "# 草稿\n");
+        write(&root, "sessions/流水.md", "# 流水\n");
+        let report = sync_graph(&root).unwrap();
+        assert_eq!(report.docs, 1, "pending/sessions 不进图谱");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn project_of_first_dir() {
+        assert_eq!(project_of("notes/架构/托盘.md"), "notes");
+        assert_eq!(project_of("KB.md"), "root");
+    }
+}

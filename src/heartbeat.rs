@@ -72,3 +72,62 @@ pub fn fingerprint_key(fp: &[(String, i64, u64)]) -> String {
     }
     s
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn test_root(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("md-agent-ut-hb-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(root: &std::path::Path, rel: &str, content: &str) {
+        let p = root.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, content).unwrap();
+    }
+
+    #[test]
+    fn fingerprint_excludes_pending_and_sessions() {
+        let root = test_root("excl");
+        write(&root, "KB.md", "# KB\n");
+        write(&root, "notes/知识.md", "# 知识\n");
+        write(&root, "pending/草稿.md", "# 草稿\n");
+        write(&root, "sessions/流水.md", "# 流水\n");
+        let fp = fingerprint(&root);
+        let names: Vec<&str> = fp.iter().map(|(p, _, _)| p.as_str()).collect();
+        assert!(names.contains(&"KB.md"));
+        assert!(names.iter().any(|n| n.replace('\\', "/") == "notes/知识.md"), "notes 应参与指纹: {names:?}");
+        assert!(!names.iter().any(|n| n.contains("pending")), "待审不参与指纹");
+        assert!(!names.iter().any(|n| n.contains("sessions")), "会话流水不参与指纹");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn fingerprint_changes_when_content_changes() {
+        let root = test_root("change");
+        write(&root, "notes/文档.md", "# 文档\n第一版\n");
+        let fp1 = fingerprint(&root);
+        let key1 = fingerprint_key(&fp1);
+        std::thread::sleep(std::time::Duration::from_millis(1100)); // mtime 秒精度
+        write(&root, "notes/文档.md", "# 文档\n第二版（变长了）\n");
+        let fp2 = fingerprint(&root);
+        let key2 = fingerprint_key(&fp2);
+        assert_ne!(key1, key2, "内容变化指纹必须不同");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn fingerprint_stable_when_unchanged() {
+        let root = test_root("stable");
+        write(&root, "notes/文档.md", "# 文档\n内容\n");
+        let k1 = fingerprint_key(&fingerprint(&root));
+        let k2 = fingerprint_key(&fingerprint(&root));
+        assert_eq!(k1, k2, "未变化时指纹稳定");
+        fs::remove_dir_all(&root).unwrap();
+    }
+}

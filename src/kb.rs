@@ -1176,4 +1176,107 @@ mod tests {
         assert!(r.content.contains("决策丙"));
         fs::remove_dir_all(&root).unwrap();
     }
+
+    // ---------- reject_pending ----------
+
+    #[test]
+    fn reject_single_and_all() {
+        let root = test_root("rej");
+        ensure_layout(&root).unwrap();
+        write(&root, "pending/notes/a.md", "# A\n");
+        write(&root, "pending/MEMORY.b.md", "## 2026-08-03\n- x\n");
+        assert_eq!(reject_pending(&root, "pending/notes/a.md").unwrap(), 1);
+        assert!(!root.join("pending/notes/a.md").exists());
+        assert_eq!(reject_pending(&root, "all").unwrap(), 1);
+        assert_eq!(list_pending(&root).len(), 0);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn reject_rejects_outside_pending() {
+        let root = test_root("rejguard");
+        ensure_layout(&root).unwrap();
+        write(&root, "notes/合法.md", "# x\n");
+        let r = reject_pending(&root, "notes/合法.md");
+        assert!(r.is_err());
+        assert!(root.join("notes/合法.md").is_file(), "越权拒绝不得删除目标");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn reject_missing_file_errors() {
+        let root = test_root("rejmiss");
+        ensure_layout(&root).unwrap();
+        assert!(reject_pending(&root, "pending/不存在.md").is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    // ---------- memory 合并三分支（memory_added_text） ----------
+
+    #[test]
+    fn memory_added_three_branches() {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        // ① 自带 ## 标题 → 原样追加
+        let a = memory_added_text("", "## 2026-08-01\n- 自定义节\n");
+        assert!(a.contains("## 2026-08-01"), "自带标题原样追加");
+        assert!(a.contains("自定义节"), "正文保留");
+        // ② 当日小节已存在 → 追加 bullet
+        let b = memory_added_text(&format!("# 记忆\n\n## {today}\n- 旧\n"), "- 新条目\n");
+        assert!(b.starts_with("\n- 新条目"), "当日节追加 bullet");
+        assert!(!b.contains("## "), "不重复建节");
+        // ③ 空库 → 建头 + 当日小节
+        let c = memory_added_text("", "新条目");
+        assert!(c.starts_with(&format!("# 记忆\n\n## {today}")), "空库建头+当日节");
+        // ④ 非空但无当日节 → 追加新当日小节
+        let d = memory_added_text("# 记忆\n\n## 2026-01-01\n- 旧\n", "新条目");
+        assert!(d.contains(&format!("## {today}")), "无当日节则新建");
+        assert!(!d.contains("2026-01-01"), "不触碰旧节");
+        fs::remove_dir_all(&std::env::temp_dir().join("md-agent-ut-rej")).ok();
+    }
+
+    #[test]
+    fn preview_memory_does_not_write() {
+        let root = test_root("prev");
+        ensure_layout(&root).unwrap();
+        fs::write(root.join("MEMORY.md"), "# 记忆\n").unwrap();
+        write(&root, "pending/MEMORY.p.md", "## 2026-08-03\n- 预览内容\n");
+        let pv = preview_pending(&root, "pending/MEMORY.p.md").unwrap();
+        assert_eq!(pv.kind, "memory");
+        assert_eq!(pv.target, "MEMORY.md");
+        assert!(pv.added.contains("预览内容"));
+        // 只读：MEMORY.md 未变、待审文件还在
+        let mem = fs::read_to_string(root.join("MEMORY.md")).unwrap();
+        assert!(!mem.contains("预览内容"), "preview 不得落盘");
+        assert!(root.join("pending/MEMORY.p.md").exists(), "preview 不得消费待审");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    // ---------- resolve_in_kb 路径安全 ----------
+
+    #[test]
+    fn resolve_in_kb_blocks_escape() {
+        let root = test_root("resv");
+        ensure_layout(&root).unwrap();
+        write(&root, "notes/合法.md", "# x\n");
+        assert!(resolve_in_kb(&root, "notes/合法.md").is_some());
+        // 路径穿越 / 绝对路径一律拒绝
+        assert!(resolve_in_kb(&root, "../evil.md").is_none());
+        assert!(resolve_in_kb(&root, "notes/../../evil.md").is_none());
+        if let Some(abs) = std::env::current_dir().ok() {
+            assert!(resolve_in_kb(&root, &abs.to_string_lossy()).is_none());
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn resolve_in_kb_allows_existing_ancestors() {
+        let root = test_root("resv2");
+        ensure_layout(&root).unwrap();
+        write(&root, "notes/子目录/目标.md", "# x\n");
+        // 目标存在 → 直接命中
+        assert!(resolve_in_kb(&root, "notes/子目录/目标.md").is_some());
+        // 目标不存在但父目录存在 → 仍返回可写路径（用于新建）
+        assert!(resolve_in_kb(&root, "notes/子目录/新文件.md").is_some());
+        fs::remove_dir_all(&root).unwrap();
+    }
 }

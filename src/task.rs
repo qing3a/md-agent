@@ -172,3 +172,89 @@ pub fn stats(root: &Path) -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(out))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn test_root(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("md-agent-ut-task-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn create_and_list_roundtrip() {
+        let root = test_root("crud");
+        let t = create(&root, "搭建测试体系", "测试").unwrap();
+        assert_eq!(t.status, "todo");
+        assert_eq!(t.goal, "搭建测试体系");
+        let list = list(&root).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].title, "测试");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn create_rejects_empty_goal() {
+        let root = test_root("empty");
+        assert!(create(&root, "   ", "").is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn state_machine_rejects_illegal_status() {
+        let root = test_root("state");
+        let t = create(&root, "目标", "").unwrap();
+        assert!(update(&root, t.id, Some("bogus"), None, None).is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn dependency_gate_blocks_doing_until_done() {
+        let root = test_root("dep");
+        let dep = create(&root, "前置任务", "").unwrap();
+        let t = create(&root, "后置任务", "").unwrap();
+        // 设依赖后，前置未完成 → 拒绝进入 doing
+        update(&root, t.id, None, None, Some(&[dep.id.to_string()])).unwrap();
+        let r = update(&root, t.id, Some("doing"), None, None);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("依赖未完成"));
+        // 前置完成 → 放行 doing/done
+        update(&root, dep.id, Some("done"), None, None).unwrap();
+        update(&root, t.id, Some("doing"), None, None).unwrap();
+        update(&root, t.id, Some("done"), None, None).unwrap();
+        let final_t = list(&root).unwrap().into_iter().find(|x| x.id == t.id).unwrap();
+        assert_eq!(final_t.status, "done");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn note_appends_timestamped_log() {
+        let root = test_root("log");
+        let t = create(&root, "目标", "").unwrap();
+        update(&root, t.id, None, Some("第一条推进"), None).unwrap();
+        update(&root, t.id, None, Some("第二条推进"), None).unwrap();
+        let t2 = list(&root).unwrap().into_iter().find(|x| x.id == t.id).unwrap();
+        assert_eq!(t2.log.len(), 2);
+        assert!(t2.log[0].contains("第一条推进"));
+        assert!(t2.log[0].contains('['));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn remove_and_stats() {
+        let root = test_root("rm");
+        let a = create(&root, "任务A", "").unwrap();
+        let b = create(&root, "任务B", "").unwrap();
+        update(&root, b.id, Some("done"), None, None).unwrap();
+        assert!(remove(&root, a.id).unwrap());
+        assert!(!remove(&root, a.id).unwrap(), "重复删除返回 false");
+        let st = stats(&root).unwrap();
+        assert_eq!(st["done"], 1);
+        assert_eq!(st["todo"], 0);
+        fs::remove_dir_all(&root).unwrap();
+    }
+}
