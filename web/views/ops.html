@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>md-agent 运营中心</title>
+<style>
+  :root {
+    --bg: #1e1e2e; --panel: #26263a; --panel2: #2f2f46;
+    --fg: #cdd6f4; --dim: #7f849c; --line: #3a3a55;
+    --blue: #89b4fa; --cyan: #94e2d5; --yellow: #f9e2af;
+    --green: #a6e3a1; --red: #f38ba8; --purple: #cba6f7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg);
+    font: 13px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; padding: 16px; }
+  h1 { font-size: 18px; color: var(--cyan); margin-bottom: 4px; }
+  .sub { color: var(--dim); font-size: 12px; margin-bottom: 16px; }
+  .sec { font-size: 13px; font-weight: 700; color: var(--blue); margin: 18px 0 8px;
+    display: flex; align-items: center; gap: 10px; }
+  .sec .badge { font-size: 11px; color: var(--red); font-weight: 700; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 14px; }
+  .kv { display: flex; gap: 8px; flex-wrap: wrap; }
+  .kv .chip { background: var(--panel2); border: 1px solid var(--line); border-radius: 999px;
+    padding: 2px 12px; font-size: 12px; color: var(--dim); }
+  .kv .chip b { color: var(--fg); }
+  .tl { max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+  .tl .row { padding: 3px 6px; border-radius: 6px; font-size: 12.5px;
+    display: flex; gap: 8px; align-items: baseline; }
+  .tl .row:hover { background: var(--panel2); }
+  .tl .time { color: var(--dim); font-size: 11px; font-family: Consolas, monospace; flex-shrink: 0; }
+  .tl .txt { word-break: break-all; }
+  .tl .nread { color: var(--red); font-weight: 700; cursor: pointer; flex-shrink: 0; }
+  .empty { color: var(--dim); font-size: 12px; padding: 8px 0; }
+  .acts { display: flex; gap: 8px; margin-top: 6px; }
+  button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 4px 14px; font-size: 12.5px; cursor: pointer; }
+  button:hover { border-color: var(--blue); color: var(--blue); }
+  button.primary { background: var(--blue); color: #111; border-color: var(--blue); font-weight: 600; }
+  .spark-row { display: flex; align-items: center; gap: 14px; padding: 8px 4px; }
+  .spark-row .lab { width: 72px; font-size: 12.5px; color: var(--dim); flex-shrink: 0; }
+  .spark-row .sum { font-size: 12px; color: var(--fg); flex-shrink: 0; }
+  .spark-row canvas { flex: 1; min-width: 0; }
+</style>
+</head>
+<body>
+<h1>📊 运营中心</h1>
+<div class="sub">记忆热度 · 用量 · 活动时间线 · 通知 — 你的 AI 做了什么，永远可查</div>
+
+<div class="sec">记忆热度</div>
+<div class="card" id="heat-card"><canvas id="heat" width="660" height="66"></canvas></div>
+
+<div class="sec">用量</div>
+<div class="card kv" id="usage"></div>
+
+<div class="sec">近 7 日趋势
+  <span style="font-weight:400;color:var(--dim);font-size:11px">检索 / 工具 / 待审流转</span>
+</div>
+<div class="card" id="sparks"></div>
+
+<div class="sec">活动时间线 <span class="badge" id="nread-badge"></span></div>
+<div class="card">
+  <div class="tl" id="timeline"><div class="empty">加载中…</div></div>
+  <div class="acts"><button id="mark-all" style="display:none">全部已读</button></div>
+</div>
+
+<script>
+// R4 阶段 2 运营面板：拉取 + 3s 轮询（单用户本地，轮询够"实时感"，不做 SSE）
+// 已读状态存 localStorage——内置面板的 localStorage 是 BRIDGE 内存代理，跨重启不保留；
+// 「未读 = 自上次打开面板以来」的会话内临时语义，符合预期。
+const ACT_COLOR = {
+  tool: '#a6e3a1', task: '#cba6f7', pending: '#f9e2af', doc: '#89b4fa',
+  search: '#94e2d5', session: '#7f849c', sys: '#7f849c',
+};
+const NOTIFY_KINDS = ['pending', 'task', 'doc'];
+const READ_KEY = 'ops-read-ids';
+
+const $ = (id) => document.getElementById(id);
+let items = [];          // 活动条目（id 升序）
+let lastId = 0;          // 轮询增量游标
+let readIds = new Set();
+try { readIds = new Set(JSON.parse(localStorage.getItem(READ_KEY) || '[]')); } catch (e) { /* 忽略 */ }
+
+function saveRead() { try { localStorage.setItem(READ_KEY, JSON.stringify([...readIds])); } catch (e) { /* 忽略 */ } }
+function timeStr(ts) { return String(ts || '').slice(11, 19) || '--:--:--'; }
+function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+async function api(path) {
+  const r = await fetch(path);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+
+// ---- 记忆热度（canvas 热力条；数据源 /api/memory/heat 的 paths 表） ----
+async function loadHeat() {
+  const d = await api('/api/memory/heat');
+  const paths = (d && d.paths) || {};
+  const entries = Object.entries(paths)
+    .map(([p, v]) => [p, (v && v.read_count) || 0])
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 16);
+  const cv = $('heat');
+  const c = cv.getContext('2d');
+  c.clearRect(0, 0, cv.width, cv.height);
+  if (!entries.length) {
+    $('heat-card').innerHTML = '<div class="empty">暂无记忆热度数据（读文档后自动积累，存 .memory-heat.json）</div>';
+    return;
+  }
+  const max = Math.max(...entries.map((e) => e[1]), 1);
+  const n = entries.length, bw = cv.width / n;
+  entries.forEach(([p, v], i) => {
+    const t = v / max;
+    c.fillStyle = 'rgba(137,180,250,' + (0.12 + t * 0.88).toFixed(2) + ')';
+    c.fillRect(i * bw + 2, 2, bw - 4, 44);
+    c.fillStyle = '#cdd6f4';
+    c.font = '10px Consolas, monospace';
+    c.textAlign = 'center';
+    c.fillText(p.split('/').pop().replace('.md', '').slice(0, 10), i * bw + bw / 2, 60);
+  });
+}
+
+// ---- 用量（/api/context/stats per-source 记账） ----
+async function loadUsage() {
+  const d = await api('/api/context/stats');
+  const fmt = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
+  const ratio = d.cache_read_ratio == null ? '—' : Math.round(d.cache_read_ratio * 100) + '%';
+  const src = d.src || {};
+  $('usage').innerHTML =
+    '<span class="chip">累计输入 <b>' + fmt(d.input_tokens || 0) + '</b> tok</span>' +
+    '<span class="chip">累计输出 <b>' + fmt(d.output_tokens || 0) + '</b> tok</span>' +
+    '<span class="chip">缓存命中率 <b>' + ratio + '</b></span>' +
+    '<span class="chip">记账 <b>' + (d.total || 0) + '</b> 条</span>' +
+    '<span class="chip">前缀分桶 sys <b>' + Math.round((src.pct && src.pct.system || 0) * 100) + '%</b></span>' +
+    '<span class="chip">skills <b>' + Math.round((src.pct && src.pct.skills || 0) * 100) + '%</b></span>' +
+    '<span class="chip">mid <b>' + Math.round((src.pct && src.pct.mid || 0) * 100) + '%</b></span>';
+}
+
+// ---- 近 7 日 sparkline（前端聚合：拉 activity 按日计数，零后端统计端点） ----
+const SPARK = [
+  { kind: 'search', label: '检索', color: '#94e2d5' },
+  { kind: 'tool', label: '工具调用', color: '#a6e3a1' },
+  { kind: 'pending', label: '待审流转', color: '#f9e2af' },
+];
+function dayKey(ts) { return String(ts || '').slice(0, 10); }
+function drawSpark(cv, data, color) {
+  const c = cv.getContext('2d');
+  const w = cv.width, h = cv.height;
+  c.clearRect(0, 0, w, h);
+  const max = Math.max(...data, 1);
+  c.strokeStyle = 'rgba(125,140,155,0.25)'; c.lineWidth = 1;
+  [0.25, 0.5, 0.75].forEach((f) => {
+    c.beginPath(); c.moveTo(0, h * f); c.lineTo(w, h * f); c.stroke();
+  });
+  c.beginPath();
+  data.forEach((v, i) => {
+    const x = data.length > 1 ? (i / (data.length - 1)) * (w - 4) + 2 : 2;
+    const y = h - 4 - (v / max) * (h - 8);
+    i ? c.lineTo(x, y) : c.moveTo(x, y);
+  });
+  c.strokeStyle = color; c.lineWidth = 2; c.stroke();
+  const g = c.createLinearGradient(0, 0, 0, h);
+  g.addColorStop(0, color + '44'); g.addColorStop(1, color + '00');
+  c.fillStyle = g;
+  c.lineTo(w - 2, h); c.lineTo(2, h); c.closePath(); c.fill();
+}
+async function loadSparks() {
+  const d = await api('/api/activity?limit=500');
+  const all = (d.items || []).filter((it) => SPARK.some((s) => s.kind === it.kind));
+  const box = $('sparks');
+  box.innerHTML = '';
+  if (!all.length) { box.innerHTML = '<div class="empty">暂无活动数据（提问/工具/待审操作后这里会出现趋势）</div>'; return; }
+  // 近 7 天（含今天）日期轴
+  const days = [];
+  for (let i = 6; i >= 0; i--) {
+    const d2 = new Date(); d2.setDate(d2.getDate() - i);
+    days.push(d2.getFullYear() + '-' + String(d2.getMonth() + 1).padStart(2, '0') + '-' + String(d2.getDate()).padStart(2, '0'));
+  }
+  for (const s of SPARK) {
+    const counts = days.map(() => 0);
+    all.forEach((it) => { if (it.kind === s.kind) { const k = dayKey(it.ts); const i = days.indexOf(k); if (i >= 0) counts[i]++; } });
+    const row = document.createElement('div');
+    row.className = 'spark-row';
+    const cv = document.createElement('canvas');
+    cv.width = 260; cv.height = 40;
+    drawSpark(cv, counts, s.color);
+    row.innerHTML = '<span class="lab">' + s.label + '</span>';
+    row.appendChild(cv);
+    row.innerHTML += '<span class="sum">合计 ' + counts.reduce((a, b) => a + b, 0) + '</span>';
+    box.appendChild(row);
+  }
+}
+
+// ---- 活动时间线 + 通知区块（同数据源：activity 落盘） ----
+function notifyCount() {
+  const unread = items.filter((it) => NOTIFY_KINDS.includes(it.kind) && !readIds.has(it.id));
+  $('nread-badge').textContent = unread.length ? '未读 ' + unread.length : '';
+  $('mark-all').style.display = items.length ? 'inline-block' : 'none';
+}
+function renderTimeline() {
+  const tl = $('timeline');
+  tl.innerHTML = '';
+  if (!items.length) { tl.innerHTML = '<div class="empty">（暂无活动 · 提问/工具/待审/任务后这里实时出现）</div>'; notifyCount(); return; }
+  // 新→旧展示
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    const isN = NOTIFY_KINDS.includes(it.kind) && !readIds.has(it.id);
+    const row = document.createElement('div');
+    row.className = 'row';
+    const color = ACT_COLOR[it.kind] || '#7f849c';
+    row.innerHTML =
+      '<span class="time">' + timeStr(it.ts) + '</span>' +
+      '<span class="txt" style="color:' + color + '">' + esc(it.text) + '</span>' +
+      (isN ? '<span class="nread" data-id="' + it.id + '">●未读</span>' : '');
+    tl.appendChild(row);
+  }
+  tl.querySelectorAll('.nread').forEach((el) => {
+    el.addEventListener('click', () => { readIds.add(parseInt(el.dataset.id, 10)); saveRead(); renderTimeline(); notifyCount(); });
+  });
+  notifyCount();
+}
+async function poll() {
+  try {
+    if (!document.hidden) {
+      const d = await api('/api/activity/since?id=' + lastId);
+      const fresh = d.items || [];
+      if (fresh.length) {
+        items = items.concat(fresh);
+        if (items.length > 300) items = items.slice(-300);
+        lastId = fresh[fresh.length - 1].id;
+        renderTimeline();
+      }
+    }
+  } catch (e) { /* 轮询失败静默（面板关闭/服务重启时自动恢复） */ }
+}
+async function init() {
+  try {
+    const [heat, usage, act] = await Promise.all([
+      loadHeat().catch(() => {}), loadUsage().catch(() => {}), api('/api/activity?limit=100'),
+    ]);
+    items = (act.items || []).slice().reverse(); // 拉取为倒序，转正序（id 升序）
+    lastId = items.length ? items[items.length - 1].id : 0;
+    renderTimeline();
+    await loadSparks().catch(() => {});
+    setInterval(poll, 3000);
+  } catch (e) {
+    $('timeline').innerHTML = '<div class="empty">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+$('mark-all').addEventListener('click', () => {
+  items.forEach((it) => readIds.add(it.id));
+  saveRead(); renderTimeline(); notifyCount();
+});
+init();
+</script>
+</body>
+</html>

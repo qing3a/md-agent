@@ -105,6 +105,7 @@
     history = history.slice(-MAX_HISTORY);
     Core.resetSectionCache();
     saveHistory();
+    logActivity('session', '恢复会话 ' + hit.id + '（' + parsed.length + ' 轮）', { id: hit.id });
     term.writeln('\x1b[32m✓ 已恢复会话 ' + hit.id + '（' + parsed.length + ' 轮 → 载入最近 ' + Math.floor(history.length / 2) + ' 轮）\x1b[0m');
     term.writeln('\x1b[90m继续提问即引用前文；/clear 退出恢复态\x1b[0m');
   }
@@ -1091,6 +1092,15 @@
   }
 
   // 工具行 DOM 卡（demo .toolrow：三态 + 点击展开 + 失败自动展开）
+  // 活动落盘（demo ops 时间线数据源；fire-and-forget，失败静默）
+  function logActivity(kind, text, meta) {
+    fetch('/api/activity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind, text, meta: meta || {} }),
+    }).catch(() => {});
+  }
+
   function createToolRow(name, paramsTxt) {
     const t0 = Date.now();
     let timer = null;
@@ -1125,6 +1135,7 @@
         card.classList.remove('running');
         card.classList.add('done');
         stateEl.textContent = '成功 · ' + ((Date.now() - t0) / 1000).toFixed(2) + 's';
+        logActivity('tool', '工具 ' + name + ' · 成功', { tool: name, ok: true });
         resEl.textContent = '结果: ' + String(result).slice(0, 2000);
       },
       fail(reason) {
@@ -1132,6 +1143,7 @@
         card.classList.remove('running');
         card.classList.add('fail');
         stateEl.textContent = '失败 · ' + ((Date.now() - t0) / 1000).toFixed(2) + 's';
+        logActivity('tool', '工具 ' + name + ' · 失败', { tool: name, ok: false });
         resEl.textContent = '原因: ' + String(reason || '未知错误');
         toggleOpen(true);
       },
@@ -2440,13 +2452,13 @@
       closeView();
       return;
     }
-    if (arg === 'graph' || arg === 'board' || arg === 'pending' || arg === 'audit' || arg === 'market' || arg === 'home' || arg === 'sessions') {
+    if (arg === 'graph' || arg === 'board' || arg === 'pending' || arg === 'audit' || arg === 'market' || arg === 'home' || arg === 'sessions' || arg === 'ops') {
       const dup = findView('builtin', arg);
       if (dup) { activateView(dup.id); return; }
       const name = arg + '.html';
       const r = await fetch('/views/' + name);
       if (!r.ok) throw new Error('内置视图加载失败: HTTP ' + r.status);
-      const titles = { graph: '知识库结构导航', board: '任务看板', pending: '待审审核', audit: '知识库健康审计', market: '应用市场', home: '功能首页', sessions: '历史会话' };
+      const titles = { graph: '知识库结构导航', board: '任务看板', pending: '待审审核', audit: '知识库健康审计', market: '应用市场', home: '功能首页', sessions: '历史会话', ops: '运营中心' };
       openView(titles[arg], await r.text(), null, { kind: 'builtin', arg });
       return;
     }

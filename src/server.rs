@@ -90,6 +90,8 @@ pub async fn serve(
         .route("/api/llm", post(llm_chat))
         .route("/api/context/log", post(context_log))
         .route("/api/context/stats", get(context_stats))
+        .route("/api/activity", get(activity_list).post(activity_post))
+        .route("/api/activity/since", get(activity_since))
         .route("/api/apps", get(apps_list))
         .route("/api/apps/{id}/data", get(app_data_get).post(app_data_post))
         .route("/api/hubs", get(hubs_list))
@@ -316,7 +318,11 @@ async fn search_handler(
     Query(p): Query<SearchParams>,
 ) -> Response {
     match crate::search::search(&st.kb_root, &p.q, &p.layer, ctx_enabled(&p.ctx)) {
-        Ok(r) => Json(r).into_response(),
+        Ok(r) => {
+            // R4 活动埋点：仅记命中数，不记 query 全文（防隐私）
+            crate::activity::record(&st.kb_root, "search", &format!("检索命中 {} 条", r.hit_count), json!({ "hits": r.hit_count }));
+            Json(r).into_response()
+        }
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     }
 }
@@ -760,7 +766,7 @@ fn apply_link_to_doc(root: &Path, src_rel: &str, dst_rel: &str) -> Result<Option
 /// 返回 (更新后的 heat, 新建提案路径[恒空，规则层已自动化], 自动应用的双链行)。
 fn apply_memory_touch(root: &Path, paths: &[String]) -> (Value, Vec<String>, Vec<String>) {
     let mut heat = load_heat(root);
-    let mut created: Vec<String> = Vec::new();
+    let created: Vec<String> = Vec::new();
     let mut applied: Vec<String> = Vec::new();
     let now = chrono::Local::now().timestamp();
     for p in paths {
@@ -1168,7 +1174,7 @@ async fn heartbeat_loop(state: AppState) {
         let cfg = crate::config::load();
         let mut interval = cfg.heartbeat.interval_secs.max(5).min(3600);
         let mut acc: u64 = 0;
-        let mut cfg_mtime = config_mtime();
+        let cfg_mtime = config_mtime();
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             acc += 1;
@@ -1332,6 +1338,8 @@ async fn link_add(State(st): State<AppState>, Json(body): Json<LinkBody>) -> Res
     // 写文档复用公共函数（人工 /link 与读时整理自动补链同一条写路径）
     match apply_link_to_doc(&st.kb_root, &src, &dst) {
         Ok(Some(link_line)) => {
+            // R4 活动埋点：补链（图谱写操作）
+            crate::activity::record(&st.kb_root, "doc", &format!("补链 {} → {}", body.src, body.dst), json!({ "src": body.src, "dst": body.dst }));
             let _ = crate::kb::sync_index(&st.kb_root);
             let _ = crate::graph::sync_graph(&st.kb_root);
             Json(json!({ "ok": true, "src": src, "dst": dst, "link": link_line })).into_response()
@@ -1440,13 +1448,19 @@ async fn kb_pending_approve(State(st): State<AppState>, Json(body): Json<Pending
     if !ok.is_empty() {
         let _ = crate::kb::sync_index(&st.kb_root);
         let _ = crate::graph::sync_graph(&st.kb_root);
+        // R4 活动埋点：批准待审（人审落地，图谱重建由 graph_sync 埋点另记）
+        crate::activity::record(&st.kb_root, "pending", &format!("批准待审 {} 条", ok.len()), json!({ "count": ok.len() }));
     }
     Json(json!({ "ok": ok, "errors": errors })).into_response()
 }
 
 async fn kb_pending_reject(State(st): State<AppState>, Json(body): Json<PendingBody>) -> Response {
     match crate::kb::reject_pending(&st.kb_root, &body.path) {
-        Ok(n) => Json(json!({ "ok": [json!({ "path": body.path, "removed": n })], "errors": [] })).into_response(),
+        Ok(n) => {
+            // R4 活动埋点：拒绝待审
+            crate::activity::record(&st.kb_root, "pending", &format!("拒绝待审 {}", body.path), json!({}));
+            Json(json!({ "ok": [json!({ "path": body.path, "removed": n })], "errors": [] })).into_response()
+        }
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "error": e }))).into_response(),
     }
 }
@@ -1465,7 +1479,11 @@ fn ensure_graph(root: &std::path::Path) -> Result<(), String> {
 async fn graph_sync(State(st): State<AppState>) -> Response {
     let _guard = st.sync_lock.lock().await; // 与心跳共用互斥
     match crate::graph::sync_graph(&st.kb_root) {
-        Ok(r) => Json(json!({ "ok": true, "graph": r })).into_response(),
+        Ok(r) => {
+            // R4 活动埋点：图谱重建（docs/links 数取自报告）
+            crate::activity::record(&st.kb_root, "doc", &format!("图谱重建：{} 篇 · {} 链", r.docs, r.links), json!({ "docs": r.docs, "links": r.links }));
+            Json(json!({ "ok": true, "graph": r })).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e })),
@@ -1731,7 +1749,14 @@ async fn tasks_update(
     Json(b): Json<TaskUpdateBody>,
 ) -> Response {
     match crate::task::update(&s.kb_root, id, b.status.as_deref(), b.note.as_deref(), b.deps.as_deref()) {
-        Ok(t) => Json(json!({ "task": t })).into_response(),
+        Ok(t) => {
+            // R4 活动埋点：任务状态流转（kind=task）
+            let status = b.status.clone().unwrap_or_default();
+            if !status.is_empty() {
+                crate::activity::record(&s.kb_root, "task", &format!("任务 #{} → {}", t.id, status), json!({ "id": t.id, "status": status }));
+            }
+            Json(json!({ "task": t })).into_response()
+        }
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     }
 }
@@ -2361,4 +2386,49 @@ fn cache_breakers(entries: &[Value]) -> std::collections::HashMap<String, u64> {
         prev = Some(cur);
     }
     breakers
+}
+
+// ---------- 活动记录（R4 阶段 2：运营中心数据地基） ----------
+
+#[derive(Deserialize)]
+struct ActivityListParams {
+    #[serde(default = "default_activity_limit")]
+    limit: i64,
+}
+
+fn default_activity_limit() -> i64 {
+    100
+}
+
+async fn activity_list(State(s): State<AppState>, Query(q): Query<ActivityListParams>) -> Response {
+    match crate::activity::list(&s.kb_root, q.limit) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ActivitySinceParams {
+    id: i64,
+}
+
+async fn activity_since(State(s): State<AppState>, Query(q): Query<ActivitySinceParams>) -> Response {
+    match crate::activity::since(&s.kb_root, q.id, 200) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ActivityPostBody {
+    kind: String,
+    text: String,
+    #[serde(default)]
+    meta: Value,
+}
+
+/// 前端埋点入口（工具行状态 / 会话恢复等宿主侧事件）：fire-and-forget 落盘
+async fn activity_post(State(s): State<AppState>, Json(b): Json<ActivityPostBody>) -> Response {
+    crate::activity::record(&s.kb_root, &b.kind, &b.text, b.meta);
+    Json(json!({ "ok": true })).into_response()
 }
