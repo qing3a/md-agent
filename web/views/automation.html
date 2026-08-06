@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>自动化</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 28px; background: var(--bg, #1e1e2e); color: var(--fg, #cdd6f4);
+    font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; }
+  h1 { margin: 0 0 4px; font-size: 19px; color: var(--accent, #89b4fa); }
+  .sub { color: var(--muted, #7f849c); font-size: 12.5px; margin: 0 0 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+  .card { background: var(--chip2, #1e1e30); border: 1px solid var(--border, #313244); border-radius: 12px; padding: 16px 18px; }
+  .card h2 { margin: 0 0 10px; font-size: 14px; color: var(--fg2, #a6adc8); display: flex; align-items: center; gap: 8px; }
+  .card .desc { color: var(--muted, #7f849c); font-size: 12px; line-height: 1.7; margin: 0 0 12px; }
+  .row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+  .row label { font-size: 12.5px; color: var(--fg2, #a6adc8); }
+  input[type=number] { width: 76px; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border, #313244);
+    background: var(--bg3, #11111b); color: var(--fg, #cdd6f4); font-size: 12.5px; outline: none; }
+  input:focus { border-color: var(--accent, #89b4fa); }
+  button { padding: 6px 14px; border-radius: 8px; border: 1px solid var(--border, #313244);
+    background: var(--chip, #26263a); color: var(--fg, #cdd6f4); font-size: 12.5px; cursor: pointer; font-family: inherit; }
+  button:hover { border-color: var(--accent, #89b4fa); color: var(--accent, #89b4fa); }
+  button.primary { background: var(--accent, #89b4fa); color: var(--bg3, #11111b); border: none; font-weight: 600; }
+  button.primary:hover { color: var(--bg3, #11111b); opacity: .9; }
+  button:disabled { opacity: .5; cursor: default; }
+  .switch { position: relative; display: inline-block; width: 34px; height: 19px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .slider { position: absolute; cursor: pointer; inset: 0; background: var(--border2, #45475a); border-radius: 10px; transition: .2s; }
+  .switch .slider:before { content: ''; position: absolute; width: 13px; height: 13px; left: 3px; bottom: 3px;
+    background: var(--fg2, #a6adc8); border-radius: 50%; transition: .2s; }
+  .switch input:checked + .slider { background: var(--accent-55, rgba(137,180,250,.55)); }
+  .switch input:checked + .slider:before { transform: translateX(15px); background: var(--accent, #89b4fa); }
+  .stat { color: var(--muted, #7f849c); font-size: 12px; margin-top: 8px; }
+  .stat .v { color: var(--ok, #a6e3a1); }
+  .stat .w { color: var(--warn, #f9e2af); }
+  ul { margin: 8px 0 0; padding-left: 18px; color: var(--fg2, #a6adc8); font-size: 12.5px; line-height: 1.9; }
+  .empty { color: var(--muted2, #585b70); font-size: 12px; }
+  #msg { min-height: 18px; margin-top: 12px; font-size: 12px; color: var(--muted, #7f849c); white-space: pre-wrap; }
+  #msg.ok { color: var(--ok, #a6e3a1); }
+  #msg.err { color: var(--danger, #f38ba8); }
+</style>
+</head>
+<body>
+<h1>自动化</h1>
+<p class="sub">自组织能力集中控制：规则自动执行，人审只守源文件内容变更（派生产物自动落盘）</p>
+
+<div class="grid">
+  <!-- 心跳自动同步 -->
+  <div class="card">
+    <h2>🔁 心跳自动同步</h2>
+    <p class="desc">周期性检测知识库变化，自动重建 INDEX + 图谱，并提示审计问题（孤立/悬空/重复）。</p>
+    <div class="row">
+      <label class="switch" title="开启/关闭心跳"><input type="checkbox" id="hbOn"><span class="slider"></span></label>
+      <label for="hbSecs">周期（秒）</label>
+      <input type="number" id="hbSecs" min="5" step="5">
+      <button id="hbSave">保存</button>
+    </div>
+    <div class="stat" id="hbStat">加载中…</div>
+  </div>
+
+  <!-- 自组织：补链 + 巩固 -->
+  <div class="card">
+    <h2>🧩 自组织</h2>
+    <p class="desc">补链建议自动应用（读时整理规则层直接写回，人审只守内容变更）；巩固器合并重复记忆。</p>
+    <div class="row">
+      <button id="linkBtn">自动补链（应用审计建议）</button>
+      <button id="conBtn">运行巩固器</button>
+    </div>
+    <div class="stat" id="selfStat"></div>
+  </div>
+
+  <!-- 经验闭环 -->
+  <div class="card">
+    <h2>🧠 经验闭环</h2>
+    <p class="desc">纠正/失败信号触发审视 → 经验提案进待审（fire-and-forget，零 token 触发）。</p>
+    <ul id="expList"><li class="empty">加载中…</li></ul>
+  </div>
+
+  <!-- 读时整理 -->
+  <div class="card">
+    <h2>📖 读时整理</h2>
+    <p class="desc">知识被读取即记热度（三排除：sessions/pending/apps），规则层自动补链、热度沉淀。</p>
+    <ul id="heatList"><li class="empty">加载中…</li></ul>
+  </div>
+
+  <!-- 会话自动归档 -->
+  <div class="card">
+    <h2>🗂 会话自动归档</h2>
+    <p class="desc">30 分钟无操作自动收尾：会话标记 archived + 摘要落 <b>notes/会话归档/</b>（进可检索层）+ 未决提案进待审。</p>
+    <div class="stat">触发：30min 空闲 / /clear / 关闭页面 · 摘要为派生产物，自动落盘无人审</div>
+  </div>
+</div>
+
+<div id="msg"></div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const msg = $('msg');
+  function setMsg(t, cls) { msg.textContent = t; msg.className = cls || ''; }
+  function cmd(c) { window.parent.postMessage({ type: 'cmd', cmd: c }, '*'); }
+
+  // 心跳：加载 + 保存
+  async function loadHeartbeat() {
+    try {
+      const r = await (await fetch('/api/heartbeat')).json();
+      $('hbOn').checked = !!r.enabled;
+      $('hbSecs').value = r.interval_secs || 60;
+      let auditTxt = '';
+      if (r.audit && (r.audit.orphans || r.audit.dangling || r.audit.duplicates)) {
+        const parts = [];
+        if (r.audit.orphans) parts.push('孤立 ' + r.audit.orphans);
+        if (r.audit.dangling) parts.push('悬空 ' + r.audit.dangling);
+        if (r.audit.duplicates) parts.push('重复 ' + r.audit.duplicates);
+        auditTxt = ' · 审计⚠ ' + parts.join(' / ');
+      }
+      $('hbStat').innerHTML = '状态：<span class="' + (r.enabled ? 'v' : 'w') + '">' + (r.enabled ? '开启' : '关闭') + '</span> · 周期 ' + (r.interval_secs || 60) + 's' + (auditTxt || '');
+    } catch (e) { $('hbStat').textContent = '加载失败: ' + e.message; }
+  }
+  $('hbSave').addEventListener('click', async () => {
+    const secs = parseInt($('hbSecs').value, 10);
+    if (!secs || secs < 5) { setMsg('周期至少 5 秒', 'err'); return; }
+    try {
+      const r = await (await fetch('/api/heartbeat', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: $('hbOn').checked, interval_secs: secs }),
+      })).json();
+      if (r.error) throw new Error(r.error);
+      setMsg('✓ 心跳设置已保存', 'ok');
+      loadHeartbeat();
+    } catch (e) { setMsg('保存失败: ' + e.message, 'err'); }
+  });
+
+  // 自组织：补链 + 巩固（走宿主命令通道，与输入条同一生命周期）
+  $('linkBtn').addEventListener('click', () => { cmd('/link-all'); setMsg('已触发自动补链（结果见主界面）', 'ok'); });
+  $('conBtn').addEventListener('click', () => { cmd('/consolidate llm'); setMsg('已触发巩固器（LLM 整合版，结果见主界面/待审）', 'ok'); });
+
+  // 经验闭环：待审中的经验提案
+  async function loadExp() {
+    try {
+      const r = await (await fetch('/api/kb/pending')).json();
+      const items = (r.pending || []).filter((p) => p.kind === 'experience' || p.path.indexOf('EXPERIENCE') !== -1);
+      const el = $('expList');
+      if (!items.length) { el.innerHTML = '<li class="empty">暂无经验提案（纠正/工具失败时会自动生成）</li>'; return; }
+      el.innerHTML = items.slice(0, 5).map((p) => '<li>' + p.title + ' <span class="empty">(' + p.path.replace('pending/', '') + ')</span></li>').join('');
+    } catch (e) { $('expList').innerHTML = '<li class="empty">加载失败</li>'; }
+  }
+
+  // 读时整理：热度 top
+  async function loadHeat() {
+    try {
+      const r = await (await fetch('/api/memory/heat')).json();
+      const list = (r && (r.top || r.heat)) || [];
+      const el = $('heatList');
+      if (!Array.isArray(list) || !list.length) { el.innerHTML = '<li class="empty">暂无热度数据（知识被读取后自动累积）</li>'; return; }
+      el.innerHTML = list.slice(0, 5).map((h) => {
+        const name = (h.file || h.path || '').replace(/^notes\//, '').replace(/\.md$/, '');
+        return '<li>' + name + ' <span class="empty">' + (h.count || h.hits || 0) + ' 次</span></li>';
+      }).join('');
+    } catch (e) { $('heatList').innerHTML = '<li class="empty">加载失败</li>'; }
+  }
+
+  loadHeartbeat();
+  loadExp();
+  loadHeat();
+</script>
+</body>
+</html>
