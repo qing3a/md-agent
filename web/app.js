@@ -259,6 +259,7 @@
   // 回车提交：提交内容渲染为用户消息区块（demo .row.user），输入块原位清空
   function submitMsg() {
     atPrompt = false;
+    compClose();
     term.appendCard('<div class="row user"><span class="up">' + PROMPT + '</span>' + escHtml(line) + '</div>', 'user');
     line = '';
     term._input.value = '';
@@ -378,6 +379,17 @@
   // xterm 按键扩展：↑↓ 历史、Tab 命令补全、Ctrl+C 中断（流内输入，焦点在终端）
   term.attachCustomKeyEventHandler((ev) => {
     const k = ev.key;
+    // 补全下拉：↑↓/Tab 移动选择，Enter 选中，Esc 关闭
+    if (compOpen && compItems.length) {
+      if (k === 'ArrowUp' || k === 'ArrowDown' || k === 'Tab') {
+        ev.preventDefault();
+        compIdx = (compIdx + (k === 'ArrowUp' ? -1 : 1) + compItems.length) % compItems.length;
+        compPaint();
+        return false;
+      }
+      if (k === 'Enter') { ev.preventDefault(); compPick(compIdx); return false; }
+      if (k === 'Escape') { ev.preventDefault(); compClose(); return false; }
+    }
     if (k === 'ArrowUp' || k === 'ArrowDown') {
       ev.preventDefault();
       navHistory(k === 'ArrowUp' ? 1 : -1);
@@ -385,8 +397,8 @@
     }
     if (k === 'Tab') {
       ev.preventDefault();
-      if (/^\/[^\s]*$/.test(line)) completeCmd(); // 命令补全（/ 开头）
-      else completeAt();                          // @ 文件提及（行尾 @ 触发）
+      if (!compOpen) domComplete();
+      else { compIdx = (compIdx + 1) % compItems.length; compPaint(); }
       return false;
     }
     if (k === 'c' && ev.ctrlKey && currentAbort) {
@@ -418,6 +430,129 @@
     return true;
   });
   quickBtns.forEach((btn) => btn.addEventListener('click', () => submitCmd(btn.dataset.cmd)));
+
+  // ---------- 补全下拉（demo #completion） ----------
+  let compOpen = false;
+  let compItems = [];
+  let compIdx = 0;
+  const compEl = document.getElementById('completion');
+  function compShow(list) {
+    compItems = list;
+    compIdx = 0;
+    compOpen = true;
+    compEl.innerHTML = '';
+    list.forEach((it, i) => {
+      const d = document.createElement('div');
+      d.className = 'comp-item' + (i === compIdx ? ' sel' : '');
+      d.textContent = it;
+      d.addEventListener('mousedown', (e) => { e.preventDefault(); compPick(i); });
+      d.addEventListener('mouseenter', () => { compIdx = i; compPaint(); });
+      compEl.appendChild(d);
+    });
+    // 定位：输入块上方
+    const ib = document.getElementById('inputblock');
+    const r = ib.getBoundingClientRect();
+    compEl.style.bottom = (window.innerHeight - r.top + 8) + 'px';
+    compEl.classList.add('open');
+  }
+  function compPaint() {
+    compEl.querySelectorAll('.comp-item').forEach((d, i) => d.classList.toggle('sel', i === compIdx));
+  }
+  function compPick(i) {
+    if (compItems[i] !== undefined) {
+      line = compItems[i];
+      redrawInput();
+    }
+    compClose();
+    term.focus();
+  }
+  function compClose() {
+    compOpen = false;
+    compEl.classList.remove('open');
+  }
+  async function domComplete() {
+    const m = line.match(/(^|\s)@([^\s]*)$/);
+    if (m) {
+      const docs = await loadAtDocs();
+      const kw = m[2].toLowerCase();
+      const list = docs.filter((p) => p.toLowerCase().includes(kw));
+      if (list.length) compShow(list.map((p) => line.slice(0, m.index + m[1].length) + '@' + p));
+      return;
+    }
+    const head = line.match(/^(\/[^\s]*)/);
+    let list = [];
+    if (head) list = COMMANDS.map(([c]) => c).filter((c) => c.startsWith(head[1]) && c !== head[1]);
+    if (list.length) compShow(list);
+  }
+  document.addEventListener('mousedown', (e) => {
+    if (compOpen && !compEl.contains(e.target)) compClose();
+  });
+
+  // ---------- 停止按钮（demo #inline-stop：随 LLM 流显隐） ----------
+  const stopBtn = document.getElementById('inline-stop');
+  function setStopBtn(show) {
+    if (stopBtn) stopBtn.classList.toggle('show', show);
+  }
+  if (stopBtn) {
+    stopBtn.addEventListener('click', () => {
+      if (currentAbort) {
+        currentAbort.abort();
+        term.writeln('\x1b[90m(已停止)\x1b[0m');
+      }
+    });
+  }
+
+  // ---------- 会话标签条（demo #session-bar：active 会话，点击恢复/× 归档/＋新建） ----------
+  const sessionTabs = document.getElementById('session-tabs');
+  async function archiveSession(id) {
+    const f = await api('/api/file?path=sessions/' + encodeURIComponent(id + '.md')).catch(() => null);
+    if (!f || !f.content) return;
+    const next = f.content.replace(/^(status:\s*)active$/m, '$1archived');
+    if (next === f.content) return;
+    await api('/api/file', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: 'sessions/' + id + '.md', content: next }),
+    }).catch(() => {});
+  }
+  async function paintSessionBar() {
+    const r = await api('/api/sessions').catch(() => null);
+    const list = ((r && r.sessions) || []).filter((s) => s.status === 'active');
+    sessionTabs.innerHTML = '';
+    if (!list.length) {
+      const d = document.createElement('span');
+      d.className = 'sb-empty';
+      d.textContent = '（无进行中会话 · 提问后自动创建）';
+      sessionTabs.appendChild(d);
+      return;
+    }
+    for (const s of list.slice(0, 8)) {
+      const b = document.createElement('button');
+      b.className = 'sb-tab';
+      const name = document.createElement('span');
+      name.textContent = String(s.title || s.id).slice(0, 12);
+      b.appendChild(name);
+      b.title = s.id + ' · ' + (s.count || 0) + ' 轮';
+      b.addEventListener('click', () => { resumeCmd(s.id); });
+      const x = document.createElement('span');
+      x.className = 'sb-x';
+      x.textContent = '×';
+      x.title = '归档会话';
+      x.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        if (!confirm('归档会话 ' + s.id + '？')) return;
+        archiveSession(s.id).then(() => paintSessionBar());
+      });
+      b.appendChild(x);
+      sessionTabs.appendChild(b);
+    }
+  }
+  document.getElementById('session-new').addEventListener('click', () => {
+    if (!confirm('新建会话将归档当前对话并清空多轮记忆，继续？')) return;
+    submitCmd('/clear');
+    setTimeout(paintSessionBar, 800);
+  });
+  paintSessionBar();
 
   // ---------- 输入历史（会话内，空输入时 ArrowUp/Down 翻动） ----------
   function pushHistory(t) {
@@ -1013,6 +1148,7 @@
     let toolJson = null;
     const TITLE = '\x1b[1;32m──── 回答 ────\x1b[0m';
     currentAbort = new AbortController();
+    setStopBtn(true);
     try {
       const res = await fetch('/api/llm', {
         method: 'POST',
@@ -1141,6 +1277,7 @@
       return null;
     } finally {
       currentAbort = null;
+      setStopBtn(false);
     }
     // 工具识别：纯 JSON 开头（toolMode）→ 解析；否则全文检测（DeepSeek 可能先简短说明再调工具）
     if (toolMode) {
