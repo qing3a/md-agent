@@ -1,4 +1,4 @@
-/* md-agent 终端前端：xterm.js 命令行操作双层知识库 + Agent 问答回路
+/* md-agent 前端：DeepSeek 式网页版（左侧会话边栏 + 顶栏 + 气泡消息流 + 底部输入条）操作双层知识库 + Agent 问答回路
  * 回路：启动注入 L1（规范/记忆/索引）→ 用户提问 → 提取关键词 → 检索 L2 → 拼 Prompt → /api/llm 代理 → 回答
  */
 (function () {
@@ -10,8 +10,19 @@
   // 终端壳重做（demo 结构）：DOM 消息流替代 xterm（stream.js），接口保持 writeln/write/onData 等
   const term = new StreamTerm();
   // 多行串安全写屏：行级渲染，统一换行（stream.js 已按 \n 分行，这里只做兼容规范化）
+  // DeepSeek 式原生 textarea：输入事件同步 line（无字符流事件）；草稿防抖落盘；打字计入活动（30min 归档判定）
+  term._input.addEventListener('input', () => {
+    line = term._input.value;
+    touchActivity();
+    saveDraft();
+  });
+  // 联网搜索开关（DeepSeek 式）：开启后本轮首请求带 web:true（服务端 web_search，非流式）
+  let webToggle = false;
+  document.getElementById('web-toggle').addEventListener('change', (e) => {
+    webToggle = e.target.checked;
+  });
 
-  const PROMPT = 'md-agent';
+  const PROMPT = 'md-agent'; // 保留（历史引用点可能用到；气泡 UI 不显示）
   let L1_TEXT = ''; // 启动时注入的 L1 层全文
   let GUIDE_TEXT = ''; // L1 规范层（KB/FRAMEWORK/RULES）——稳定前缀
   let MEMORY_TEXT = ''; // L1 记忆/索引层（MEMORY/INDEX）——易变
@@ -108,6 +119,7 @@
     logActivity('session', '恢复会话 ' + hit.id + '（' + parsed.length + ' 轮）', { id: hit.id });
     term.writeln('\x1b[32m✓ 已恢复会话 ' + hit.id + '（' + parsed.length + ' 轮 → 载入最近 ' + Math.floor(history.length / 2) + ' 轮）\x1b[0m');
     term.writeln('\x1b[90m继续提问即引用前文；/clear 退出恢复态\x1b[0m');
+    if (topbarTitle) topbarTitle.textContent = String(hit.title || hit.id).slice(0, 30);
   }
 
   // ---------- 会话收尾归档（A4 自动归档 + B3 未决决策，合并落地） ----------
@@ -249,24 +261,28 @@
   function drawStatusRow() {
     if (atPrompt && statusLine) term.setStatus(statusLine.replace(/\x1b\[[0-9;]*m/g, ''));
   }
-  // 输入框（输入中）：DOM 输入块常驻流末（demo #inputblock 语义），输入值/状态直接落 DOM
+  // 输入框（输入中）：DOM 输入条常驻底部（DeepSeek 式），输入值/状态直接落 DOM
   function showPrompt() {
     atPrompt = true;
     term._input.value = line;
+    term.autogrow();
     term.setStatus((statusLine || '').replace(/\x1b\[[0-9;]*m/g, ''));
     term.focus();
   }
-  // 回车提交：提交内容渲染为用户消息区块（demo .row.user），输入块原位清空
+  // 回车提交：提交内容渲染为用户气泡（.msg.user），输入条清空
   function submitMsg() {
     atPrompt = false;
     compClose();
-    term.appendCard('<div class="row user"><span class="up">' + PROMPT + '</span>' + escHtml(line) + '</div>', 'user');
+    term.beginMsg('user');
+    term.appendCard(escHtml(line));
+    term.endMsg();
     line = '';
     term._input.value = '';
+    term.autogrow();
     clearDraft();
   }
   // 重绘输入行（退格/历史/补全用）：直接落输入元素
-  function redrawInput() { term._input.value = line; saveDraft(); }
+  function redrawInput() { term._input.value = line; term.autogrow(); saveDraft(); }
   // DOM 转义（消息区块渲染用）
   function escHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -281,7 +297,7 @@
     clearTimeout(draftTimer);
     try { localStorage.removeItem('md-agent-draft'); } catch (e) { /* 忽略 */ }
   }
-  const quickBtns = [...document.querySelectorAll('#quick-btns button')];
+  const quickBtns = [...document.querySelectorAll('#sb-nav button')];
 
   let busy = false;          // 命令/回答进行中（提交/按钮禁用，输入框仍可编辑）
   let cmdHistory = loadCmdHistory(); // 命令行历史（localStorage 持久化；区别于多轮对话 history）
@@ -338,6 +354,7 @@
       busy = false;
       setBusyUI();
       showPrompt();   // 回答结束后重画输入框（上边框/输入行/下边框/状态行）
+      updateTopTitle();
       refreshStatus();
     }
   }
@@ -367,6 +384,7 @@
       busy = false;
       setBusyUI();
       showPrompt();
+      updateTopTitle();
       refreshStatus();
     }
   }
@@ -376,9 +394,21 @@
     quickBtns.forEach((b) => (b.disabled = false));
   }
 
-  // xterm 按键扩展：↑↓ 历史、Tab 命令补全、Ctrl+C 中断（流内输入，焦点在终端）
+  // 按键扩展：y/n 确认、↑↓ 历史、Tab 命令补全、Ctrl+C 中断（原生 textarea，Enter 由 stream.js 转发）
   term.attachCustomKeyEventHandler((ev) => {
     const k = ev.key;
+    // 终端确认机制（写操作人审 y/n）：原生 textarea 无字符流事件，改按键级拦截
+    if (confirmCb) {
+      ev.preventDefault();
+      if (k === 'y' || k === 'Y') {
+        term.writeln('\x1b[32m✓ 已确认\x1b[0m');
+        const cb = confirmCb; confirmCb = null; cb(true);
+      } else if (k === 'n' || k === 'N' || k === 'Enter' || k === 'Escape') {
+        term.writeln('\x1b[90m已取消\x1b[0m');
+        const cb = confirmCb; confirmCb = null; cb(false);
+      }
+      return false;
+    }
     // 补全下拉：↑↓/Tab 移动选择，Enter 选中，Esc 关闭
     if (compOpen && compItems.length) {
       if (k === 'ArrowUp' || k === 'ArrowDown' || k === 'Tab') {
@@ -390,7 +420,8 @@
       if (k === 'Enter') { ev.preventDefault(); compPick(compIdx); return false; }
       if (k === 'Escape') { ev.preventDefault(); compClose(); return false; }
     }
-    if (k === 'ArrowUp' || k === 'ArrowDown') {
+    // ↑↓ 历史：仅输入为空时（原生 textarea 多行时光标移动优先）
+    if ((k === 'ArrowUp' || k === 'ArrowDown') && !line.trim()) {
       ev.preventDefault();
       navHistory(k === 'ArrowUp' ? 1 : -1);
       return false;
@@ -431,7 +462,7 @@
   });
   quickBtns.forEach((btn) => btn.addEventListener('click', () => submitCmd(btn.dataset.cmd)));
 
-  // ---------- 补全下拉（demo #completion） ----------
+  // ---------- 补全下拉（锚定输入条上方） ----------
   let compOpen = false;
   let compItems = [];
   let compIdx = 0;
@@ -449,10 +480,11 @@
       d.addEventListener('mouseenter', () => { compIdx = i; compPaint(); });
       compEl.appendChild(d);
     });
-    // 定位：输入块上方
-    const ib = document.getElementById('inputblock');
+    // 定位：输入条上方（左侧锚定输入条左缘）
+    const ib = document.querySelector('#input-bar .i-row');
     const r = ib.getBoundingClientRect();
     compEl.style.bottom = (window.innerHeight - r.top + 8) + 'px';
+    compEl.style.left = Math.max(12, r.left) + 'px';
     compEl.classList.add('open');
   }
   function compPaint() {
@@ -488,23 +520,36 @@
     if (compOpen && !compEl.contains(e.target)) compClose();
   });
 
-  // ---------- 停止按钮（demo #inline-stop：随 LLM 流显隐） ----------
-  const stopBtn = document.getElementById('inline-stop');
+  // ---------- 发送/停止按钮（busy 互换，复用 currentAbort；DeepSeek 式） ----------
+  const sendBtn = document.getElementById('send-btn');
   function setStopBtn(show) {
-    if (stopBtn) stopBtn.classList.toggle('show', show);
+    if (!sendBtn) return;
+    sendBtn.textContent = show ? '停止' : '发送';
+    sendBtn.classList.toggle('stop', show);
+    sendBtn.title = show ? '停止回答' : '发送 (Enter)';
   }
-  if (stopBtn) {
-    stopBtn.addEventListener('click', () => {
+  if (sendBtn) {
+    sendBtn.addEventListener('click', () => {
       if (currentAbort) {
         currentAbort.abort();
         term.writeln('\x1b[90m(已停止)\x1b[0m');
+      } else {
+        const cmd = line.trim();
+        if (cmd) submitCmd(cmd);
       }
     });
   }
 
-  // ---------- 会话标签条（demo #session-bar：active 会话，点击恢复/× 归档/＋新建） ----------
-  const sessionTabs = document.getElementById('session-tabs');
-  async function archiveSession(id) {
+  // ---------- 左侧会话边栏（DeepSeek 式：新建/搜索/恢复/归档；E1：标签条版改名 archiveSessionStatus，
+  //            不再覆盖 137 行完整归档版 archiveSession——/clear 与 30min 空闲归档随之复活） ----------
+  const sbList = document.getElementById('sb-list');
+  const sbSearchEl = document.getElementById('sb-search');
+  let sbSearchTxt = '';
+  let sbSearchTimer = null;
+  let sbCache = null;        // /api/sessions lite 列表缓存（8s 轮询指纹对比，变化才重绘——R6）
+  let sbFingerprint = '';
+  // 单会话归档（侧边栏 ×）：只翻 status 字段（不覆盖完整归档版）
+  async function archiveSessionStatus(id) {
     const f = await api('/api/file?path=sessions/' + encodeURIComponent(id + '.md')).catch(() => null);
     if (!f || !f.content) return;
     const next = f.content.replace(/^(status:\s*)active$/m, '$1archived');
@@ -515,44 +560,104 @@
       body: JSON.stringify({ path: 'sessions/' + id + '.md', content: next }),
     }).catch(() => {});
   }
-  async function paintSessionBar() {
-    const r = await api('/api/sessions').catch(() => null);
-    const list = ((r && r.sessions) || []).filter((s) => s.status === 'active');
-    sessionTabs.innerHTML = '';
+  function renderSidebar(r) {
+    const all = (r && r.sessions) || [];
+    const kw = sbSearchTxt.trim().toLowerCase();
+    const list = kw
+      ? all.filter((s) => String(s.title || '').toLowerCase().includes(kw) || s.id.includes(kw))
+      : all;
+    const active = list.filter((s) => s.status === 'active');
+    const archived = list.filter((s) => s.status !== 'active');
+    const curId = (sessionFile || '').replace('sessions/', '').replace(/\.md$/, '');
+    sbList.innerHTML = '';
+    const group = (items, label) => {
+      if (!items.length) return;
+      const h = document.createElement('div');
+      h.className = 'sb-group';
+      h.textContent = label;
+      sbList.appendChild(h);
+      for (const s of items.slice(0, 60)) {
+        const it = document.createElement('div');
+        it.className = 'sb-item' + (s.id === curId ? ' current' : '');
+        const t = document.createElement('span');
+        t.className = 'sb-item-title';
+        t.textContent = String(s.title || s.id).slice(0, 24);
+        t.title = s.id;
+        const d = document.createElement('span');
+        d.className = 'sb-item-meta';
+        d.textContent = (s.count || 0) + ' 轮 · ' + (s.date || (s.mtime ? new Date(s.mtime * 1000).toISOString().slice(0, 10) : ''));
+        const x = document.createElement('span');
+        x.className = 'sb-item-x';
+        x.textContent = '×';
+        x.title = '归档会话';
+        x.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          if (!confirm('归档会话 ' + s.id + '？')) return;
+          archiveSessionStatus(s.id).then(() => { sbFingerprint = ''; paintSidebar(); });
+        });
+        it.appendChild(t);
+        it.appendChild(d);
+        it.appendChild(x);
+        it.addEventListener('click', () => {
+          resumeCmd(s.id).then(() => { sbFingerprint = ''; paintSidebar(); });
+        });
+        sbList.appendChild(it);
+      }
+    };
+    group(active, '进行中');
+    group(archived, '已归档');
     if (!list.length) {
-      const d = document.createElement('span');
-      d.className = 'sb-empty';
-      d.textContent = '（无进行中会话 · 提问后自动创建）';
-      sessionTabs.appendChild(d);
+      const e = document.createElement('div');
+      e.className = 'sb-empty';
+      e.textContent = kw ? '无匹配会话' : '暂无会话 · 提问后自动创建';
+      sbList.appendChild(e);
+    }
+  }
+  function paintSidebar() {
+    if (!sbCache) {
+      api('/api/sessions').catch(() => null).then((r) => { sbCache = r || { sessions: [] }; renderSidebar(sbCache); });
       return;
     }
-    for (const s of list.slice(0, 8)) {
-      const b = document.createElement('button');
-      b.className = 'sb-tab';
-      const name = document.createElement('span');
-      name.textContent = String(s.title || s.id).slice(0, 12);
-      b.appendChild(name);
-      b.title = s.id + ' · ' + (s.count || 0) + ' 轮';
-      b.addEventListener('click', () => { resumeCmd(s.id); });
-      const x = document.createElement('span');
-      x.className = 'sb-x';
-      x.textContent = '×';
-      x.title = '归档会话';
-      x.addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        if (!confirm('归档会话 ' + s.id + '？')) return;
-        archiveSession(s.id).then(() => paintSessionBar());
-      });
-      b.appendChild(x);
-      sessionTabs.appendChild(b);
-    }
+    renderSidebar(sbCache);
+  }
+  // 8s 轮询：会话列表变化（新建/归档/计数）才重绘，避免打断 hover（R6）
+  async function paintSidebarIfChanged() {
+    const r = await api('/api/sessions').catch(() => null);
+    if (!r) return;
+    const fp = (r.sessions || []).map((s) => s.id + ':' + s.status + ':' + s.count).join('|');
+    if (fp !== sbFingerprint) { sbFingerprint = fp; sbCache = r; renderSidebar(sbCache); }
+  }
+  if (sbSearchEl) {
+    sbSearchEl.addEventListener('input', (e) => {
+      sbSearchTxt = e.target.value;
+      clearTimeout(sbSearchTimer);
+      sbSearchTimer = setTimeout(paintSidebar, 150);
+    });
   }
   document.getElementById('session-new').addEventListener('click', () => {
     if (!confirm('新建会话将归档当前对话并清空多轮记忆，继续？')) return;
     submitCmd('/clear');
-    setTimeout(paintSessionBar, 800);
+    setTimeout(() => { sbFingerprint = ''; paintSidebar(); }, 800);
   });
-  paintSessionBar();
+  paintSidebar();
+
+  // ---------- 顶栏：会话标题 + 模型芯片 ----------
+  const topbarTitle = document.getElementById('topbar-title');
+  const modelChip = document.getElementById('model-chip');
+  function updateTopTitle() {
+    if (!topbarTitle) return;
+    const q = sessionLog[0] && sessionLog[0].q;
+    topbarTitle.textContent = q ? String(q).slice(0, 30) : '新对话';
+  }
+  function updateModelChip(model, endpoint) {
+    if (!modelChip) return;
+    modelChip.textContent = model || '未配置 LLM';
+    modelChip.classList.toggle('nok', !model || !endpoint);
+    modelChip.title = endpoint
+      ? (endpoint + ' · 点击打开配置页')
+      : '未配置模型服务 · 点击打开配置页';
+  }
+  if (modelChip) modelChip.addEventListener('click', () => window.open('/config.html', '_blank'));
 
   // ---------- 输入历史（会话内，空输入时 ArrowUp/Down 翻动） ----------
   function pushHistory(t) {
@@ -603,44 +708,30 @@
     return atDocs;
   }
 
-  // ---- 启动欢迎 banner + 状态信息（异步汇总；bannerDone 保证状态行先于输入框打印）----
+  // ---- 启动欢迎横幅 + 建议 chips（DeepSeek 式；R2：状态行不再启动时拉 5 端点，
+  //      改由 refreshStatus 8s 轮询填充——启动只需 1 个 config 请求，输入框不被 banner 阻塞）----
   let bannerDone = Promise.resolve();
   function printBanner() {
-    // 终端重做：DOM 欢迎横幅（demo .welcome），状态汇总异步填充
     const bannerRow = term.appendCard(
       '<div class="welcome">' +
         '<div class="w-title">md-agent · 私人 AI 运营中心</div>' +
-        '<div class="w-line">输入 <span class="k">/view</span> 打开面板 · <span class="k">/help</span> 命令 · <span class="k">/config</span> 配置 · <span class="k">/view ops</span> 运营中心</div>' +
+        '<div class="w-line">输入 <span class="k">/help</span> 命令 · <span class="k">/config</span> 配置 · <span class="k">/view ops</span> 运营中心</div>' +
         '<div class="w-line dim">你的 AI 做了什么，永远可查</div>' +
+        '<div class="w-chips">' +
+          '<button data-cmd="/view home">🏠 功能首页</button>' +
+          '<button data-cmd="/view pending">📥 待审</button>' +
+          '<button data-cmd="/view ops">📊 运营中心</button>' +
+          '<button data-cmd="/side">⌘ 命令速览</button>' +
+        '</div>' +
         '<div class="w-status">状态加载中…</div>' +
       '</div>'
     );
-    const statusEl = bannerRow.querySelector('.w-status');
-    // 状态汇总：健康 / KB / 模型 / 待审 / 任务 / 图谱
-    bannerDone = Promise.all([
-      fetch('/api/health').then((r) => r.json()).catch(() => null),
-      fetch('/api/config').then((r) => r.json()).catch(() => null),
-      fetch('/api/kb/pending').then((r) => r.json()).catch(() => null),
-      fetch('/api/tasks').then((r) => r.json()).catch(() => null),
-      fetch('/api/graph/stats').then((r) => r.json()).catch(() => null),
-    ]).then(([h, c, p, t, g]) => {
-      const ver = (h && h.version) || '?';
-      const kb = ((c && c.kb_root) || '-').split(/[\/]/).pop();
-      const model = (c && c.llm && c.llm.model) || '未配置';
-      applyLlmConfigured(!!(c && c.llm && c.llm.endpoint)); // 上下文组装 v2：有 LLM 配置 → 工具化取用
-      const pend = (p && Array.isArray(p.pending)) ? p.pending.length : '-';
-      const todo = (t && t.stats) ? (t.stats.todo || 0) + (t.stats.doing || 0) : '-';
-      const gs = (g && g.docs) ? (g.docs || 0) + ' 文档 / ' + (g.links || 0) + ' 链接' : '-';
-      if (statusEl) {
-        statusEl.innerHTML = '版本 <span class="v">v' + ver + '</span> · 模型 <span class="v">' + model + '</span>' +
-          ' · KB <span class="v">' + kb + '</span> · 待审 <span class="v">' + pend + '</span>' +
-          ' · 进行中任务 <span class="v">' + todo + '</span> · 图谱 <span class="v">' + gs + '</span>';
-      }
-    }).catch(() => {});
+    bannerRow.querySelectorAll('.w-chips button').forEach((b) => b.addEventListener('click', () => submitCmd(b.dataset.cmd)));
+    // 状态汇总改由 refreshStatus（8s 轮询）填充：banner 状态行与输入条状态行同源
   }
   printBanner();
 
-  // ---- 终端内状态栏（输入框下方第 4 行；命令后刷新 + 8s 轮询，原地重绘）----
+  // ---- 状态轮询（输入条状态行 + 欢迎横幅状态 + 顶栏模型芯片 + 侧边栏会话指纹；8s） ----
   function refreshStatus() {
     Promise.all([
       fetch('/api/health').then((r) => r.json()).catch(() => null),
@@ -652,14 +743,15 @@
     ]).then(([h, c, p, t, g, hb]) => {
       const ok = !!(h && h.status === 'ok');
       const model = (c && c.llm && c.llm.model) || '未配置 LLM';
+      const endpoint = (c && c.llm && c.llm.endpoint) || '';
       const kb = (c && c.kb_root) || '-';
-      applyLlmConfigured(!!(c && c.llm && c.llm.endpoint)); // 配置页改 endpoint 后 ≤8s 生效（无需重载页面）
+      applyLlmConfigured(!!endpoint); // 配置页改 endpoint 后 ≤8s 生效（无需重载页面）
       const pend = (p && Array.isArray(p.pending)) ? p.pending.length : '-';
       const todo = (t && t.stats) ? (t.stats.todo || 0) + (t.stats.doing || 0) : '-';
       const gs = (g && g.docs) ? (g.docs || 0) + ' 文档 / ' + (g.links || 0) + ' 链接' : '-';
       const hbTxt = hb ? (hb.enabled ? '心跳开' : '心跳关') : '';
       let auditTxt = '';
-      let auditCount = 0; // 快捷按钮「审计」徽标（与状态行同源）
+      let auditCount = 0; // 侧边栏「审计」徽标（与状态行同源）
       if (hb && hb.audit && (hb.audit.orphans || hb.audit.dangling || hb.audit.duplicates || hb.audit.mentions)) {
         const parts = [];
         if (hb.audit.orphans) { parts.push('孤立 ' + hb.audit.orphans); auditCount += hb.audit.orphans; }
@@ -668,7 +760,8 @@
         if (hb.audit.mentions) auditCount += hb.audit.mentions;
         auditTxt = ' ⚠ 审计：' + parts.join(' · ');
       }
-      updateBadges(typeof pend === 'number' ? pend : 0, auditCount); // 按钮徽标（待审红/审计黄）
+      updateBadges(typeof pend === 'number' ? pend : 0, auditCount); // 侧边栏徽标（待审红/审计黄）
+      updateModelChip(model, endpoint);
       statusLine = truncateW(
         '\x1b[' + (ok ? '32' : '31') + 'm●\x1b[0m ' + (ok ? '服务运行中' : '服务异常') +
         '\x1b[90m · 模型 ' + model + ' · KB ' + kb + ' · 待审 ' + pend +
@@ -677,6 +770,15 @@
         (auditTxt ? '\x1b[33m' + auditTxt + '\x1b[0m' : '') + '\x1b[0m',
         trueCols() - 1);
       drawStatusRow();
+      // 欢迎横幅状态行（R2：与输入条状态行同源，随轮询更新）
+      const bannerStatus = document.querySelector('.welcome .w-status');
+      if (bannerStatus) {
+        const kbName = kb.split(/[\/\\]/).pop();
+        bannerStatus.innerHTML = '版本 <span class="v">v' + ((h && h.version) || '?') + '</span> · 模型 <span class="v">' + model + '</span>' +
+          ' · KB <span class="v">' + kbName + '</span> · 待审 <span class="v">' + pend + '</span>' +
+          ' · 进行中任务 <span class="v">' + todo + '</span> · 图谱 <span class="v">' + gs + '</span>';
+      }
+      paintSidebarIfChanged(); // 会话列表变化才重绘（R6）
     }).catch(() => {});
   }
   refreshStatus();
@@ -726,8 +828,8 @@
     showPrompt(); // 输入框（上边框/输入行/下边框/状态行）在内容末尾
   })();
 
-  // 终端确认机制：confirm(msg) 挂起等待 y/n 按键（写操作人审闭环的基础设施）
-  // 焦点从输入框转到终端收 y/n，结束后回输入框
+  // 终端确认机制：confirm(msg) 挂起等待 y/n 按键（写操作人审闭环的基础设施；E6：无效键静默吞掉，无空行）
+  // y/n 由按键处理器（attachCustomKeyEventHandler）拦截——原生 textarea 无字符流事件
   let confirmCb = null;
   function confirm(msg) {
     return new Promise((resolve) => {
@@ -737,37 +839,12 @@
     });
   }
 
-  // 终端键盘：confirm 分支 + 流内输入（回车提交/退格/追加式）
+  // 输入提交（原生 textarea：字符编辑/IME 组合由浏览器处理，line 经 input 事件同步；这里只接 Enter）
   term.onData((data) => {
     touchActivity(); // A4 收尾归档：任意输入 = 活动（30min 空闲判定）
-    const code = data.charCodeAt(0);
-    // 终端确认机制（写操作人审：y/n）
-    if (confirmCb) {
-      const c = data.trim().toLowerCase();
-      const cb = confirmCb;
-      // 注意：此处不调 showPrompt()——命令仍在执行（atPrompt 保持 false），输入条由命令结束后统一重建；
-      // 提前重画输入条会把 atPrompt 置 true，8s 状态栏轮询会把状态行写进命令输出中间
-      if (c === 'y') { confirmCb = null; term.writeln('\x1b[32m✓ 已确认\x1b[0m'); cb(true); }
-      else if (c === 'n' || data === '\r' || code === 27) { confirmCb = null; term.writeln('\x1b[90m已取消\x1b[0m'); cb(false); }
-      else { term.write('\b \b'); }
-      return;
-    }
     if (data === '\r') {
       const cmd = line.trim();
       submitCmd(cmd); // 统一提交入口（提交块 + run + finally showPrompt）
-      return;
-    }
-    if (data === '\x7f' || data === '\x08') {
-      // 退格（兼容 DEL/BS）：Array.from 字符级切片（代理对安全，不劈 emoji），整行重绘
-      if (line.length) {
-        const chars = Array.from(line);
-        chars.pop();
-        line = chars.join('');
-        redrawInput();
-      }
-    } else if (code >= 32) {
-      line += data;
-      saveDraft();
     }
   });
 
@@ -864,6 +941,21 @@
     }
     out.push(...md.flush());
     return out.join('\n');
+  }
+
+  // 深度思考折叠块（DeepSeek 式）：reasoning_content 折叠展示，点击展开；返回行 HTML
+  function renderThinkBlock(text, secs) {
+    return '<div class="think-block collapsed">' +
+      '<div class="think-head"><span>🧠 深度思考' + (secs ? ' · ' + secs + ' 秒' : '') + '</span><span class="chev">▸</span></div>' +
+      '<div class="think-body">' + escHtml(String(text || '')) + '</div>' +
+      '</div>';
+  }
+  // 思考块点击展开（renderThinkBlock 的行元素需绑定；DeepSeek 式折叠交互）
+  function wireThink(rowEl) {
+    if (!rowEl) return;
+    const head = rowEl.querySelector('.think-head');
+    const blk = rowEl.querySelector('.think-block');
+    if (head && blk) head.addEventListener('click', () => blk.classList.toggle('open'));
   }
 
   async function api(path, opts) {
@@ -1081,12 +1173,15 @@
   function createToolRow(name, paramsTxt) {
     const t0 = Date.now();
     let timer = null;
+    // 工具调用折叠卡（.msg.tool 容器：整宽灰色卡片，三态 + 点击展开 + 失败自动展开）
+    term.beginMsg('tool');
     const rowEl = term.appendCard(
-      '<div class="toolrow queued"><span class="tr-name">[工具] ' + escHtml(name) + '</span>' +
+      '<div class="toolrow queued"><span class="tr-name"><span class="tr-ico">🔧</span>' + escHtml(name) + '</span>' +
       '<span class="tr-state">排队中</span>' +
       '<div class="tr-body"><div class="kv">参数: ' + escHtml(paramsTxt || '{}') + '</div><div class="res"></div></div>' +
       '</div>'
     );
+    term.endMsg();
     const card = rowEl.querySelector('.toolrow');
     const stateEl = card.querySelector('.tr-state');
     const bodyEl = card.querySelector('.tr-body');
@@ -1109,7 +1204,7 @@
       },
       done(result) {
         clearInterval(timer);
-        card.classList.remove('running');
+        card.classList.remove('queued', 'running');
         card.classList.add('done');
         stateEl.textContent = '成功 · ' + ((Date.now() - t0) / 1000).toFixed(2) + 's';
         logActivity('tool', '工具 ' + name + ' · 成功', { tool: name, ok: true });
@@ -1117,7 +1212,7 @@
       },
       fail(reason) {
         clearInterval(timer);
-        card.classList.remove('running');
+        card.classList.remove('queued', 'running');
         card.classList.add('fail');
         stateEl.textContent = '失败 · ' + ((Date.now() - t0) / 1000).toFixed(2) + 's';
         logActivity('tool', '工具 ' + name + ' · 失败', { tool: name, ok: false });
@@ -1188,10 +1283,9 @@
     let firstContentAt = null;
     let lastUsage = null;
     let toolMode = false;
-    let titlePrinted = false;
-    let thoughtPrinted = false;
+    let thoughtShown = false;
+    let thoughtEl = null;   // 「思考中…」行元素（首个 content 到达时替换为深度思考折叠块）
     let toolJson = null;
-    const TITLE = '\x1b[1;32m──── 回答 ────\x1b[0m';
     currentAbort = new AbortController();
     setStopBtn(true);
     try {
@@ -1216,7 +1310,12 @@
         reasoning = (msg && msg.reasoning_content) || '';
         lastUsage = body.usage || null;
         toolJson = Core.tryParseTool(full, TOOL_API);
-        if (!toolJson) { term.writeln(TITLE); term.writeln(renderMdFile(full)); }
+        if (!toolJson) {
+          // 非流式回答：气泡 + 深度思考块 + 正文
+          term.beginMsg('assistant');
+          if (reasoning) wireThink(term.appendCard(renderThinkBlock(reasoning, null), 'think-card'));
+          term.writeln(renderMdFile(full));
+        }
         return { full, reasoning, reasoningStartAt, firstContentAt, lastUsage, toolJson };
       }
       const reader = res.body.getReader();
@@ -1226,11 +1325,8 @@
       const md = createMdRenderer();
       let lineBuf = '';
       let held = []; // 含 <!-- 的行可能是写回块前奏，暂缓显示（避免露出一小段标记）
-      const printTitle = () => {
-        if (titlePrinted) return;
-        titlePrinted = true;
-        term.writeln(TITLE);
-      };
+      // 气泡容器：本轮回答的容器（reasoning 或首个 content 时创建），后续写入自动进入
+      const ensureBubble = () => { if (!term.currentMsg()) term.beginMsg('assistant'); };
       const feedDelta = (d) => {
         lineBuf += d;
         let nl;
@@ -1258,19 +1354,32 @@
             const rc = d && d.reasoning_content;
             if (rc) {
               reasoning += rc;
-              if (!titlePrinted && !thoughtPrinted) {
-                thoughtPrinted = true;
-                term.writeln('\x1b[90m🧠 思考中…\x1b[0m');
+              if (!thoughtShown) {
+                thoughtShown = true;
+                ensureBubble();
+                thoughtEl = term.appendRow('🧠 思考中…', 'think');
               }
             }
             const delta = d && d.content;
             if (!delta) continue;
             if (firstContentAt === null) {
               firstContentAt = Date.now(); // reasoning 结束 = 首个 content 到达
-              if (thoughtPrinted) term.write('\x1b[1A\x1b[2K\r'); // 清掉「思考中…」行
-              // 工具调用识别：首个 content 以 { 开头 → 整轮工具模式（不打印标题、不渲染）
+              // 工具调用识别：首个 content 以 { 开头 → 整轮工具模式（不渲染）
               toolMode = delta.trimStart().startsWith('{');
-              if (!toolMode) printTitle();
+              if (toolMode) {
+                // 工具轮：移除思考指示与空气泡（E4：不再用 \x1b[1A\x1b[2K 清除，DOM 行直接删）
+                if (thoughtEl) { term.removeRow(thoughtEl); thoughtEl = null; }
+                term.endMsg(true);
+              } else {
+                ensureBubble();
+                if (thoughtEl) {
+                  // 「思考中…」→ 深度思考折叠块（含完整 reasoning，默认折叠）
+                  wireThink(term.replaceRow(thoughtEl, renderThinkBlock(reasoning, Math.max(1, Math.round((Date.now() - reasoningStartAt) / 1000))), 'think-card'));
+                  thoughtEl = null;
+                } else if (reasoning) {
+                  wireThink(term.appendCard(renderThinkBlock(reasoning, Math.max(1, Math.round((Date.now() - reasoningStartAt) / 1000))), 'think-card'));
+                }
+              }
             }
             full += delta;
             if (toolMode) continue; // 工具轮只收集（不渲染）
@@ -1278,8 +1387,7 @@
             if (!saveSeen) {
               if (full.includes('<!-- md-agent-save -->')) {
                 saveSeen = true;
-                term.write('\r\n'); // 完整回车换行（裸 \n 只下移，光标会停在列 X，后续输入条被画偏）
-                continue;
+                continue; // E5：DOM 无光标概念，不再补 \r\n
               }
               feedDelta(delta);
             }
@@ -1328,7 +1436,7 @@
     if (toolMode) {
       toolJson = Core.tryParseTool(full, TOOL_API);
       if (!toolJson) {
-        term.writeln(TITLE);
+        term.beginMsg('assistant');
         term.writeln(renderMdFile(full));
       }
     } else {
@@ -1446,8 +1554,8 @@
     let lastUsage = null;
     const MAX_TOOL = 3;
     let toolCount = 0;
-    // 联网通道开关：触发词首轮开启；知识检索 0 命中时自动开启（让模型在知识库不足时走服务端 web_search）
-    let web = Core.webTrigger(question);
+    // 联网通道开关：输入条开关（webToggle）或触发词首轮开启；知识检索 0 命中时自动开启
+    let web = webToggle || Core.webTrigger(question);
     // CE 双模式（fresh-window 默认）：上下文超限 → 降级最小上下文重试（只保留引导前缀 + 当前问题）
     const llmOnceWithFresh = async (msgs) => {
       const r = await llmStreamOnce(msgs, web);
@@ -1465,7 +1573,7 @@
     for (;;) {
       term.writeln('\x1b[90m(' + (toolCount ? '继续' : '回答中') + (web ? '·联网' : '') + '...)\x1b[0m');
       const r = await llmOnceWithFresh(messages);
-      if (!r) return; // 中断/失败（内部已提示）
+      if (!r) { term.endMsg(); return; } // 中断/失败（内部已提示）；关闭残留气泡
       if (!r.toolJson) {
         // 最终回答：llmStreamOnce 已流式渲染；收尾信息用最后一轮
         full = r.full;
@@ -1509,12 +1617,7 @@
         break;
       }
     }
-    term.writeln('');
-    // 推理折叠行 + 本次回答 token 用量（回答渲染完成后、引用来源前；无则静默跳过）
-    if (reasoning) {
-      const secs = firstContentAt ? Math.max(1, Math.round((firstContentAt - reasoningStartAt) / 1000)) : null;
-      term.writeln('\x1b[90mThought' + (secs ? ' · ' + secs + ' 秒' : '') + '\x1b[0m');
-    }
+    // 本次回答 token 用量（深度思考块已在 llmStreamOnce 内展示；无则静默跳过）
     if (lastUsage && lastUsage.total_tokens) {
       term.writeln('\x1b[90m本次输出 ' + lastUsage.total_tokens + ' tokens\x1b[0m');
     }
@@ -1588,6 +1691,7 @@
         term.writeln('\x1b[90m' + k + '  ' + (h.section || '') + '\x1b[0m');
       }
     }
+    term.endMsg(); // 关闭本轮回答气泡（工具轮无气泡，无操作）
   }
 
   // ---------- 写回（Agent 沉淀） ----------
@@ -2780,10 +2884,10 @@
     submitCmd(sec.dataset.cmd);
   });
   document.getElementById('side-refresh').addEventListener('click', (e) => { e.stopPropagation(); loadSide(); });
-  // 点抽屉外关闭（快捷按钮区域除外，避免与按钮唤出竞态）
+  // 点抽屉外关闭（侧边栏导航区域除外，避免与按钮唤出竞态）
   document.addEventListener('click', (e) => {
     if (sideDrawer.classList.contains('hidden')) return;
-    if (sideDrawer.contains(e.target) || (e.target.closest && e.target.closest('#quick-btns'))) return;
+    if (sideDrawer.contains(e.target) || (e.target.closest && e.target.closest('#sb-nav'))) return;
     closeSide();
   });
 

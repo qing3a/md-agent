@@ -1,7 +1,7 @@
-// web/stream.js — 终端呈现层（demo 结构重写）：DOM 消息流 + ANSI→HTML + 输入路由
-// 替换 xterm：保持 term.writeln/write/clear/focus/onData/attachCustomKeyEventHandler 接口，
-// 内部把 ANSI 转成 HTML 行追加到 #stream（#inputblock 之前），输入走 #cmd-input。
-// 无 cell 模型/光标数学——行级渲染，提示块由 DOM 输入块承担（app.js 重写）。
+// web/stream.js — 终端呈现层（DeepSeek 网页版结构）：DOM 消息流 + ANSI→HTML + 原生 textarea 输入路由
+// 保持 term.writeln/write/clear/focus/onData/attachCustomKeyEventHandler 接口；
+// 消息按「气泡容器」组织：beginMsg() 后写入进入当前容器（.msg.user / .msg.assistant / .msg.tool），
+// 无容器时写入 #stream 根部（系统行/横幅）。无 cell 模型/光标数学——行级渲染，输入走 #cmd-input。
 
 (function () {
   'use strict';
@@ -9,6 +9,7 @@
   var SGR = { '30': 'c-30', '31': 'c-31', '32': 'c-32', '33': 'c-33', '34': 'c-34', '35': 'c-35', '36': 'c-36', '37': 'c-37', '90': 'c-90' };
   var CSS = [
     '.stream-row{white-space:pre-wrap;word-break:break-word;margin-bottom:6px;font-size:13.5px;line-height:1.75;}',
+    '.stream-row.think{color:#7f849c;font-size:12.5px;}',
     '.stream-row .c-30{color:#4c4f69}.stream-row .c-31{color:#f38ba8}.stream-row .c-32{color:#a6e3a1}',
     '.stream-row .c-33{color:#f9e2af}.stream-row .c-34{color:#89b4fa}.stream-row .c-35{color:#cba6f7}',
     '.stream-row .c-36{color:#94e2d5}.stream-row .c-37{color:#cdd6f4}.stream-row .c-90{color:#7f849c}',
@@ -27,12 +28,14 @@
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   }
-  // SGR 状态累积（真终端语义）：属性/前景各自增量
+  // SGR 状态累积（真终端语义）：属性/前景各自增量；\x1b[0;32m 这类"重置+上色"组合正确生效（E7）
   function sgrToCls(params, prev) {
-    if (!params.length || params[0] === '0' || params[0] === '') return '';
+    if (!params.length) return '';
     var attrs = new Set((prev.match(/\b(?:b|d|i|u)\b/g) || []));
     var parts = new Set(params);
     var isTc = params[0] === '48' && params[1] === '2'; // 48;2;R;G;B 的 2 是色彩空间
+    var fg = '';
+    if (parts.has('0')) attrs = new Set(); // 重置属性（fg 本就按本轮参数重算）
     if (parts.has('1')) attrs.add('b');
     if (parts.has('2') && !isTc) attrs.add('d');
     if (parts.has('3')) attrs.add('i');
@@ -40,7 +43,6 @@
     if (parts.has('22')) attrs.delete('b');
     if (parts.has('23')) attrs.delete('i');
     if (parts.has('24')) attrs.delete('u');
-    var fg = '';
     for (var i = 0; i < params.length; i++) if (SGR[params[i]]) fg = SGR[params[i]];
     var cls = Array.from(attrs);
     if (fg) cls.push(fg);
@@ -70,37 +72,29 @@
       injectCss();
       this.element = document.getElementById('stream');
       this._input = document.getElementById('cmd-input');
-      this._inputBlock = document.getElementById('inputblock');
+      this._current = null;          // 当前消息容器（气泡）；null = 写 #stream 根部
       this._onDataCbs = [];
       this._keyHandlers = [];
       this._nearBottom = true;
-      this.cols = 100;
+      this.cols = 100; // 兼容遗留（app.js trueCols() 自行按容器宽度计算）
 
-      // 输入路由：input 事件 → onData；keydown → attachCustomKeyEventHandler（未消费才默认处理）
-      this._input.addEventListener('input', () => {
-        const v = this._input.value;
-        if (v) { this._emit(v); this._input.value = ''; }
-      });
+      // 原生 textarea 编辑：Enter(无 Shift)=提交；Tab 永远拦截（补全/焦点保护）；
+      // Shift+Enter 换行 / 退格 / 光标移动 = 原生行为（app.js 在 input 事件同步 line）
       this._input.addEventListener('keydown', (ev) => {
         for (const h of this._keyHandlers) {
           const r = h(ev);
           if (r === false) { ev.preventDefault(); ev.stopPropagation(); return; }
         }
-        if (ev.key === 'Enter') { ev.preventDefault(); this._emit('\r'); }
-        else if (ev.key === 'Backspace') { ev.preventDefault(); this._emit('\x7f'); }
+        if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); this._emit('\r'); }
+        else if (ev.key === 'Tab') ev.preventDefault();
       });
-      // 滚动：近底才自动跟随；输入块随滚动淡出（demo）
+      // 输入即自动增高（1→6 行封顶）
+      this._input.addEventListener('input', () => { this.autogrow(); });
       const onScroll = () => {
-        const el = this.element;
-        this._nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-        if (this._inputBlock) this._inputBlock.style.opacity = this._nearBottom ? '1' : '0.25';
+        this._nearBottom = this.element.scrollHeight - this.element.scrollTop - this.element.clientHeight < 60;
       };
       this.element.addEventListener('scroll', onScroll);
-      window.addEventListener('resize', () => {
-        this.cols = Math.max(40, Math.floor((this.element.clientWidth - 32) / 8));
-      });
-      this.cols = Math.max(40, Math.floor((this.element.clientWidth - 32) / 8));
-      this._measureTimer = null;
+      this.autogrow();
     }
 
     // ---- 输入路由 ----
@@ -108,6 +102,27 @@
     attachCustomKeyEventHandler(h) { this._keyHandlers.push(h); return () => {}; }
     _emit(data) { this._onDataCbs.forEach((cb) => cb(data)); }
     focus() { this._input.focus({ preventScroll: true }); }
+    autogrow() {
+      const el = this._input;
+      el.style.height = 'auto';
+      el.style.height = Math.min(200, el.scrollHeight) + 'px';
+    }
+
+    // ---- 消息容器（气泡） ----
+    beginMsg(cls) {
+      this._current = document.createElement('div');
+      this._current.className = 'msg ' + (cls || '');
+      this.element.appendChild(this._current);
+      if (this._nearBottom) this.element.scrollTop = this.element.scrollHeight;
+      return this._current;
+    }
+    endMsg(removeIfEmpty) {
+      if (this._current) {
+        if (removeIfEmpty && !this._current.childNodes.length) this._current.remove();
+        this._current = null;
+      }
+    }
+    currentMsg() { return this._current; }
 
     // ---- 输出（行级 ANSI→HTML） ----
     write(text) {
@@ -118,13 +133,9 @@
     }
     writeln(text) { this.write(text); }
     clear() {
-      // 清空消息行（保留输入块）
-      let el = this.element.firstChild;
-      while (el && el !== this._inputBlock) {
-        const next = el.nextSibling;
-        this.element.removeChild(el);
-        el = next;
-      }
+      // 清空全部消息（输入条在 #stream 外，不动）
+      this._current = null;
+      this.element.innerHTML = '';
       this.element.scrollTop = 0;
     }
     scrollToBottom() { this.element.scrollTop = this.element.scrollHeight; this._nearBottom = true; }
@@ -134,20 +145,42 @@
       const d = document.createElement('div');
       d.className = 'stream-row';
       d.innerHTML = html;
-      this.element.insertBefore(d, this._inputBlock);
+      (this._current || this.element).appendChild(d);
       if (this._nearBottom) this.element.scrollTop = this.element.scrollHeight;
       return d;
     }
-    // 富内容行（工具卡/欢迎横幅/用户消息区块）：直接 appendCard 到流（在输入块之前）
+    // 纯文本行（思考中指示等）
+    appendRow(text, cls) {
+      const d = document.createElement('div');
+      d.className = 'stream-row' + (cls ? ' ' + cls : '');
+      d.textContent = text;
+      (this._current || this.element).appendChild(d);
+      if (this._nearBottom) this.element.scrollTop = this.element.scrollHeight;
+      return d;
+    }
+    // 富内容行（工具卡/欢迎横幅/用户消息区块）
     appendCard(html, cls) {
       const d = document.createElement('div');
       d.className = 'row ' + (cls || '');
       d.innerHTML = html;
-      this.element.insertBefore(d, this._inputBlock);
+      (this._current || this.element).appendChild(d);
       if (this._nearBottom) this.element.scrollTop = this.element.scrollHeight;
       return d;
     }
-    // 输入块状态行
+    removeRow(el) {
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+    }
+    // 用富 HTML 行替换现有行（「思考中…」→ 深度思考折叠块）
+    replaceRow(el, html, cls) {
+      const d = document.createElement('div');
+      d.className = 'row ' + (cls || '');
+      d.innerHTML = html;
+      if (el && el.parentNode) el.parentNode.replaceChild(d, el);
+      else (this._current || this.element).appendChild(d);
+      if (this._nearBottom) this.element.scrollTop = this.element.scrollHeight;
+      return d;
+    }
+    // 输入条状态行
     setStatus(text) {
       const el = document.getElementById('statusline');
       if (el) el.textContent = text;
