@@ -304,7 +304,8 @@
 
     <div id="input-bar">
       <div class="i-row">
-        <button id="attach-btn" title="上传文档（即将支持）" disabled>＋</button>
+        <button id="attach-btn" title="摄入文档（PDF/DOCX/PPT/XLS/EPUB → Markdown 进知识库）">＋</button>
+        <input type="file" id="attach-file" accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.csv,.odt,.ods,.odp,.rtf,.epub" hidden>
         <label class="switch" title="联网搜索（服务端 web_search，非流式）"><input type="checkbox" id="web-toggle"><span class="slider"></span></label>
         <span id="web-label">联网</span>
         <textarea id="cmd-input" rows="1" placeholder="输入问题 / 命令（Tab 补全 · @ 提及 · /view 面板）" autocomplete="off" spellcheck="false"></textarea>

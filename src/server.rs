@@ -93,6 +93,7 @@ pub async fn serve(
         .route("/api/context/stats", get(context_stats))
         .route("/api/activity", get(activity_list).post(activity_post))
         .route("/api/activity/since", get(activity_since))
+        .route("/api/ingest", post(ingest_handler))
         .route("/api/apps", get(apps_list))
         .route("/api/apps/{id}/data", get(app_data_get).post(app_data_post))
         .route("/api/hubs", get(hubs_list))
@@ -1620,6 +1621,64 @@ fn mask_key(key: &str) -> String {
     let head: String = key.chars().take(3).collect();
     let tail: String = key.chars().rev().take(4).collect::<String>().chars().rev().collect();
     format!("{head}****{tail}")
+}
+
+/// 文档摄入：body `{name, content_base64, dry_run?}`。
+/// dry_run=true 只转换返回预览（不落盘）；否则落 kb/notes/<safe>.md 并重建 INDEX+图谱。
+#[derive(Deserialize)]
+struct IngestBody {
+    name: String,
+    content_base64: String,
+    #[serde(default)]
+    dry_run: Option<bool>,
+}
+
+async fn ingest_handler(State(st): State<AppState>, Json(body): Json<IngestBody>) -> Response {
+    let bytes = match base64_decode(&body.content_base64) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("base64 解码失败: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    if body.name.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "缺文件名（name）" })),
+        )
+            .into_response();
+    }
+    let dry_run = body.dry_run.unwrap_or(false);
+    if dry_run {
+        return match crate::ingest::convert_bytes(&bytes, &body.name) {
+            Ok(md) => Json(json!({ "ok": true, "dry_run": true, "markdown": md })).into_response(),
+            Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+        };
+    }
+    let _guard = st.sync_lock.lock().await;
+    match crate::ingest::ingest_to_notes(&st.kb_root, &bytes, &body.name) {
+        Ok((rel, md)) => {
+            let _ = crate::kb::sync_index(&st.kb_root);
+            let _ = crate::graph::sync_graph(&st.kb_root);
+            crate::activity::record(
+                &st.kb_root,
+                "ingest",
+                &format!("摄入文档 {}", body.name),
+                json!({ "path": rel }),
+            );
+            Json(json!({ "ok": true, "path": rel, "markdown": md })).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
+    STANDARD.decode(s).map_err(|e| e.to_string())
 }
 
 async fn config_get() -> Json<serde_json::Value> {

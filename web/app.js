@@ -575,6 +575,67 @@
     });
   }
 
+  // ---------- 文档摄入（附件按钮）：选文件 → dry-run 预览 → y/n 确认落盘 ----------
+  const attachBtn = document.getElementById('attach-btn');
+  const attachInput = document.getElementById('attach-file');
+  if (attachBtn && attachInput) {
+    attachBtn.addEventListener('click', () => attachInput.click());
+    attachInput.addEventListener('change', () => {
+      const f = attachInput.files && attachInput.files[0];
+      attachInput.value = '';
+      if (!f) return;
+      ingestFile(f);
+    });
+  }
+
+  async function ingestFile(f) {
+    term.writeln('\x1b[90m(正在转换 ' + f.name + '，' + (f.size / 1024).toFixed(0) + ' KB ...)\x1b[0m');
+    let b64;
+    try {
+      const buf = await f.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let bin = '';
+      const CH = 0x8000;
+      for (let i = 0; i < bytes.length; i += CH) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+      }
+      b64 = btoa(bin);
+    } catch (e) {
+      term.writeln('\x1b[31m读取文件失败: ' + ((e && e.message) || e) + '\x1b[0m');
+      return;
+    }
+    let preview;
+    try {
+      preview = await api('/api/ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: f.name, content_base64: b64, dry_run: true }),
+      });
+    } catch (e) {
+      term.writeln('\x1b[31m摄入失败: ' + ((e && e.message) || e) + '\x1b[0m');
+      return;
+    }
+    const md = preview.markdown || '';
+    const lines = md.split('\n');
+    const shown = lines.slice(0, 40).join('\n');
+    term.writeln('\x1b[90m──── 转换预览（' + lines.length + ' 行 · 前 40 行）────\x1b[0m');
+    term.writeln(shown || '\x1b[90m(空内容)\x1b[0m');
+    const ok = await confirm('摄入到知识库 notes/？');
+    if (!ok) return;
+    term.writeln('\x1b[90m(正在落盘并重建索引...)\x1b[0m');
+    try {
+      const r = await api('/api/ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: f.name, content_base64: b64, dry_run: false }),
+      });
+      term.writeln('\x1b[32m✓ 已摄入 → ' + r.path + '\x1b[0m');
+      term.writeln('\x1b[90m可检索: /search <关键词> · 图谱: /view graph\x1b[0m');
+    } catch (e) {
+      term.writeln('\x1b[31m落盘失败: ' + ((e && e.message) || e) + '\x1b[0m');
+    }
+  }
+
   // ---------- 左侧会话边栏（DeepSeek 式：新建/搜索/恢复/归档；E1：标签条版改名 archiveSessionStatus，
   //            不再覆盖 137 行完整归档版 archiveSession——/clear 与 30min 空闲归档随之复活） ----------
   const sbList = document.getElementById('sb-list');

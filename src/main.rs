@@ -7,6 +7,7 @@ mod config;
 mod consolidate;
 mod fetch;
 mod heartbeat;
+mod ingest;
 mod hub;
 mod graph;
 mod kb;

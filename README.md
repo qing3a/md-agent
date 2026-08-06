@@ -50,6 +50,7 @@
 ### 工具链
 
 - **网页读取与操作**：`/fetch <url> [标题]` 静态抓取；`/page <url> [标题]` 动态读取（headless 等 JS 渲染）；`/page act <url> <json 动作数组>` 写侧（click/fill/select/scroll，动作清单**人工确认后执行**，返回页面结果）
+- **文档摄入**：附件按钮「＋」选 PDF/DOCX/PPT/XLS/CSV/EPUB 等 → anydoc 本地转 Markdown（dry-run 预览 → y/N 人审确认）→ 落 `notes/` 自动重建 INDEX+图谱；扫描件/加密文档明确报错
 - **任务引擎（Phase 3-B）**：`kb/.tasks.db` 独立 SQLite：目标/状态机（待办·进行中·完成·放弃）/依赖/推进日志；`/task` 终端文字看板 + `/task board` HTML 看板；**依赖就绪校验**（进入进行中/完成时依赖必须已完成）；`/task plan <目标>` LLM 拆解串行子任务链
 
 ### Agent 与 LLM
@@ -146,6 +147,8 @@ open <路径>           查看 KB 内 MD
 # 网页
 /fetch <url> [标题]    静态抓取网页：阅读视图 / 带标题则沉淀为待审笔记
 /page <url> [标题]     动态网页读取（headless Edge/Chrome，等 JS 渲染）
+# 文档摄入
+＋ 附件按钮             摄入 PDF/DOCX/PPT/XLS/CSV/EPUB → 预览 → y/N 确认进 notes/
 
 # 任务
 /task                  任务看板：new/start/done/drop/note/dep/rm/plan/board
@@ -197,6 +200,7 @@ cp config.json dist/config.json   # 可选：携带已有 LLM 配置
 | POST | `/api/link` | 补链接（body: `{src, dst}`；文件名双链 + 去重 + 重建图谱） |
 | GET | `/api/fetch?url=` | 静态网页抓取（HTTP + HTML 文本提取，零浏览器依赖） |
 | GET | `/api/page?url=` | 动态网页读取（chromiumoxide + 系统 Edge/Chrome headless） |
+| POST | `/api/ingest` | 文档摄入（body: `{name, content_base64, dry_run?}`；anydoc 转 GFM，dry_run 预览 / 落 notes/ 重建 INDEX+图谱） |
 | POST | `/api/page/act` | 动作执行（body: `{url, actions: [{kind: click\|fill\|select\|scroll, selector, value?}]}`；前端人审确认后调用） |
 | GET | `/api/tasks` | 任务列表 + 看板统计（`kb/.tasks.db` 独立库） |
 | POST | `/api/tasks` | 新建任务（body: `{goal, title?}`） |
