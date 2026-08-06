@@ -2,44 +2,16 @@
  * 回路：启动注入 L1（规范/记忆/索引）→ 用户提问 → 提取关键词 → 检索 L2 → 拼 Prompt → /api/llm 代理 → 回答
  */
 (function () {
-  if (typeof Terminal === 'undefined') {
+  if (typeof StreamTerm === 'undefined') {
     document.body.innerHTML =
-      '<pre style="color:#f38ba8;padding:16px">xterm.js 未加载（vendor/xterm.min.js 缺失或损坏）。请确认 web/vendor/ 完整后刷新。</pre>';
+      '<pre style="color:#f38ba8;padding:16px">stream.js 未加载（缺失或损坏）。请确认 web/ 完整后刷新。</pre>';
     return;
   }
-  const term = new Terminal({
-    cursorBlink: true,
-    fontSize: 14,
-    fontFamily: 'Consolas, "Cascadia Mono", monospace',
-    theme: { background: '#1e1e2e', foreground: '#cdd6f4', cursor: '#f5e0dc' },
-    scrollback: 2000,
-  });
-  const fit = new FitAddon.FitAddon();
-  term.loadAddon(fit);
-  term.open(document.getElementById('terminal'));
-  fit.fit();
-  // 多行串安全写屏：xterm 的 \n(LF) 只下移不回车，单次 writeln 多行内容会从上一行末尾接着写（阶梯错位）。
-  // 统一把内嵌换行规范为 \r\n（单行调用零影响；修复 cfg JSON / renderMdFile 等所有单次写多行的路径）
-  const _termWriteln = term.writeln.bind(term);
-  term.writeln = (d) => _termWriteln(String(d).replace(/\r?\n/g, '\r\n'));
-  // resize 防抖（150ms），避免拖动窗口时频繁重排终端
-  let fitTimer = null;
-  // resize 重画输入框（方案 A：reflow 变形后重画 4 行结构，光标送回输入行）
-  function redrawPromptIfVisible() {
-    if (!atPrompt) return;
-    if (term.buffer.active.cursorY + 3 >= term.rows) return;
-    term.write('\x1b[1A\x1b[2K\r' + hline());                 // 上边框
-    term.write('\x1b[1B\x1b[2K\r' + PROMPT + line);           // 输入行
-    term.write('\x1b[1B\x1b[2K\r' + hline());                 // 下边框
-    term.write('\x1b[1B\x1b[2K\r' + (statusLine || ''));      // 状态行
-    term.write('\x1b[3A\x1b[2K\r' + PROMPT + line);           // 光标回输入行
-  }
-  window.addEventListener('resize', () => {
-    clearTimeout(fitTimer);
-    fitTimer = setTimeout(() => { fit.fit(); redrawPromptIfVisible(); }, 150);
-  });
+  // 终端壳重做（demo 结构）：DOM 消息流替代 xterm（stream.js），接口保持 writeln/write/onData 等
+  const term = new StreamTerm();
+  // 多行串安全写屏：行级渲染，统一换行（stream.js 已按 \n 分行，这里只做兼容规范化）
 
-  const PROMPT = '\x1b[1;34mmd-agent>\x1b[0m ';
+  const PROMPT = 'md-agent';
   let L1_TEXT = ''; // 启动时注入的 L1 层全文
   let GUIDE_TEXT = ''; // L1 规范层（KB/FRAMEWORK/RULES）——稳定前缀
   let MEMORY_TEXT = ''; // L1 记忆/索引层（MEMORY/INDEX）——易变
@@ -273,30 +245,31 @@
     }
     return out + '\u2026';
   }
-  // 重绘状态行（要求光标在输入框）：下移两行（越过下边框）到状态行，重绘后回输入框
+  // 重绘状态行（DOM 输入块：直接写状态行元素）
   function drawStatusRow() {
-    if (!atPrompt || !statusLine) return;
-    if (term.buffer.active.cursorY + 2 >= term.rows) return;
-    term.write('\x1b[2B\x1b[2K\r' + statusLine + '\x1b[2A\x1b[2K\r' + PROMPT + line);
+    if (atPrompt && statusLine) term.setStatus(statusLine.replace(/\x1b\[[0-9;]*m/g, ''));
   }
-  // 输入框（输入中）：上边框 + 输入行 + 下边框 + 状态行；光标回输入行
+  // 输入框（输入中）：DOM 输入块常驻流末（demo #inputblock 语义），输入值/状态直接落 DOM
   function showPrompt() {
-    term.write(hline() + '\r\n' + PROMPT + line + '\r\n' + hline() + '\r\n' + (statusLine || ''));
-    term.write('\x1b[2A\x1b[2K\r' + PROMPT + line);
     atPrompt = true;
+    term._input.value = line;
+    term.setStatus((statusLine || '').replace(/\x1b\[[0-9;]*m/g, ''));
+    term.focus();
   }
-  // 回车提交：输入框边框与状态行移除、输入行变整行背景色块（已提交消息），回答从下方开始
+  // 回车提交：提交内容渲染为用户消息区块（demo .row.user），输入块原位清空
   function submitMsg() {
     atPrompt = false;
-    const bg = '\x1b[48;2;49;50;68m';
-    term.write('\x1b[1A\x1b[2K\r');
-    term.write('\x1b[1B\x1b[2K\r' + bg + ' '.repeat(trueCols()) + '\r' + PROMPT + line + '\x1b[0m');
-    term.write('\x1b[1B\x1b[2K\r');
-    term.write('\x1b[1B\x1b[2K\r');
-    term.write('\r\n');
+    term.appendCard('<div class="row user"><span class="up">' + PROMPT + '</span>' + escHtml(line) + '</div>', 'user');
+    line = '';
+    term._input.value = '';
+    clearDraft();
   }
-  // 流内重绘输入行（退格/历史/补全用）
-  function redrawInput() { term.write('\x1b[2K\r' + PROMPT + line); saveDraft(); }
+  // 重绘输入行（退格/历史/补全用）：直接落输入元素
+  function redrawInput() { term._input.value = line; saveDraft(); }
+  // DOM 转义（消息区块渲染用）
+  function escHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
   // 输入草稿：未提交输入防抖存 localStorage，刷新恢复（saveDraft 由 redrawInput/追加式输入触发）
   let draftTimer = null;
   function saveDraft() {
@@ -323,16 +296,9 @@
   }
   let currentAbort = null;   // 当前 LLM 流的 AbortController（Ctrl+C / Esc 中断回答）
 
-  // 终端实测列宽（消息块铺背景用；term.cols 是 fit 估算值，实测偏大 2 列）
+  // 终端实测列宽（消息块铺背景用；DOM 流按容器像素估算）
   function trueCols() {
-    try {
-      const cw = term._core.dimensions.css.cell.width; // xterm 内部 cell 宽（像素）
-      if (cw && cw > 0) {
-        const w = document.querySelector('.xterm-rows').clientWidth;
-        return Math.max(20, Math.floor(w / cw));
-      }
-    } catch (e) { /* fallthrough */ }
-    return term.cols - 2; // 兜底：留 2 列余量防 wrap
+    return Math.max(40, Math.floor((term.element.clientWidth - 32) / 8));
   }
 
   // ---------- 输入与提交 ----------
@@ -679,10 +645,7 @@
         redrawInput();
       }
     } else if (code >= 32) {
-      // 超长保护：输入行 wrap 会让下方边框/状态行错位，接近行宽时静默忽略
-      if (dispW(visOnly(PROMPT + line + data)) >= trueCols() - 2) return;
       line += data;
-      term.write(data); // 追加式：光标自然跟随内容
       saveDraft();
     }
   });
@@ -2171,8 +2134,7 @@
   const viewSplitBtn = document.getElementById('view-split');
   const SPLIT_KEY = 'md-agent-view-split';
   function refitTerm() {
-    try { fit.fit(); } catch (e) { /* fit 失败不阻塞 */ }
-    redrawPromptIfVisible();
+    // DOM 流自适应（stream.js 已按容器宽度计算列宽），无需重算
   }
   function applySplit(on) {
     document.body.classList.toggle('view-split', on);

@@ -3,57 +3,123 @@
 <head>
 <meta charset="utf-8">
 <title>md-agent</title>
-<link rel="stylesheet" href="vendor/xterm.min.css">
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #1e1e2e; }
-  /* 外壳：终端内容区 + DOM 输入条 + DOM 状态条（UI chrome 全部放 DOM，resize 由 CSS 自动适配） */
+  body { color: #cdd6f4; font-family: ui-monospace, Consolas, "Microsoft YaHei", monospace; }
   #app { display: flex; flex-direction: column; height: 100%; }
-  #terminal { flex: 1; min-height: 0; overflow: hidden; }
-  /* 留白放在 .xterm 自身（FitAddon 会读 term.element 的 padding 并扣除，不会像父级 padding 那样算偏列数） */
-  #terminal .xterm { padding: 10px; box-sizing: border-box; }
 
-  /* xterm 滚动条：细窄 + 主题色（仅终端内滚动，页面永不滚动） */
-  .xterm-viewport::-webkit-scrollbar { width: 8px; }
-  .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
-  .xterm-viewport::-webkit-scrollbar-thumb { background: #313244; border-radius: 4px; }
-  .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #45475a; }
-  .xterm-viewport { scrollbar-width: thin; scrollbar-color: #313244 transparent; }
+  /* ---- 会话标签条（demo #session-bar：打开的会话，点击恢复/× 归档/＋新建）---- */
+  #session-bar { display: flex; align-items: center; gap: 8px; padding: 5px 12px;
+    background: #181825; border-bottom: 1px solid #313244; font-size: 12px; flex: none; }
+  #session-bar .sb-lab { color: #585b70; flex: none; }
+  #session-tabs { display: flex; gap: 5px; flex: 1; min-width: 0; overflow-x: auto; }
+  .sb-tab { background: #26263a; color: #7f849c; border: 1px solid #313244; border-radius: 6px;
+    padding: 2px 8px 2px 10px; font-size: 11.5px; cursor: pointer; white-space: nowrap; display: flex; gap: 4px; align-items: center; }
+  .sb-tab:hover { border-color: #89b4fa; color: #cdd6f4; }
+  .sb-tab.active { color: #89b4fa; border-color: #89b4fa; }
+  .sb-tab .sb-x { color: #585b70; padding: 0 2px; border-radius: 3px; font-weight: 700; }
+  .sb-tab .sb-x:hover { color: #f38ba8; background: #181825; }
+  .sb-empty { color: #585b70; font-size: 11px; }
+  #session-new { background: #26263a; color: #a6e3a1; border: 1px dashed #313244;
+    border-radius: 6px; padding: 2px 10px; font-size: 11.5px; cursor: pointer; flex: none; }
+  #session-new:hover { border-color: #a6e3a1; }
 
-  /* ---- DOM 输入条（原流内输入框迁出；上下边框包裹输入行，跟随滚动淡出）---- */
-  #input-bar {
-    background: #181825;
-    transition: opacity .25s ease;
-  }
+  /* ---- 消息流（demo #stream：滚动容器，消息行 + 流末输入块）---- */
+  #stream { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 16px 4px;
+    scrollbar-width: thin; scrollbar-color: #313244 transparent; }
+  #stream::-webkit-scrollbar { width: 8px; }
+  #stream::-webkit-scrollbar-thumb { background: #313244; border-radius: 4px; }
+
+  .row { margin-bottom: 6px; font-size: 13.5px; line-height: 1.75; white-space: pre-wrap; word-break: break-word; }
+  .row.user { background: rgba(137, 180, 250, .08); border-left: 3px solid #89b4fa;
+    padding: 7px 12px; border-radius: 4px; }
+  .row.user .up { color: #89b4fa; font-weight: 700; margin-right: 8px; }
+  .row.sys { color: #7f849c; font-size: 12.5px; }
+  .row.think { color: #f9e2af; }
+  .row .hd { color: #89b4fa; font-weight: 700; }
+  .row .code { color: #f9e2af; background: rgba(38, 38, 58, .7); border-radius: 3px; padding: 0 3px; }
+  .row .bold { font-weight: 700; }
+  .row .link { color: #89b4fa; text-decoration: underline; }
+  .row .wl { color: #a6e3a1; }
+  .row .dim { color: #7f849c; }
+  .row .it { font-style: italic; }
+  .codeblock { background: #11111b; border: 1px solid #313244; border-radius: 6px;
+    padding: 8px 12px; margin: 4px 0 8px; font-size: 12.5px; overflow-x: auto; white-space: pre; }
+  .quote { border-left: 3px solid #585b70; padding: 2px 10px; margin: 4px 0; color: #a6adc8; }
+
+  /* ---- 工具行（demo .toolrow：状态 + 点击展开）---- */
+  .toolrow { margin: 2px 0; font-size: 12.5px; cursor: pointer; padding: 3px 8px; border-radius: 5px; }
+  .toolrow:hover { background: rgba(69, 71, 90, .35); }
+  .toolrow .tr-name { font-weight: 700; }
+  .toolrow.queued .tr-name { color: #7f849c; }
+  .toolrow.running .tr-name { color: #f9e2af; }
+  .toolrow.done .tr-name { color: #a6e3a1; }
+  .toolrow.fail { background: rgba(243, 139, 168, .08); }
+  .toolrow.fail .tr-name { color: #f38ba8; }
+  .toolrow .tr-state { color: #7f849c; font-size: 11.5px; margin-left: 6px; }
+  .toolrow.running .tr-state { color: #f9e2af; }
+  .toolrow.done .tr-state { color: #a6e3a1; }
+  .toolrow.fail .tr-state { color: #f38ba8; }
+  .toolrow .tr-body { display: none; margin: 2px 0 4px 20px; font-size: 12px; color: #cdd6f4; }
+  .toolrow.open .tr-body { display: block; }
+  .toolrow .tr-body .kv { color: #7f849c; }
+  .toolrow .tr-body .reason { color: #f38ba8; }
+
+  /* ---- 欢迎横幅（demo .welcome）---- */
+  .welcome { margin: 6px 0 14px; border: 1px solid rgba(137, 180, 250, .5); border-radius: 8px;
+    padding: 12px 16px; color: #cdd6f4; font-size: 13px; line-height: 1.9;
+    background: linear-gradient(135deg, rgba(137, 180, 250, .08), transparent 60%); }
+  .welcome .w-title { font-size: 16px; font-weight: 700; letter-spacing: 2px; color: #89b4fa; margin-bottom: 4px; }
+  .welcome .k { color: #89b4fa; font-weight: 700; }
+  .welcome .v { color: #a6e3a1; }
+  .welcome .dim { color: #585b70; font-size: 12px; }
+  .welcome .w-status { color: #585b70; font-size: 12px; margin-top: 4px; padding-top: 4px;
+    border-top: 1px dashed rgba(49, 50, 68, .7); }
+
+  /* ---- 流末输入块（demo #inputblock：随内容滚动，不固定底部）---- */
+  #inputblock { margin-top: 10px; transition: opacity .3s ease; }
+  #inputblock .i-border { height: 1px; background: #313244; }
+  #inputblock .i-row { display: flex; align-items: center; gap: 8px; padding: 6px 2px; }
+  #inputblock .i-prompt { color: #a6e3a1; font-weight: 700; font-size: 13px; white-space: nowrap; }
+  #cmd-input { flex: 1; background: transparent; border: none; outline: none; color: #cdd6f4;
+    font: inherit; font-size: 13px; caret-color: #89b4fa; min-width: 40px; }
+  #inputblock .i-btn { color: #f38ba8; border: 1px solid #f38ba8; background: transparent;
+    border-radius: 5px; padding: 2px 12px; font-size: 12px; cursor: pointer; display: none; }
+  #inputblock .i-btn.show { display: inline-block; }
+  #inputblock .i-btn:hover { background: rgba(243, 139, 168, .1); }
+  #inputblock #statusline { padding: 2px 0 6px; color: #585b70; font-size: 11.5px; }
+
+  /* ---- 补全下拉（demo #completion）---- */
+  #completion { position: fixed; left: 16px; z-index: 40; background: #181825;
+    border: 1px solid #313244; border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.5);
+    max-height: 220px; overflow-y: auto; display: none; min-width: 260px; }
+  #completion.open { display: block; }
+  .comp-item { padding: 5px 12px; font-size: 12.5px; cursor: pointer; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  .comp-item.sel { background: #313244; color: #89b4fa; }
+
+  /* ---- 快捷工具栏（保留）---- */
+  #input-bar { background: #181825; flex: none; }
   #quick-btns { display: flex; gap: 6px; padding: 6px 10px; }
-  #quick-btns button {
-    background: #313244; color: #a6adc8; border: none; border-radius: 5px;
-    padding: 2px 10px; font-size: 12px; cursor: pointer; position: relative;
-  }
+  #quick-btns button { background: #313244; color: #a6adc8; border: none; border-radius: 5px;
+    padding: 2px 10px; font-size: 12px; cursor: pointer; position: relative; }
   #quick-btns button:hover { background: #45475a; color: #cdd6f4; }
   #quick-btns button:disabled { opacity: .5; cursor: default; }
-  /* 按钮徽标（待审红 / 审计黄，右上角；与状态行同源，updateBadges 8s 轮询更新） */
-  #quick-btns .badge {
-    position: absolute; top: -5px; right: -6px; min-width: 15px; height: 15px;
+  #quick-btns .badge { position: absolute; top: -5px; right: -6px; min-width: 15px; height: 15px;
     padding: 0 4px; border-radius: 8px; box-sizing: border-box;
     background: #f38ba8; color: #11111b; font-size: 10px; font-weight: 700;
-    line-height: 15px; text-align: center;
-  }
+    line-height: 15px; text-align: center; }
   #quick-btns .badge.warn { background: #f9e2af; }
-  /* 输入框上下两条全宽横线（定稿视觉：上边框 + 输入行 + 下边框） */
-  /* 命令补全面板：悬浮在输入框上方（absolute 定位，不占布局） */
 
-  /* ---- 速览侧边栏（批次三：Ctrl+K | /side | 快捷按钮唤出的左侧抽屉，非常驻；改造后=命令面板 + 状态中心）---- */
-  #side-drawer {
-    position: fixed; left: 10px; top: 10px; bottom: 10px; width: 320px;
+  /* ---- 速览侧边栏（保留）---- */
+  #side-drawer { position: fixed; left: 10px; top: 10px; bottom: 10px; width: 320px;
     background: #181825; border: 1px solid #313244; border-radius: 8px;
     z-index: 50; display: flex; flex-direction: column; overflow: hidden;
-    box-shadow: 0 6px 24px rgba(0,0,0,.45);
-  }
+    box-shadow: 0 6px 24px rgba(0,0,0,.45); }
   #side-drawer.hidden { display: none; }
   #side-drawer header { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid #313244; }
   #side-drawer header span { color: #f5e0dc; font-weight: 600; font-size: 13px; }
   #side-drawer header button { background: #313244; color: #cdd6f4; border: none; border-radius: 5px; padding: 2px 8px; font-size: 12px; cursor: pointer; }
-  /* 命令面板（抽屉上部）：搜索框 + 候选列表；下半为状态中心速览卡 */
   #side-search-wrap { padding: 8px; border-bottom: 1px solid #313244; display: flex; flex-direction: column; gap: 6px; }
   #side-search { width: 100%; box-sizing: border-box; background: #1e1e30; color: #cdd6f4;
     border: 1px solid #313244; border-radius: 6px; padding: 6px 10px; font-size: 12px; outline: none; }
@@ -71,77 +137,88 @@
   .side-body { color: #cdd6f4; font-size: 12px; line-height: 1.6; }
   .side-hint { color: #7f849c; font-size: 11px; margin-top: 3px; }
 
-  /* ---- DOM 状态条（原流内状态行迁出；8s 轮询刷文本，不随终端滚动）---- */
-  #status-dot.bad { background: #f38ba8; }
-  /* /view 面板渲染层：iframe 沙箱浮层（图谱可视化等 HTML 视图） */
-  #view-overlay {
-    position: fixed; inset: 0; z-index: 100; background: #11111b;
-    display: flex; flex-direction: column;
-  }
+  /* ---- /view 面板渲染层（保留）---- */
+  #view-overlay { position: fixed; inset: 0; z-index: 100; background: #11111b;
+    display: flex; flex-direction: column; }
   #view-overlay.hidden { display: none; }
-  #view-overlay header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 8px 14px; background: #181825; border-bottom: 1px solid #313244;
-  }
+  #view-overlay header { display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 14px; background: #181825; border-bottom: 1px solid #313244; }
   #view-overlay header span { color: #f5e0dc; font-weight: 600; font-size: 13px; }
-  #view-overlay header button {
-    background: #313244; color: #cdd6f4; border: none; border-radius: 6px;
-    padding: 4px 12px; font-size: 12px; cursor: pointer;
-  }
+  #view-overlay header button { background: #313244; color: #cdd6f4; border: none; border-radius: 6px;
+    padding: 4px 12px; font-size: 12px; cursor: pointer; }
   #view-overlay header button:hover { background: #45475a; }
-  /* /view 标签页：多视图并存（graph/board/pending/audit/html 可同时开、切换、关闭） */
   #view-tabs { display: flex; gap: 4px; align-items: center; flex: 1; min-width: 0; overflow-x: auto; }
-  .view-tab {
-    background: #313244; color: #a6adc8; border: none; border-radius: 5px;
+  .view-tab { background: #313244; color: #a6adc8; border: none; border-radius: 5px;
     padding: 3px 8px 3px 10px; font-size: 12px; cursor: pointer;
-    display: flex; gap: 5px; align-items: center; white-space: nowrap;
-  }
+    display: flex; gap: 5px; align-items: center; white-space: nowrap; }
   .view-tab.active { background: #45475a; color: #f5e0dc; }
-  .view-tab.warn { color: #f9e2af; }  /* 加载慢（后台节流 10s 未就绪） */
-  .view-tab.err { color: #f38ba8; }   /* 视图脚本错误（已上报宿主） */
+  .view-tab.warn { color: #f9e2af; }
+  .view-tab.err { color: #f38ba8; }
   .view-tab .ld { width: 6px; height: 6px; border-radius: 50%; background: #89b4fa;
-                  flex: none; animation: ld-pulse 1s ease-in-out infinite; }
+    flex: none; animation: ld-pulse 1s ease-in-out infinite; }
   @keyframes ld-pulse { 0%,100% { opacity: .4; } 50% { opacity: 1; } }
   .view-tab-x { color: #a6adc8; font-weight: 700; padding: 0 2px; border-radius: 3px; }
   .view-tab-x:hover { color: #f38ba8; background: #181825; }
   #view-panes { flex: 1; position: relative; min-height: 0; }
   #view-panes iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: none; display: none; }
   #view-panes iframe.active { display: block; }
-  /* /view 分屏参照：分屏模式终端占左 40%（FitAddon 重算列数），视图盖右 60%，对话流随时可见可参照 */
-  body.view-split #terminal { width: 40%; }
+  body.view-split #stream { width: 40%; }
   body.view-split #input-bar { width: 40%; }
   body.view-split #view-overlay { left: 40%; }
 </style>
 </head>
 <body>
 <div id="app">
-  <div id="terminal"></div>
+  <!-- 会话标签条（demo #session-bar） -->
+  <div id="session-bar">
+    <span class="sb-lab">会话</span>
+    <div id="session-tabs"><span class="sb-empty">加载中…</span></div>
+    <button id="session-new" title="归档当前会话并开始新会话">＋ 新建</button>
+  </div>
 
-  <!-- 快捷工具栏（DOM）：输入框/状态栏回流内终端流（贴内容末尾），按钮行保留；全导航语义 + 徽标计数 -->
+  <!-- 消息流（demo #stream：消息行 + 流末输入块） -->
+  <div id="stream">
+    <!-- 流末输入块（demo #inputblock：随内容滚动，不固定底部） -->
+    <div id="inputblock">
+      <div class="i-border"></div>
+      <div class="i-row">
+        <span class="i-prompt">md-agent</span>
+        <input id="cmd-input" autocomplete="off" spellcheck="false" placeholder="输入问题 / 命令（Tab 补全 · @ 提及 · /view 面板）">
+        <button id="inline-stop" class="i-btn">停止</button>
+      </div>
+      <div class="i-border"></div>
+      <div id="statusline"></div>
+    </div>
+  </div>
+
+  <!-- 快捷工具栏（保留） -->
   <div id="input-bar">
     <div id="quick-btns">
       <button data-cmd="/view home" title="功能首页（全部功能一键进入）">首页</button>
       <button data-cmd="/view graph" title="知识库结构导航（查看图谱）">图谱</button>
-      <button data-cmd="/view pending" data-badge="pending" title="待审审核面板（批准/拒绝 LLM 写回；红徽标=待审数，点击直达）">待审</button>
-      <button data-cmd="/view audit" data-badge="audit" title="知识库健康审计面板（黄徽标=审计发现数，点击直达）">审计</button>
-      <button data-cmd="/view market" title="应用市场（SkillHub 管理端）">市场</button>
+      <button data-cmd="/view pending" data-badge="pending" title="待审审核面板">待审</button>
+      <button data-cmd="/view audit" data-badge="audit" title="知识库健康审计面板">审计</button>
+      <button data-cmd="/view market" title="应用市场">市场</button>
       <button data-cmd="/side" title="命令面板 + 速览（Ctrl+K）">速览</button>
     </div>
   </div>
 </div>
 
-<!-- /view 渲染层：iframe 沙箱（sandbox=allow-scripts，跨源桥接走 postMessage）；多标签并存 -->
+<!-- 补全下拉（demo #completion） -->
+<div id="completion"></div>
+
+<!-- /view 渲染层（保留） -->
 <div id="view-overlay" class="hidden">
   <header>
     <div id="view-tabs"></div>
-    <button id="view-split" title="切换分屏：终端保持可见可参照（对话流不遮挡）">分屏</button>
+    <button id="view-split" title="切换分屏">分屏</button>
     <button id="view-close-all" title="关闭全部视图">全部关闭</button>
     <button id="view-close" title="关闭当前视图 (Esc)">× 关闭</button>
   </header>
   <div id="view-panes"></div>
 </div>
 
-<!-- 命令面板 + 状态中心（Ctrl+K / /side / 速览按钮唤出；上部模糊搜索直达视图/命令/@文档，下部实时速览卡） -->
+<!-- 命令面板 + 状态中心（保留） -->
 <div id="side-drawer" class="hidden">
   <header>
     <span>命令面板</span>
@@ -154,8 +231,7 @@
   <div id="side-body"></div>
 </div>
 
-<script src="vendor/xterm.min.js"></script>
-<script src="vendor/addon-fit.min.js"></script>
+<script src="stream.js"></script>
 <script src="core.js"></script>
 <script src="app.js"></script>
 </body>
