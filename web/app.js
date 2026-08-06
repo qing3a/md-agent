@@ -628,11 +628,16 @@
   // ---- 启动欢迎 banner + 状态信息（异步汇总；bannerDone 保证状态行先于输入框打印）----
   let bannerDone = Promise.resolve();
   function printBanner() {
-    term.writeln('\x1b[90m' + '─'.repeat(Math.min(trueCols(), 64)) + '\x1b[0m');
-    term.writeln('\x1b[1;36m  md-agent\x1b[0m  \x1b[90m本地双层 MD 知识库 Agent\x1b[0m');
-    term.writeln('\x1b[90m' + '─'.repeat(Math.min(trueCols(), 64)) + '\x1b[0m');
-    term.writeln('  直接输入问题 → 知识库问答（流式）·  /help 查看命令 ·  配置页 /config.html');
-    term.writeln('\x1b[90m  状态加载中…\x1b[0m');
+    // 终端重做：DOM 欢迎横幅（demo .welcome），状态汇总异步填充
+    const bannerRow = term.appendCard(
+      '<div class="welcome">' +
+        '<div class="w-title">md-agent · 私人 AI 运营中心</div>' +
+        '<div class="w-line">输入 <span class="k">/view</span> 打开面板 · <span class="k">/help</span> 命令 · <span class="k">/config</span> 配置 · <span class="k">/view ops</span> 运营中心</div>' +
+        '<div class="w-line dim">你的 AI 做了什么，永远可查</div>' +
+        '<div class="w-status">状态加载中…</div>' +
+      '</div>'
+    );
+    const statusEl = bannerRow.querySelector('.w-status');
     // 状态汇总：健康 / KB / 模型 / 待审 / 任务 / 图谱
     bannerDone = Promise.all([
       fetch('/api/health').then((r) => r.json()).catch(() => null),
@@ -642,14 +647,17 @@
       fetch('/api/graph/stats').then((r) => r.json()).catch(() => null),
     ]).then(([h, c, p, t, g]) => {
       const ver = (h && h.version) || '?';
-      const kb = (c && c.kb_root) || '-';
+      const kb = ((c && c.kb_root) || '-').split(/[\/]/).pop();
       const model = (c && c.llm && c.llm.model) || '未配置';
       applyLlmConfigured(!!(c && c.llm && c.llm.endpoint)); // 上下文组装 v2：有 LLM 配置 → 工具化取用
       const pend = (p && Array.isArray(p.pending)) ? p.pending.length : '-';
       const todo = (t && t.stats) ? (t.stats.todo || 0) + (t.stats.doing || 0) : '-';
       const gs = (g && g.docs) ? (g.docs || 0) + ' 文档 / ' + (g.links || 0) + ' 链接' : '-';
-      term.writeln('\x1b[90m  v' + ver + ' · KB: ' + kb + ' · 图谱 ' + gs + '\x1b[0m');
-      term.writeln('\x1b[90m  模型 ' + model + ' · 待审 ' + pend + ' · 进行中任务 ' + todo + '\x1b[0m');
+      if (statusEl) {
+        statusEl.innerHTML = '版本 <span class="v">v' + ver + '</span> · 模型 <span class="v">' + model + '</span>' +
+          ' · KB <span class="v">' + kb + '</span> · 待审 <span class="v">' + pend + '</span>' +
+          ' · 进行中任务 <span class="v">' + todo + '</span> · 图谱 <span class="v">' + gs + '</span>';
+      }
     }).catch(() => {});
   }
   printBanner();
@@ -1082,6 +1090,54 @@
     }).catch(() => {});
   }
 
+  // 工具行 DOM 卡（demo .toolrow：三态 + 点击展开 + 失败自动展开）
+  function createToolRow(name, paramsTxt) {
+    const t0 = Date.now();
+    let timer = null;
+    const rowEl = term.appendCard(
+      '<div class="toolrow queued"><span class="tr-name">[工具] ' + escHtml(name) + '</span>' +
+      '<span class="tr-state">排队中</span>' +
+      '<div class="tr-body"><div class="kv">参数: ' + escHtml(paramsTxt || '{}') + '</div><div class="res"></div></div>' +
+      '</div>'
+    );
+    const card = rowEl.querySelector('.toolrow');
+    const stateEl = card.querySelector('.tr-state');
+    const bodyEl = card.querySelector('.tr-body');
+    const resEl = card.querySelector('.res');
+    let open = false;
+    function toggleOpen(force) {
+      open = force === undefined ? !open : !!force;
+      card.classList.toggle('open', open);
+    }
+    card.addEventListener('click', () => toggleOpen());
+    return {
+      running() {
+        clearInterval(timer);
+        const tick = () => {
+          card.classList.add('running');
+          stateEl.textContent = '执行中 · ' + ((Date.now() - t0) / 1000).toFixed(1) + 's';
+        };
+        tick();
+        timer = setInterval(tick, 200);
+      },
+      done(result) {
+        clearInterval(timer);
+        card.classList.remove('running');
+        card.classList.add('done');
+        stateEl.textContent = '成功 · ' + ((Date.now() - t0) / 1000).toFixed(2) + 's';
+        resEl.textContent = '结果: ' + String(result).slice(0, 2000);
+      },
+      fail(reason) {
+        clearInterval(timer);
+        card.classList.remove('running');
+        card.classList.add('fail');
+        stateEl.textContent = '失败 · ' + ((Date.now() - t0) / 1000).toFixed(2) + 's';
+        resEl.textContent = '原因: ' + String(reason || '未知错误');
+        toggleOpen(true);
+      },
+    };
+  }
+
   async function runTool(name, args) {
     const fn = TOOL_API[name];
     if (!fn) throw new Error('未知工具: ' + name);
@@ -1432,10 +1488,14 @@
       }
       // 工具调用轮：终端审计行 + 执行 + 结果回填
       const tj = r.toolJson;
-      term.writeln('\x1b[36m🛠 调用 ' + tj.tool + '(' + JSON.stringify(tj.args || {}) + ')\x1b[0m');
+      const toolRow = createToolRow(tj.tool, JSON.stringify(tj.args || {}));
+      toolRow.running();
       let result;
+      let toolFail = null;
       try { result = await runTool(tj.tool, tj.args); }
-      catch (e) { result = '工具调用失败: ' + ((e && e.message) || e); touchExperience('tool_failure', tj.tool + ': ' + ((e && e.message) || e)); }
+      catch (e) { toolFail = ((e && e.message) || e); result = '工具调用失败: ' + toolFail; touchExperience('tool_failure', tj.tool + ': ' + toolFail); }
+      if (toolFail) toolRow.fail(toolFail);
+      else toolRow.done(result);
       // 知识检索 0 命中 → 下一轮开启联网通道（服务端 web_search），让模型在知识库不足时能搜到外部信息
       if (!web && /无命中|未命中|未定位|无片段|未找到/.test(String(result))) {
         web = true;
