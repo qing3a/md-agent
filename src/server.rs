@@ -49,6 +49,7 @@ pub async fn serve(
         .route("/api/l1/read", get(l1_read_handler))
         .route("/api/file", get(file_read))
         .route("/api/file", post(file_write))
+        .route("/api/file", delete(file_delete))
         .route("/api/sessions", get(sessions_list))
         .route("/api/memory/touch", post(memory_touch))
         .route("/api/memory/heat", get(memory_heat))
@@ -422,6 +423,37 @@ async fn file_write(State(st): State<AppState>, Json(body): Json<FileWriteBody>)
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+// 会话文件删除（仅限 kb/sessions/ 下，防误删笔记/记忆；路径经 resolve_in_kb 防逃逸）
+async fn file_delete(State(st): State<AppState>, Query(p): Query<FileParams>) -> Response {
+    if !p.path.starts_with("sessions/") || !p.path.ends_with(".md") {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "仅允许删除 sessions/ 下的 .md 会话文件" })),
+        )
+            .into_response();
+    }
+    match crate::kb::resolve_in_kb(&st.kb_root, &p.path) {
+        Some(pb) => match tokio::fs::remove_file(&pb).await {
+            Ok(()) => Json(json!({ "ok": true, "path": p.path })).into_response(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "文件不存在" })),
+            )
+                .into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response(),
+        },
+        None => (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "路径超出 KB 范围" })),
         )
             .into_response(),
     }

@@ -148,6 +148,10 @@
     Core.resetSectionCache();
     saveHistory();
     logActivity('session', '恢复会话 ' + hit.id + '（' + parsed.length + ' 轮）', { id: hit.id });
+    // 真会话绑定：本会话文件 = 被恢复会话；sessionLog 载入历史 Q/A（后续快照续写同文件，不丢旧内容）
+    sessionFile = 'sessions/' + hit.id + '.md';
+    sessionLog = parsed.map((p) => ({ q: p.q, a: p.a || '(无回答/中断)', ts: Date.now() })).slice(-MAX_SESSION_LOG);
+    sessionArchived = false;
     term.writeln('\x1b[32m✓ 已恢复会话 ' + hit.id + '（' + parsed.length + ' 轮 → 载入最近 ' + Math.floor(history.length / 2) + ' 轮）\x1b[0m');
     term.writeln('\x1b[90m继续提问即引用前文；/clear 退出恢复态\x1b[0m');
     if (topbarTitle) topbarTitle.textContent = String(hit.title || hit.id).slice(0, 30);
@@ -328,7 +332,7 @@
     clearTimeout(draftTimer);
     try { localStorage.removeItem('md-agent-draft'); } catch (e) { /* 忽略 */ }
   }
-  const quickBtns = [...document.querySelectorAll('#sb-menu button')];
+  const quickBtns = [...document.querySelectorAll('#sb-menu button[data-cmd]')];
 
   let busy = false;          // 命令/回答进行中（提交/按钮禁用，输入框仍可编辑）
   let cmdHistory = loadCmdHistory(); // 命令行历史（localStorage 持久化；区别于多轮对话 history）
@@ -651,9 +655,21 @@
           ev.stopPropagation();
           renameSession(s.id, s.title);
         });
+        const del = document.createElement('span');
+        del.className = 'sb-item-del';
+        del.textContent = '🗑';
+        del.title = '删除会话（不可恢复）';
+        del.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          if (!confirm('删除会话 ' + s.id + '（不可恢复）？')) return;
+          await api('/api/file?path=sessions/' + encodeURIComponent(s.id + '.md'), { method: 'DELETE' }).catch(() => {});
+          sbFingerprint = '';
+          paintSidebar();
+        });
         it.appendChild(t);
         it.appendChild(d);
         it.appendChild(more);
+        it.appendChild(del);
         it.appendChild(x);
         it.addEventListener('click', () => {
           resumeCmd(s.id).then(() => { sbFingerprint = ''; paintSidebar(); });
@@ -693,6 +709,7 @@
   }
   document.getElementById('session-new').addEventListener('click', () => {
     if (!confirm('新建会话将归档当前对话并清空多轮记忆，继续？')) return;
+    closeView(); // 先回聊天区（新对话 = 回到对话主界面）
     submitCmd('/clear');
     setTimeout(() => { sbFingerprint = ''; paintSidebar(); }, 800);
   });
@@ -1038,7 +1055,7 @@
       case '/config': await cfg(); break;
       case '/remember': await remember(rest); break;
       case '/digest': await digest(rest.join(' ')); break;
-      case '/clear': if (sessionLog.length && !sessionArchived) archiveSession(); history = []; saveHistory(); Core.resetSectionCache(); term.writeln('多轮记忆已清空（系统提示词分节缓存已重置）'); break;
+      case '/clear': if (sessionLog.length && !sessionArchived) archiveSession(); history = []; saveHistory(); Core.resetSectionCache(); sessionFile = null; sessionLog = []; sessionArchived = false; term.writeln('多轮记忆已清空（系统提示词分节缓存已重置）'); break;
       case '/link-all': await linkAll(); break;
       case '/fetch': await fetchCmd(rest); break;
       case '/page': await pageCmd(rest); break;
@@ -1371,6 +1388,10 @@
         reasoning = (msg && msg.reasoning_content) || '';
         lastUsage = body.usage || null;
         toolJson = Core.tryParseTool(full, TOOL_API);
+        // web 模式（非流式）：模型可能只产出 web_search_call 事件而无 message 文本（content 空）→ retry 标记，上层重试一轮
+        if (!toolJson && !String(full).trim() && web) {
+          return { full, reasoning, reasoningStartAt, firstContentAt, lastUsage, toolJson, retry: true };
+        }
         if (!toolJson) {
           // 非流式回答：气泡 + 深度思考块 + 正文
           term.beginMsg('assistant');
@@ -1635,6 +1656,13 @@
       term.writeln('\x1b[90m(' + (toolCount ? '继续' : '回答中') + (web ? '·联网' : '') + '...)\x1b[0m');
       const r = await llmOnceWithFresh(messages);
       if (!r) { term.endMsg(); return; } // 中断/失败（内部已提示）；关闭残留气泡
+      if (r.retry) {
+        // 联网轮无文本返回（web_search_call 事件轮）→ 重试一轮；计入上限防死循环
+        term.writeln('\x1b[90m(联网检索无文本返回，继续等待模型作答…)\x1b[0m');
+        toolCount++;
+        if (toolCount >= MAX_TOOL) { term.endMsg(); return; }
+        continue;
+      }
       if (!r.toolJson) {
         // 最终回答：llmStreamOnce 已流式渲染；收尾信息用最后一轮
         full = r.full;
@@ -2601,13 +2629,13 @@
       closeView();
       return;
     }
-    if (arg === 'graph' || arg === 'board' || arg === 'pending' || arg === 'audit' || arg === 'market' || arg === 'home' || arg === 'sessions' || arg === 'ops') {
+    if (arg === 'graph' || arg === 'board' || arg === 'pending' || arg === 'audit' || arg === 'market' || arg === 'home' || arg === 'sessions' || arg === 'ops' || arg === 'config') {
       const dup = findView('builtin', arg);
       if (dup) { activateView(dup.id); return; }
-      const name = arg + '.html';
-      const r = await fetch('/views/' + name);
+      const path = arg === 'config' ? '/config.html' : '/views/' + arg + '.html';
+      const r = await fetch(path);
       if (!r.ok) throw new Error('内置视图加载失败: HTTP ' + r.status);
-      const titles = { graph: '知识库结构导航', board: '任务看板', pending: '待审审核', audit: '知识库健康审计', market: '应用市场', home: '功能首页', sessions: '历史会话', ops: '运营中心' };
+      const titles = { graph: '知识库结构导航', board: '任务看板', pending: '待审审核', audit: '知识库健康审计', market: '应用市场', home: '功能首页', sessions: '历史会话', ops: '运营中心', config: '设置' };
       openView(titles[arg], await r.text(), null, { kind: 'builtin', arg });
       return;
     }
@@ -2628,14 +2656,12 @@
   }
 
   // 应用市场（阶段 3）：URL ?view=<id> 自动打开面板/应用（托盘「应用市场/已安装应用」入口用）；否则恢复上次 /view 标签组合
+  // 详情页布局下启动不再默认打开 home（避免覆盖聊天区；?view= 与标签记忆仍生效）
   (async function autoView() {
     const v = new URLSearchParams(location.search).get('view');
     if (v) { try { await viewCmd(v); } catch (e) { term.writeln('\x1b[31m自动打开失败: ' + e.message + '\x1b[0m'); } return; }
+    if (localStorage.getItem('md-agent-start-home') !== '0') { /* 兼容旧标志位：默认不打开 */ }
     try { await restoreViews(); } catch (e) { /* 恢复失败不打扰 */ }
-    // 功能首页（方案 B）：无标签记忆时默认打开（首页内可关，标志位存宿主 localStorage）
-    if (!viewTabsList.length && localStorage.getItem('md-agent-start-home') !== '0') {
-      try { await viewCmd('home'); } catch (e) { /* 首页打开失败不打扰 */ }
-    }
   })();
 
   // ---------- 应用市场（阶段 2）：/market list | import <路径> | uninstall <id> | update <id> <路径> ----------

@@ -50,27 +50,40 @@ fn messages_to_items(messages: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-/// Responses 响应 → chat 兼容结构（前端零改：choices[0].message.content + usage）
+/// Responses 响应 → chat 兼容结构（前端零改：choices[0].message.content + reasoning_content + usage）
 fn responses_to_chat(v: &Value) -> Value {
-    // 取最后一个 message 输出块拼接为最终回答（reasoning/web_search_call 事件不产出文本）
+    // 拼接所有 message 输出块文本为最终回答；reasoning 输出块拼接为 reasoning_content（前端深度思考块展示）
     let mut text = String::new();
+    let mut reasoning = String::new();
     if let Some(out) = v.get("output").and_then(Value::as_array) {
         for o in out {
-            if o.get("type").and_then(Value::as_str) == Some("message") {
-                if let Some(cs) = o.get("content").and_then(Value::as_array) {
-                    for c in cs {
-                        if let Some(t) = c.get("text").and_then(Value::as_str) {
-                            text.push_str(t);
+            match o.get("type").and_then(Value::as_str) {
+                Some("message") => {
+                    if let Some(cs) = o.get("content").and_then(Value::as_array) {
+                        for c in cs {
+                            if let Some(t) = c.get("text").and_then(Value::as_str) {
+                                text.push_str(t);
+                            }
                         }
                     }
                 }
+                Some("reasoning") => {
+                    if let Some(cs) = o.get("content").and_then(Value::as_array) {
+                        for c in cs {
+                            if let Some(t) = c.get("text").and_then(Value::as_str) {
+                                reasoning.push_str(t);
+                            }
+                        }
+                    }
+                }
+                _ => {} // web_search_call / function_call 事件不产出文本
             }
         }
     }
     let usage = v.get("usage").cloned().unwrap_or_else(|| json!({}));
     json!({
         "choices": [{
-            "message": { "role": "assistant", "content": text },
+            "message": { "role": "assistant", "content": text, "reasoning_content": reasoning },
             "finish_reason": v.get("status").and_then(Value::as_str).unwrap_or("stop")
         }],
         "usage": {

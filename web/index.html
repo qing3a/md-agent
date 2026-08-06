@@ -19,9 +19,9 @@
   html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); }
   body { color: var(--fg); font-family: ui-monospace, Consolas, "Microsoft YaHei", monospace; }
 
-  /* ---- 整体三区：左侧会话边栏 + 主区（顶栏/消息流/输入条） ---- */
+  /* ---- 整体三区：左侧会话边栏 + 主区（顶栏/消息流/输入条 + 内嵌详情页） ---- */
   #app { display: flex; height: 100%; }
-  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
 
   /* ---- 左侧边栏（豆包式：菜单上半 + 会话列表下半 + 底部） ---- */
   #sidebar { width: 300px; flex: none; background: var(--bg2); border-right: 1px solid var(--border);
@@ -36,7 +36,7 @@
     border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 12px; outline: none; }
   #sb-search:focus { border-color: var(--accent); }
 
-  /* 功能菜单（上半：分组菜单项，点击打开 /view 面板子页面） */
+  /* 功能菜单（上半：分组菜单项，点击在右侧详情页展示） */
   #sb-menu { flex: none; max-height: 42%; overflow-y: auto; padding: 6px 8px 8px; display: flex; flex-direction: column; gap: 1px;
     border-bottom: 1px solid var(--border); scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
   #sb-menu .sb-group { color: var(--muted2); font-size: 11px; padding: 8px 6px 3px; }
@@ -45,6 +45,8 @@
     padding: 7px 8px; font-size: 12.5px; cursor: pointer; position: relative; font-family: inherit; }
   #sb-menu button:hover { background: var(--hover); color: var(--fg); }
   #sb-menu button.active { background: var(--accent-10); color: var(--accent); }
+  #sb-menu button.sb-new { color: var(--ok); font-weight: 600; }
+  #sb-menu button.sb-new:hover { background: var(--ok-12); color: var(--ok); }
   #sb-menu .mi-ico { width: 18px; text-align: center; font-size: 13px; flex: none; }
   #sb-menu .badge { position: absolute; top: 4px; right: 8px; min-width: 15px; height: 15px;
     padding: 0 4px; border-radius: 8px; box-sizing: border-box;
@@ -68,6 +70,9 @@
   .sb-item-more { flex: none; color: var(--muted); font-weight: 700; padding: 0 4px; border-radius: 4px; visibility: hidden; font-size: 13px; line-height: 1; }
   .sb-item:hover .sb-item-more { visibility: visible; }
   .sb-item-more:hover { color: var(--accent); background: var(--bg2); }
+  .sb-item-del { flex: none; color: var(--muted); padding: 0 3px; border-radius: 4px; visibility: hidden; font-size: 11px; line-height: 1; }
+  .sb-item:hover .sb-item-del { visibility: visible; }
+  .sb-item-del:hover { color: var(--danger); background: var(--bg2); }
   .sb-empty { color: var(--muted); font-size: 11.5px; padding: 12px 8px; text-align: center; }
 
   /* 底部（配置/版本） */
@@ -198,8 +203,8 @@
     overflow: hidden; text-overflow: ellipsis; }
   .comp-item.sel { background: var(--hover); color: var(--accent); }
 
-  /* ---- /view 面板渲染层（保留） ---- */
-  #view-overlay { position: fixed; inset: 0; z-index: 100; background: var(--bg);
+  /* ---- /view 详情页（内嵌 #main：覆盖聊天区为右侧详情页；分屏时左聊天右面板） ---- */
+  #view-overlay { position: absolute; inset: 0; z-index: 30; background: var(--bg);
     display: flex; flex-direction: column; }
   #view-overlay.hidden { display: none; }
   #view-overlay header { display: flex; align-items: center; justify-content: space-between;
@@ -223,8 +228,7 @@
   #view-panes { flex: 1; position: relative; min-height: 0; }
   #view-panes iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: none; display: none; }
   #view-panes iframe.active { display: block; }
-  body.view-split #main { flex: 0 0 40%; width: 40%; }
-  body.view-split #view-overlay { left: 40%; }
+  body.view-split #view-overlay { left: 60%; }
 
   /* ---- 速览侧边栏（右侧抽屉） ---- */
   #side-drawer { position: fixed; right: 10px; top: 10px; bottom: 10px; width: 320px;
@@ -259,13 +263,13 @@
   <aside id="sidebar">
     <div class="sb-head">
       <span class="sb-logo">md-agent</span>
-      <button id="session-new" title="归档当前会话并开始新会话">＋ 新对话</button>
     </div>
     <div class="sb-search-wrap">
       <input id="sb-search" type="text" placeholder="搜索会话…" autocomplete="off" spellcheck="false">
     </div>
-    <!-- 功能菜单：所有功能页面 = 菜单项子页面（点击打开 /view 面板） -->
+    <!-- 功能菜单：新对话 + 所有功能页面（点击在右侧详情页展示） -->
     <div id="sb-menu">
+      <button id="session-new" class="sb-new" title="归档当前会话并开始新会话"><span class="mi-ico">💬</span><span>新对话</span></button>
       <div class="sb-group">功能</div>
       <button data-cmd="/view home" data-view="home" title="功能首页（全部功能一键进入）"><span class="mi-ico">🏠</span><span>功能首页</span></button>
       <button data-cmd="/view graph" data-view="graph" title="知识库结构导航（查看图谱）"><span class="mi-ico">🕸️</span><span>知识图谱</span></button>
@@ -273,9 +277,9 @@
       <div class="sb-group">管理</div>
       <button data-cmd="/view pending" data-view="pending" data-badge="pending" title="待审审核面板"><span class="mi-ico">📥</span><span>待审</span></button>
       <button data-cmd="/view audit" data-view="audit" data-badge="audit" title="知识库健康审计面板"><span class="mi-ico">🩺</span><span>审计</span></button>
-      <button data-cmd="/view sessions" data-view="sessions" title="历史会话列表"><span class="mi-ico">📋</span><span>会话管理</span></button>
       <div class="sb-group">系统</div>
       <button data-cmd="/view market" data-view="market" title="应用市场"><span class="mi-ico">🧩</span><span>应用市场</span></button>
+      <button data-cmd="/view config" data-view="config" title="模型/知识库/心跳配置"><span class="mi-ico">⚙️</span><span>设置</span></button>
       <button data-cmd="/side" title="命令面板 + 速览（Ctrl+K）"><span class="mi-ico">⌘</span><span>命令速览</span></button>
     </div>
     <div id="sb-list"><div class="sb-empty">加载中…</div></div>
@@ -285,7 +289,7 @@
     </div>
   </aside>
 
-  <!-- 主区：顶栏 + 消息流 + 底部输入条 -->
+  <!-- 主区：顶栏 + 消息流 + 底部输入条 + 内嵌详情页 -->
   <main id="main">
     <header id="topbar">
       <div id="topbar-title">新对话</div>
@@ -307,22 +311,22 @@
       </div>
       <div id="statusline"></div>
     </div>
+
+    <!-- /view 详情页（内嵌 #main，覆盖聊天区） -->
+    <div id="view-overlay" class="hidden">
+      <header>
+        <div id="view-tabs"></div>
+        <button id="view-split" title="切换分屏">分屏</button>
+        <button id="view-close-all" title="关闭全部视图">全部关闭</button>
+        <button id="view-close" title="关闭当前视图 (Esc)">× 关闭</button>
+      </header>
+      <div id="view-panes"></div>
+    </div>
   </main>
 </div>
 
 <!-- 补全下拉（锚定输入条上方） -->
 <div id="completion"></div>
-
-<!-- /view 渲染层（保留） -->
-<div id="view-overlay" class="hidden">
-  <header>
-    <div id="view-tabs"></div>
-    <button id="view-split" title="切换分屏">分屏</button>
-    <button id="view-close-all" title="关闭全部视图">全部关闭</button>
-    <button id="view-close" title="关闭当前视图 (Esc)">× 关闭</button>
-  </header>
-  <div id="view-panes"></div>
-</div>
 
 <!-- 命令面板 + 状态中心（保留，右侧抽屉） -->
 <div id="side-drawer" class="hidden">
