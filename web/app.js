@@ -226,7 +226,6 @@
   let line = '';                       // 当前输入行内容
   let statusLine = '';                 // 状态栏最新文本（可含 ANSI）
   let atPrompt = false;                // 光标是否停在输入框（决定状态栏能否原地重绘）
-  function hline() { return '\x1b[90m' + '\u2500'.repeat(trueCols()) + '\x1b[0m'; }
   function dispW(s) {
     let w = 0;
     for (const ch of String(s)) {
@@ -592,20 +591,9 @@
     ['clear', '清屏'],
   ];
   // ---------- 命令补全（流内 Tab 循环；/ 开头才触发，无下拉浮层） ----------
-  let acIdx = -1;
-  function completeCmd() {
-    const head = line.match(/^(\/[^\s]*)/);
-    if (!head) return;
-    const list = COMMANDS.map(([c]) => c).filter((c) => c.startsWith(head[1]) && c !== head[1]);
-    if (!list.length) return;
-    acIdx = (acIdx + 1) % list.length;
-    line = list[acIdx];
-    redrawInput();
-  }
 
   // ---------- @ 文件提及（Tab 循环；行尾 @ 触发，候选 = KB 文档路径，提交时注入检索目标） ----------
   let atDocs = null;  // @ 补全候选（/api/graph/graph nodes 路径，惰性加载会话内缓存）
-  let atIdx = -1;
   async function loadAtDocs() {
     if (atDocs) return atDocs;
     try {
@@ -613,17 +601,6 @@
       atDocs = (g.nodes || []).map((n) => n.path);
     } catch (e) { atDocs = []; }
     return atDocs;
-  }
-  async function completeAt() {
-    const m = line.match(/@([^\s]*)$/);
-    if (!m) return;
-    const docs = await loadAtDocs();
-    const kw = m[1].toLowerCase();
-    const list = docs.filter((p) => p.toLowerCase().includes(kw));
-    if (!list.length) return;
-    atIdx = (atIdx + 1) % list.length;
-    line = line.slice(0, m.index) + '@' + list[atIdx];
-    redrawInput();
   }
 
   // ---- 启动欢迎 banner + 状态信息（异步汇总；bannerDone 保证状态行先于输入框打印）----
