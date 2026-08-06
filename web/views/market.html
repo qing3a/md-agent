@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <title>应用市场</title>
 <style>
-  :root { --bg:#1e1e2e; --panel:#26263a; --panel2:#2f2f46; --line:#3a3a55;
-          --fg:#cdd6f4; --dim:#7f849c; --green:#a6e3a1; --red:#f38ba8;
-          --yellow:#f9e2af; --blue:#89b4fa; --purple:#cba6f7; }
+  :root { --bg:var(--bg); --panel:var(--chip); --panel2:var(--chip3); --line:var(--chip4);
+          --fg:var(--fg); --dim:var(--muted); --green:var(--ok); --red:var(--danger);
+          --yellow:var(--warn); --blue:var(--accent); --purple:var(--purple); }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--fg);
     font: 13px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif;
@@ -20,8 +20,8 @@
   button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
     border-radius: 7px; padding: 5px 14px; font-size: 12px; cursor: pointer; }
   button:hover { border-color: var(--blue); color: var(--blue); }
-  button.primary { background: var(--green); color: #111; border-color: var(--green); font-weight: 600; }
-  button.danger { background: var(--red); color: #111; border-color: var(--red); font-weight: 600; }
+  button.primary { background: var(--green); color: var(--bg3); border-color: var(--green); font-weight: 600; }
+  button.danger { background: var(--red); color: var(--bg3); border-color: var(--red); font-weight: 600; }
   button:disabled { opacity: 0.4; cursor: default; }
   button.small { padding: 2px 8px; font-size: 11px; }
 

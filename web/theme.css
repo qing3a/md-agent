@@ -1,0 +1,108 @@
+/* web/theme.css — 主题变量（豆包式 data-theme 机制）：深色默认（Catppuccin Mocha）+ 亮色覆盖
+ * 主壳 <link> 引用；面板 iframe 由 app.js 注入同源 <style>（一份定义，双侧同步） */
+:root {
+  --bg: #1e1e2e;          /* 页面/主区 */
+  --bg2: #181825;         /* 侧栏/顶栏/输入条/抽屉 */
+  --bg3: #11111b;         /* overlay/代码块 */
+  --bg4: #161622;         /* 面板深底变体 */
+  --chip: #26263a;        /* 按钮/卡片底 */
+  --chip2: #1e1e30;       /* 输入框/面板卡底 */
+  --chip3: #2f2f46;       /* 面板 hover 变体 */
+  --chip4: #3a3a55;       /* 面板强调卡底 */
+  --input-bg: #26263a;    /* 消息输入框 */
+  --hover: #313244;       /* hover/选中 */
+  --hover2: #45475a;      /* hover 加强 */
+  --border: #313244;
+  --border2: #45475a;
+  --fg: #cdd6f4;
+  --fg2: #a6adc8;
+  --muted: #7f849c;
+  --muted2: #585b70;
+  --accent: #89b4fa;
+  --accent-strong: #9ac4ff;
+  --danger: #f38ba8;
+  --ok: #a6e3a1;
+  --warn: #f9e2af;
+  --info: #94e2d5;
+  --purple: #cba6f7;
+  --rose: #f5e0dc;
+  --peach: #fab387;
+  --maroon: #eba0ac;
+  /* rgba 变体（气泡/背景透色） */
+  --accent-08: rgba(137, 180, 250, .08);
+  --accent-10: rgba(137, 180, 250, .10);
+  --accent-12: rgba(137, 180, 250, .12);
+  --accent-25: rgba(137, 180, 250, .25);
+  --accent-28: rgba(137, 180, 250, .28);
+  --accent-55: rgba(137, 180, 250, .55);
+  --accent-soft: rgba(137, 180, 250, .5);
+  --danger-07: rgba(243, 139, 168, .07);
+  --danger-40: rgba(243, 139, 168, .4);
+  --danger-50: rgba(243, 139, 168, .5);
+  --hover-35: rgba(69, 71, 90, .35);
+  --ok-12: rgba(166, 227, 161, .12);
+  --muted-25: rgba(125, 140, 155, .25);
+  /* ANSI 16 色（stream.js 注入类引用；亮色下黑/白反转保可读） */
+  --ansi-30: #4c4f69;
+  --ansi-31: #f38ba8;
+  --ansi-32: #a6e3a1;
+  --ansi-33: #f9e2af;
+  --ansi-34: #89b4fa;
+  --ansi-35: #cba6f7;
+  --ansi-36: #94e2d5;
+  --ansi-37: #cdd6f4;
+  --ansi-90: #7f849c;
+}
+
+/* 亮色（豆包式：白底 + 蓝紫 accent + 深灰文字） */
+:root[data-theme="light"] {
+  --bg: #f7f8fa;
+  --bg2: #f0f1f4;
+  --bg3: #e9ebef;
+  --bg4: #e4e7ec;
+  --chip: #e9ebef;
+  --chip2: #ffffff;
+  --chip3: #dfe3e8;
+  --chip4: #d3d8df;
+  --input-bg: #ffffff;
+  --hover: #e2e5ea;
+  --hover2: #d8dce2;
+  --border: #e2e4e9;
+  --border2: #cfd3da;
+  --fg: #1f2328;
+  --fg2: #454b52;
+  --muted: #8a9199;
+  --muted2: #aeb4bb;
+  --accent: #4e6ef2;
+  --accent-strong: #3d5de0;
+  --danger: #e5484d;
+  --ok: #2fa85e;
+  --warn: #b98a00;
+  --info: #0e9f8f;
+  --purple: #7a5af8;
+  --rose: #e2555f;
+  --peach: #d9730d;
+  --maroon: #c92a4e;
+  --accent-08: rgba(78, 110, 242, .08);
+  --accent-10: rgba(78, 110, 242, .10);
+  --accent-12: rgba(78, 110, 242, .12);
+  --accent-25: rgba(78, 110, 242, .25);
+  --accent-28: rgba(78, 110, 242, .28);
+  --accent-55: rgba(78, 110, 242, .55);
+  --accent-soft: rgba(78, 110, 242, .5);
+  --danger-07: rgba(229, 72, 77, .07);
+  --danger-40: rgba(229, 72, 77, .4);
+  --danger-50: rgba(229, 72, 77, .5);
+  --hover-35: rgba(80, 90, 110, .18);
+  --ok-12: rgba(47, 168, 94, .12);
+  --muted-25: rgba(138, 145, 153, .25);
+  --ansi-30: #4a4e57;
+  --ansi-31: #d92d44;
+  --ansi-32: #1f9d55;
+  --ansi-33: #9c7a00;
+  --ansi-34: #2f6fed;
+  --ansi-35: #8250df;
+  --ansi-36: #0e9f8f;
+  --ansi-37: #1f2328;
+  --ansi-90: #8a9199;
+}

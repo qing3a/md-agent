@@ -5,10 +5,10 @@
 <title>md-agent 运营中心</title>
 <style>
   :root {
-    --bg: #1e1e2e; --panel: #26263a; --panel2: #2f2f46;
-    --fg: #cdd6f4; --dim: #7f849c; --line: #3a3a55;
-    --blue: #89b4fa; --cyan: #94e2d5; --yellow: #f9e2af;
-    --green: #a6e3a1; --red: #f38ba8; --purple: #cba6f7;
+    --bg: var(--bg); --panel: var(--chip); --panel2: var(--chip3);
+    --fg: var(--fg); --dim: var(--muted); --line: var(--chip4);
+    --blue: var(--accent); --cyan: var(--info); --yellow: var(--warn);
+    --green: var(--ok); --red: var(--danger); --purple: var(--purple);
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--fg);
@@ -36,7 +36,7 @@
   button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
     border-radius: 8px; padding: 4px 14px; font-size: 12.5px; cursor: pointer; }
   button:hover { border-color: var(--blue); color: var(--blue); }
-  button.primary { background: var(--blue); color: #111; border-color: var(--blue); font-weight: 600; }
+  button.primary { background: var(--blue); color: var(--bg3); border-color: var(--blue); font-weight: 600; }
   .spark-row { display: flex; align-items: center; gap: 14px; padding: 8px 4px; }
   .spark-row .lab { width: 72px; font-size: 12.5px; color: var(--dim); flex-shrink: 0; }
   .spark-row .sum { font-size: 12px; color: var(--fg); flex-shrink: 0; }

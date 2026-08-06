@@ -9,10 +9,10 @@
   var SGR = { '30': 'c-30', '31': 'c-31', '32': 'c-32', '33': 'c-33', '34': 'c-34', '35': 'c-35', '36': 'c-36', '37': 'c-37', '90': 'c-90' };
   var CSS = [
     '.stream-row{white-space:pre-wrap;word-break:break-word;margin-bottom:6px;font-size:13.5px;line-height:1.75;}',
-    '.stream-row.think{color:#7f849c;font-size:12.5px;}',
-    '.stream-row .c-30{color:#4c4f69}.stream-row .c-31{color:#f38ba8}.stream-row .c-32{color:#a6e3a1}',
-    '.stream-row .c-33{color:#f9e2af}.stream-row .c-34{color:#89b4fa}.stream-row .c-35{color:#cba6f7}',
-    '.stream-row .c-36{color:#94e2d5}.stream-row .c-37{color:#cdd6f4}.stream-row .c-90{color:#7f849c}',
+    '.stream-row.think{color:var(--muted);font-size:12.5px;}',
+    '.stream-row .c-30{color:var(--ansi-30)}.stream-row .c-31{color:var(--ansi-31)}.stream-row .c-32{color:var(--ansi-32)}',
+    '.stream-row .c-33{color:var(--ansi-33)}.stream-row .c-34{color:var(--ansi-34)}.stream-row .c-35{color:var(--ansi-35)}',
+    '.stream-row .c-36{color:var(--ansi-36)}.stream-row .c-37{color:var(--ansi-37)}.stream-row .c-90{color:var(--ansi-90)}',
     '.stream-row .b{font-weight:700}.stream-row .d{opacity:.7}.stream-row .i{font-style:italic}.stream-row .u{text-decoration:underline}',
   ].join('');
 

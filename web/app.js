@@ -22,6 +22,37 @@
     webToggle = e.target.checked;
   });
 
+  // ---------- 主题（豆包式 data-theme：localStorage 优先 → 跟随系统；切换即时生效 + 广播面板） ----------
+  const themeBtn = document.getElementById('theme-btn');
+  let currentTheme = document.documentElement.dataset.theme || 'dark';
+  function applyTheme(t, persist) {
+    currentTheme = t;
+    document.documentElement.dataset.theme = t;
+    if (persist) { try { localStorage.setItem('md-agent-theme', t); } catch (e) { /* 忽略 */ } }
+    if (themeBtn) themeBtn.textContent = t === 'dark' ? '☀️' : '🌙'; // 显示"切换去向"
+    // 广播所有面板 iframe（BRIDGE 监听 theme 消息同步）
+    for (const f of document.querySelectorAll('#view-panes iframe')) {
+      if (f.contentWindow) f.contentWindow.postMessage({ type: 'theme', theme: t }, '*');
+    }
+  }
+  if (themeBtn) themeBtn.addEventListener('click', () => applyTheme(currentTheme === 'dark' ? 'light' : 'dark', true));
+  // 面板主题变量（theme.css 同步取一次，注入面板 iframe；主壳已 <link> 引用）
+  let themeCss = '';
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', 'theme.css', false);
+    xhr.send();
+    if (xhr.status === 200) themeCss = xhr.responseText;
+  } catch (e) { /* 忽略 */ }
+  // 菜单激活高亮：当前打开的内置视图（/view）对应菜单项 .active（豆包式子页面感）
+  function updateMenuActive(spec) {
+    const arg = spec && spec.arg;
+    for (const b of quickBtns) {
+      const on = !!arg && b.dataset.view === arg;
+      b.classList.toggle('active', on);
+    }
+  }
+
   const PROMPT = 'md-agent'; // 保留（历史引用点可能用到；气泡 UI 不显示）
   let L1_TEXT = ''; // 启动时注入的 L1 层全文
   let GUIDE_TEXT = ''; // L1 规范层（KB/FRAMEWORK/RULES）——稳定前缀
@@ -297,7 +328,7 @@
     clearTimeout(draftTimer);
     try { localStorage.removeItem('md-agent-draft'); } catch (e) { /* 忽略 */ }
   }
-  const quickBtns = [...document.querySelectorAll('#sb-nav button')];
+  const quickBtns = [...document.querySelectorAll('#sb-menu button')];
 
   let busy = false;          // 命令/回答进行中（提交/按钮禁用，输入框仍可编辑）
   let cmdHistory = loadCmdHistory(); // 命令行历史（localStorage 持久化；区别于多轮对话 history）
@@ -560,6 +591,23 @@
       body: JSON.stringify({ path: 'sessions/' + id + '.md', content: next }),
     }).catch(() => {});
   }
+  // 会话重命名（豆包式 ⋯ 菜单）：改 frontmatter title（纯前端，POST /api/file）
+  async function renameSession(id, oldTitle) {
+    const t = prompt('重命名会话（' + id + '）：', String(oldTitle || ''));
+    if (t === null || !t.trim() || t.trim() === String(oldTitle || '')) return;
+    const f = await api('/api/file?path=sessions/' + encodeURIComponent(id + '.md')).catch(() => null);
+    if (!f || !f.content) return;
+    const next = f.content.replace(/^(title:\s*).*$/m, '$1' + t.trim().slice(0, 30));
+    if (next === f.content) return;
+    await api('/api/file', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: 'sessions/' + id + '.md', content: next }),
+    }).catch(() => {});
+    sbFingerprint = '';
+    paintSidebar();
+    logActivity('session', '重命名会话 ' + id, { id });
+  }
   function renderSidebar(r) {
     const all = (r && r.sessions) || [];
     const kw = sbSearchTxt.trim().toLowerCase();
@@ -595,8 +643,17 @@
           if (!confirm('归档会话 ' + s.id + '？')) return;
           archiveSessionStatus(s.id).then(() => { sbFingerprint = ''; paintSidebar(); });
         });
+        const more = document.createElement('span');
+        more.className = 'sb-item-more';
+        more.textContent = '⋯';
+        more.title = '重命名会话';
+        more.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          renameSession(s.id, s.title);
+        });
         it.appendChild(t);
         it.appendChild(d);
+        it.appendChild(more);
         it.appendChild(x);
         it.addEventListener('click', () => {
           resumeCmd(s.id).then(() => { sbFingerprint = ''; paintSidebar(); });
@@ -658,6 +715,8 @@
       : '未配置模型服务 · 点击打开配置页';
   }
   if (modelChip) modelChip.addEventListener('click', () => window.open('/config.html', '_blank'));
+  const sbConfigBtn = document.getElementById('sb-config');
+  if (sbConfigBtn) sbConfigBtn.addEventListener('click', () => window.open('/config.html', '_blank'));
 
   // ---------- 输入历史（会话内，空输入时 ArrowUp/Down 翻动） ----------
   function pushHistory(t) {
@@ -714,9 +773,9 @@
   function printBanner() {
     const bannerRow = term.appendCard(
       '<div class="welcome">' +
-        '<div class="w-title">md-agent · 私人 AI 运营中心</div>' +
-        '<div class="w-line">输入 <span class="k">/help</span> 命令 · <span class="k">/config</span> 配置 · <span class="k">/view ops</span> 运营中心</div>' +
-        '<div class="w-line dim">你的 AI 做了什么，永远可查</div>' +
+        '<div class="w-title">md-agent</div>' +
+        '<div class="w-hello">有什么我能帮你的吗？</div>' +
+        '<div class="w-line dim">私人 AI 运营中心 · 你的 AI 做了什么，永远可查</div>' +
         '<div class="w-chips">' +
           '<button data-cmd="/view home">🏠 功能首页</button>' +
           '<button data-cmd="/view pending">📥 待审</button>' +
@@ -762,6 +821,8 @@
       }
       updateBadges(typeof pend === 'number' ? pend : 0, auditCount); // 侧边栏徽标（待审红/审计黄）
       updateModelChip(model, endpoint);
+      const verEl = document.getElementById('sb-ver-num');
+      if (verEl && h && h.version) verEl.textContent = h.version;
       statusLine = truncateW(
         '\x1b[' + (ok ? '32' : '31') + 'm●\x1b[0m ' + (ok ? '服务运行中' : '服务异常') +
         '\x1b[90m · 模型 ' + model + ' · KB ' + kb + ' · 待审 ' + pend +
@@ -2262,6 +2323,8 @@
     'return window.hostApi(p,{method:(o&&o.method)||"GET",body:bd}).then(function(d){return{ok:true,status:200,json:function(){return Promise.resolve(d)},text:function(){return Promise.resolve(JSON.stringify(d))}}});}' +
     'return _nf.apply(this,arguments);};' +
     'window.addEventListener("keydown",function(e){if(e.key==="Escape"){window.parent.postMessage({type:"escape"},"*");}});' +
+    // 主题同步：宿主切换主题时广播，iframe 跟随（初始值由 openView 注入 data-theme）
+    'window.addEventListener("message",function(ev){if(ev.data&&ev.data.type==="theme"){document.documentElement.dataset.theme=ev.data.theme;}});' +
     'window.addEventListener("error",function(e){window.parent.postMessage({type:"view-error",msg:(e&&e.message)||"视图脚本错误"},"*");});' +
     'window.addEventListener("unhandledrejection",function(e){var r=e&&e.reason;window.parent.postMessage({type:"view-error",msg:(r&&r.message)||String(r)},"*");});' +
     // App 状态持久化（方案 A）：沙箱无 allow-same-origin → localStorage 不可用。
@@ -2302,6 +2365,8 @@
       t.iframe.classList.toggle('active', on);
       t.tabEl.classList.toggle('active', on);
     }
+    const at = viewTabsList.find((t) => t.id === id);
+    updateMenuActive(at && at.specKind === 'builtin' ? { arg: at.specArg } : null);
     viewOverlay.classList.remove('hidden');
     // 焦点移出 xterm textarea：聚焦时 xterm 拦截 Esc（stopPropagation），父页监听收不到
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
@@ -2329,7 +2394,7 @@
       allClosed = true;
     }
     saveViewSpecs(); // /view 标签组合记忆（恢复时按 kind/arg 重新拉取）
-    if (allClosed) { applySplit(false); term.focus(); } // 视图全关：退出分屏（终端恢复全宽）+ 焦点归还终端
+    if (allClosed) { updateMenuActive(null); applySplit(false); term.focus(); } // 视图全关：退出分屏（终端恢复全宽）+ 焦点归还终端
   }
 
   function openView(title, html, app, spec) {
@@ -2368,7 +2433,10 @@
     viewTabsList.push(tab);
     viewTabs.appendChild(tabEl);
     viewPanes.appendChild(iframe);
-    iframe.srcdoc = (app ? BRIDGE.replace(/__APP_ID__/g, app.id) : BRIDGE) + html;
+    // 面板主题：注入 theme.css 变量定义（iframe srcdoc 无法引用外部相对路径）+ 初始 data-theme（宿主当前主题）
+    iframe.srcdoc = '<style>' + themeCss + '</style>' +
+      '<script>document.documentElement.dataset.theme="' + currentTheme + '"<\/script>' +
+      (app ? BRIDGE.replace(/__APP_ID__/g, app.id) : BRIDGE) + html;
     activateView(id);
     saveViewSpecs(); // /view 标签组合记忆
   }
@@ -2884,10 +2952,10 @@
     submitCmd(sec.dataset.cmd);
   });
   document.getElementById('side-refresh').addEventListener('click', (e) => { e.stopPropagation(); loadSide(); });
-  // 点抽屉外关闭（侧边栏导航区域除外，避免与按钮唤出竞态）
+  // 点抽屉外关闭（侧边栏菜单区域除外，避免与菜单唤出竞态）
   document.addEventListener('click', (e) => {
     if (sideDrawer.classList.contains('hidden')) return;
-    if (sideDrawer.contains(e.target) || (e.target.closest && e.target.closest('#sb-nav'))) return;
+    if (sideDrawer.contains(e.target) || (e.target.closest && e.target.closest('#sb-menu'))) return;
     closeSide();
   });
 

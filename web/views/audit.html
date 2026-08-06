@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <title>知识库健康审计</title>
 <style>
-  :root { --bg:#1e1e2e; --panel:#26263a; --panel2:#2f2f46; --line:#3a3a55;
-          --fg:#cdd6f4; --dim:#7f849c; --green:#a6e3a1; --red:#f38ba8;
-          --yellow:#f9e2af; --blue:#89b4fa; }
+  :root { --bg:var(--bg); --panel:var(--chip); --panel2:var(--chip3); --line:var(--chip4);
+          --fg:var(--fg); --dim:var(--muted); --green:var(--ok); --red:var(--danger);
+          --yellow:var(--warn); --blue:var(--accent); }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--fg);
     font: 13px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif;
@@ -18,7 +18,7 @@
   button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
     border-radius: 7px; padding: 4px 12px; font-size: 12px; cursor: pointer; }
   button:hover { border-color: var(--blue); }
-  button.ok { background: var(--green); color: #111; border-color: var(--green); font-weight: 600; }
+  button.ok { background: var(--green); color: var(--bg3); border-color: var(--green); font-weight: 600; }
   #main { flex: 1; overflow: auto; padding: 12px 16px; }
   #stats { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
   .chip { background: var(--panel); border: 1px solid var(--line); border-radius: 999px;

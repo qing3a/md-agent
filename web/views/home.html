@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <title>功能首页</title>
 <style>
-  :root { --bg:#1e1e2e; --panel:#26263a; --panel2:#2f2f46; --line:#3a3a55;
-          --fg:#cdd6f4; --dim:#7f849c; --green:#a6e3a1; --red:#f38ba8;
-          --yellow:#f9e2af; --blue:#89b4fa; --purple:#cba6f7; }
+  :root { --bg:var(--bg); --panel:var(--chip); --panel2:var(--chip3); --line:var(--chip4);
+          --fg:var(--fg); --dim:var(--muted); --green:var(--ok); --red:var(--danger);
+          --yellow:var(--warn); --blue:var(--accent); --purple:var(--purple); }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--fg);
     font: 13px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif;
@@ -35,7 +35,7 @@
     font-family: Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .card .run::before { content: "$ "; color: var(--dim); }
   .badge { position: absolute; top: -5px; right: -6px; min-width: 15px; height: 15px;
-    padding: 0 4px; border-radius: 8px; background: var(--red); color: #111;
+    padding: 0 4px; border-radius: 8px; background: var(--red); color: var(--bg3);
     font-size: 10px; font-weight: 700; line-height: 15px; text-align: center; }
   .badge.warn { background: var(--yellow); }
   .badge.none { display: none; }
