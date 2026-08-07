@@ -166,6 +166,7 @@
       term.writeln('\x1b[33m会话文件无有效问答对: ' + hit.id + '\x1b[0m');
       return;
     }
+    closeView(); // 切换对话页语义：先关掉详情页（自动化/图谱等），否则视图盖着聊天区 = 点了切不过去
     // A3 恢复=新会话语义：载入 history（工作窗口内）+ 重置分节缓存（方向 3 memo 不沿用旧值）
     history = [];
     for (const p of parsed) {
@@ -397,7 +398,7 @@
   // 提交一条命令/问题：流内整行背景块 + 执行；回答期间（busy）只放行导航命令（静默执行）
   async function submitCmd(text) {
     const t = String(text || '').trim();
-    if (!t || confirmCb) return;
+    if (!t || cfCb) return;
     if (busy && !isNavCmd(t)) return;   // 回答中：非导航命令仍拦截
     if (busy) {                          // 回答中导航：不动 busy/输入框，回答流继续，视图静默打开
       try { await run(t); } catch (e) { term.writeln('\x1b[31m' + ((e && e.message) || e) + '\x1b[0m'); }
@@ -432,7 +433,7 @@
   // 与键盘路径差异：保留用户当前输入行草稿（line 不动）、不记命令历史。
   async function panelCmd(cmd) {
     const t = String(cmd || '').trim();
-    if (!t || confirmCb) return;
+    if (!t || cfCb) return;
     if (busy && !isNavCmd(t)) return;   // 回答中：与键盘一致，仅放行导航命令
     if (busy) {
       try { await run(t); } catch (e) { term.writeln('\x1b[31m' + ((e && e.message) || e) + '\x1b[0m'); }
@@ -462,21 +463,10 @@
     quickBtns.forEach((b) => (b.disabled = false));
   }
 
-  // 按键扩展：y/n 确认、↑↓ 历史、Tab 命令补全、Ctrl+C 中断（原生 textarea，Enter 由 stream.js 转发）
+  // 按键扩展：↑↓ 历史、Tab 命令补全、Ctrl+C 中断、Esc 关闭（原生 textarea，Enter 由 stream.js 转发；
+  // 确认交互已改软弹窗 #cf-overlay，不再有终端 y/n 按键拦截）
   term.attachCustomKeyEventHandler((ev) => {
     const k = ev.key;
-    // 终端确认机制（写操作人审 y/n）：原生 textarea 无字符流事件，改按键级拦截
-    if (confirmCb) {
-      ev.preventDefault();
-      if (k === 'y' || k === 'Y') {
-        term.writeln('\x1b[32m✓ 已确认\x1b[0m');
-        const cb = confirmCb; confirmCb = null; cb(true);
-      } else if (k === 'n' || k === 'N' || k === 'Enter' || k === 'Escape') {
-        term.writeln('\x1b[90m已取消\x1b[0m');
-        const cb = confirmCb; confirmCb = null; cb(false);
-      }
-      return false;
-    }
     // 补全下拉：↑↓/Tab 移动选择，Enter 选中，Esc 关闭
     if (compOpen && compItems.length) {
       if (k === 'ArrowUp' || k === 'ArrowDown' || k === 'Tab') {
@@ -738,7 +728,7 @@
         x.title = '归档会话';
         x.addEventListener('click', (ev) => {
           ev.stopPropagation();
-          if (!confirm('归档会话 ' + s.id + '？')) return;
+          // 归档可逆（进历史对话随时可恢复），免确认直接归档——与新对话行为一致
           archiveSessionStatus(s.id).then(() => { sbFingerprint = ''; paintSidebar(); });
         });
         const more = document.createElement('span');
@@ -755,7 +745,8 @@
         del.title = '删除会话（不可恢复）';
         del.addEventListener('click', async (ev) => {
           ev.stopPropagation();
-          if (!confirm('删除会话 ' + s.id + '（不可恢复）？')) return;
+          // 删除不可恢复 → 软弹窗确认（danger 红色）
+          if (!await uiConfirm('删除会话 ' + s.id + '？（不可恢复）', { danger: true })) return;
           await api('/api/file?path=sessions/' + encodeURIComponent(s.id + '.md'), { method: 'DELETE' }).catch(() => {});
           sbFingerprint = '';
           paintSidebar();
@@ -802,7 +793,7 @@
     });
   }
   document.getElementById('session-new').addEventListener('click', () => {
-    if (!confirm('新建会话将归档当前对话并清空多轮记忆，继续？')) return;
+    // 新对话免确认：直接归档当前对话并清空（归档动作本身会落盘 sessions/，随时可恢复，不丢数据）
     closeView(); // 先回聊天区（新对话 = 回到对话主界面）
     submitCmd('/clear');
     setTimeout(() => { sbFingerprint = ''; paintSidebar(); }, 800);
@@ -1114,6 +1105,16 @@
     if (ppInput) ppInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runCmdPrompt(); });
     const ppOv = document.getElementById('pp-overlay');
     if (ppOv) ppOv.addEventListener('click', (e) => { if (e.target === ppOv) closeCmdPrompt(); });
+    // 软确认弹窗绑定：确认/取消按钮 + 遮罩点击取消 + Esc 取消（安全默认焦点在取消）
+    const cfOkBtn = document.getElementById('cf-ok');
+    if (cfOkBtn) cfOkBtn.addEventListener('click', () => { if (cfCb) cfCb(true); });
+    const cfCancelBtn = document.getElementById('cf-cancel');
+    if (cfCancelBtn) cfCancelBtn.addEventListener('click', () => { if (cfCb) cfCb(false); });
+    const cfOv = document.getElementById('cf-overlay');
+    if (cfOv) cfOv.addEventListener('click', (e) => { if (e.target === cfOv && cfCb) cfCb(false); });
+    document.addEventListener('keydown', (e) => {
+      if (cfCb && e.key === 'Escape') { e.preventDefault(); cfCb(false); }
+    });
     document.addEventListener('click', (e) => {
       const menu = document.getElementById('project-menu');
       if (menu && !menu.hidden && !menu.contains(e.target) && e.target.id !== 'project-chip') closeProjectMenu();
@@ -1249,16 +1250,25 @@
     showPrompt(); // 输入框（上边框/输入行/下边框/状态行）在内容末尾
   })();
 
-  // 终端确认机制：confirm(msg) 挂起等待 y/n 按键（写操作人审闭环的基础设施；E6：无效键静默吞掉，无空行）
-  // y/n 由按键处理器（attachCustomKeyEventHandler）拦截——原生 textarea 无字符流事件
-  let confirmCb = null;
-  function confirm(msg) {
+  // 软确认弹窗（替代终端 y/n）：写操作人审走页面内 modal（#cf-overlay），不再挂起等按键
+  // 可逆操作（新对话/归档/断开 hub）已改免确认直接执行；不可逆/安全敏感操作保留确认
+  let cfCb = null;
+  function uiConfirm(msg, opts) {
     return new Promise((resolve) => {
-      confirmCb = (ok) => resolve(ok);
-      term.writeln('\x1b[33m' + msg + ' \x1b[1m(y/N)\x1b[0m');
-      term.focus();
+      const box = document.getElementById('cf-overlay');
+      if (!box) { resolve(true); return; } // 弹窗缺失兜底：直接放行
+      cfCb = (ok) => { box.hidden = true; cfCb = null; resolve(ok); };
+      document.getElementById('cf-msg').textContent = msg;
+      const danger = !!(opts && opts.danger);
+      const okBtn = document.getElementById('cf-ok');
+      okBtn.textContent = danger ? '确认删除' : '确认';
+      okBtn.className = danger ? 'danger' : '';
+      document.getElementById('cf-title').textContent = danger ? '危险操作' : '确认操作';
+      box.hidden = false;
+      setTimeout(() => document.getElementById('cf-cancel').focus(), 50); // 安全默认：焦点在取消
     });
   }
+  function confirm(msg) { return uiConfirm(msg); } // 历史调用点语义不变（交互改为弹窗）
 
   // 输入提交（原生 textarea：字符编辑/IME 组合由浏览器处理，line 经 input 事件同步；这里只接 Enter）
   term.onData((data) => {
@@ -2824,8 +2834,9 @@
     'window.parent.postMessage({type:"api",id:id,method:(opts&&opts.method)||"GET",path:path,body:opts&&opts.body},"*");' +
     '});};' +
     // 应用市场（阶段 1）：沙箱内直连 /api/* 的 fetch 自动改走桥（宿主按 app.json 权限白名单放行）
+    // body 兼容：字符串 JSON 原样解析，对象直接透传（面板误传对象的旧写法也能工作）
     'var _nf=window.fetch;window.fetch=function(u,o){var s=String(u),i=s.indexOf("/api/");' +
-    'if(i!==-1){var p=s.slice(i),bd;try{bd=o&&o.body?JSON.parse(o.body):undefined}catch(e){bd=undefined}' +
+    'if(i!==-1){var p=s.slice(i),bd;try{bd=o&&o.body?(typeof o.body==="string"?JSON.parse(o.body):o.body):undefined}catch(e){bd=undefined}' +
     'return window.hostApi(p,{method:(o&&o.method)||"GET",body:bd}).then(function(d){return{ok:true,status:200,json:function(){return Promise.resolve(d)},text:function(){return Promise.resolve(JSON.stringify(d))}}});}' +
     'return _nf.apply(this,arguments);};' +
     'window.addEventListener("keydown",function(e){if(e.key==="Escape"){window.parent.postMessage({type:"escape"},"*");}});' +
@@ -3008,7 +3019,11 @@
         body: msg.body ? JSON.stringify(msg.body) : undefined,
       });
       const data = await res.json().catch(() => ({}));
-      tab.iframe.contentWindow.postMessage({ id: msg.id, ok: res.ok, data }, '*');
+      // 非 2xx 时透传后端错误消息（面板不再只见笼统的 "host error"）
+      tab.iframe.contentWindow.postMessage({
+        id: msg.id, ok: res.ok, data,
+        error: res.ok ? undefined : ((data && data.error) || 'HTTP ' + res.status),
+      }, '*');
       // 面板写操作成功 → 主界面状态即时刷新（状态栏待审/任务数字不等 8s 轮询；面板内批准/改任务/补链/卸载后立即反映）
       if (res.ok && (msg.method || 'GET') !== 'GET') {
         refreshStatus();
@@ -3085,8 +3100,7 @@
     if (sub === 'disconnect') {
       const name = (args[1] || '').trim();
       if (!name) { term.writeln('\x1b[33m用法：/market disconnect <hub名>\x1b[0m'); return; }
-      const ok = await confirm('断开 hub「' + name + '」？（已安装的应用不受影响）');
-      if (!ok) { term.writeln('已取消'); return; }
+      // 断开可逆（随时可重连），免确认直接断开
       const r = await api('/api/hubs/disconnect', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name }),

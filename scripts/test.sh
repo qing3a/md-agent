@@ -14,7 +14,7 @@ echo ""
 echo "=== 2/3 前端逻辑测试（core.js）==="
 node --check web/app.js
 node scripts/frontend-test.js | tail -2
-node --test tests/web/ 2>/dev/null || node --test tests/web/core.test.js | tail -8
+node --test tests/web/ 2>/dev/null || { node --test tests/web/core.test.js; node --test tests/web/market.test.js; } | tail -8
 
 echo ""
 echo "=== 3/3 端到端四型审批链路（隔离 kb）==="

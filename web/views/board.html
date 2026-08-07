@@ -55,6 +55,16 @@
   .card .actions .go { color: var(--yellow); } .card .actions .fin { color: var(--green); }
   .card .actions .drop { color: var(--red); } .card .actions .del { color: var(--red); }
   .empty { color: var(--dim); font-size: 12px; text-align: center; padding: 12px 0; }
+  /* 软确认弹窗（替代原生 confirm） */
+  #ov { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 20;
+    display: flex; align-items: center; justify-content: center; }
+  #ov.hidden { display: none; }
+  #ov-box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px; width: 380px; max-width: 90vw; }
+  #ov-box h3 { color: var(--red); font-size: 14px; margin-bottom: 10px; }
+  #ov-msg { font-size: 13px; margin-bottom: 14px; }
+  #ov-actions { display: flex; gap: 8px; justify-content: flex-end; }
+  #ov-ok { background: var(--red); color: var(--bg3); border-color: var(--red); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -69,6 +79,17 @@
   </div>
 </header>
 <div class="board" id="board"><div class="empty" style="color:var(--dim)">加载中…</div></div>
+<!-- 软确认弹窗（替代原生 confirm） -->
+<div id="ov" class="hidden">
+  <div id="ov-box">
+    <h3>⚠ 危险操作</h3>
+    <div id="ov-msg"></div>
+    <div id="ov-actions">
+      <button id="ov-cancel">取消</button>
+      <button id="ov-ok">确认删除</button>
+    </div>
+  </div>
+</div>
 <script>
 const COLS = [
   ['todo', '待办'], ['doing', '进行中'], ['done', '已完成'], ['dropped', '已放弃']
@@ -133,7 +154,7 @@ async function set(id, status) {
   } catch (e) { alert(e.message); }
 }
 async function del(id) {
-  if (!confirm('删除任务 #' + id + '？')) return;
+  if (!await uiConfirm('删除任务 #' + id + '？（不可恢复）')) return;
   await api('/api/tasks/' + id, { method: 'DELETE' });
   load();
 }
@@ -155,6 +176,29 @@ function esc(s) {
 load().catch((e) => {
   document.getElementById('board').innerHTML =
     '<div class="empty" style="color:var(--red)">加载失败: ' + esc(e.message) + '</div>';
+});
+
+// 软确认弹窗：页内 modal（替代原生 confirm），Promise<boolean>
+let ovCb = null;
+function uiConfirm(msg) {
+  return new Promise((resolve) => {
+    ovCb = resolve;
+    document.getElementById('ov-msg').textContent = msg;
+    document.getElementById('ov').classList.remove('hidden');
+  });
+}
+function closeOv(ok) {
+  document.getElementById('ov').classList.add('hidden');
+  const cb = ovCb; ovCb = null;
+  if (cb) cb(ok);
+}
+document.getElementById('ov-ok').addEventListener('click', () => closeOv(true));
+document.getElementById('ov-cancel').addEventListener('click', () => closeOv(false));
+document.getElementById('ov').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('ov')) closeOv(false);
+});
+document.addEventListener('keydown', (e) => {
+  if (ovCb && e.key === 'Escape') closeOv(false);
 });
 </script>
 </body>

@@ -103,9 +103,22 @@
 </div>
 <div id="hint">连接 SkillHub：<code>连接 hub</code> 或终端 <code>/market connect &lt;url&gt;</code> · 安装走命令行（人审确认）：<code>/market install &lt;id&gt;</code> 或 <code>/market import &lt;路径&gt;</code> · 更新走 <code>/market update &lt;id&gt; &lt;路径&gt;</code> · 运行在宿主新标签打开</div>
 <div id="toast" class="toast"></div>
+<!-- 软确认弹窗（替代原生 confirm） -->
+<div id="overlay" class="hidden">
+  <div class="ov-box">
+    <h3 id="ov-title">确认卸载</h3>
+    <div id="ov-msg" class="ov-row"></div>
+    <div class="ov-actions">
+      <button id="ov-cancel">取消</button>
+      <button id="ov-ok" class="danger">确认卸载</button>
+    </div>
+  </div>
+</div>
 
 <script>
 var hubs = [], catalog = [], apps = [];
+var catalogView = []; // 渲染用目录（已安装优先排序；与 data-i 索引保持一致）
+var loadedOnce = false; // 首次加载默认 Tab = 已安装（有已装应用时）
 var tab = 'catalog'; // 'catalog' | 'installed'
 var sel = null; // { kind: 'cat' | 'inst', ...条目字段 }
 
@@ -133,10 +146,17 @@ function render() {
 
   var items = $('items');
   if (tab === 'catalog') {
-    items.innerHTML = catalog.map(function (a, i) {
+    // 已安装优先：目录里已装的应用排最前并标注（打开市场最关心自己装了什么）
+    var instIds = {};
+    apps.forEach(function (a) { instIds[a.id] = true; });
+    catalogView = catalog.slice().sort(function (a, b) {
+      return (instIds[a.id] ? 0 : 1) - (instIds[b.id] ? 0 : 1);
+    });
+    items.innerHTML = catalogView.map(function (a, i) {
       var kindBadge = a.kind === 'skill' ? '<span class="src">[技能]</span>' : '';
+      var instBadge = instIds[a.id] ? '<span class="src" style="color:var(--green)">[已安装]</span>' : '';
       return '<div class="item' + (sel && sel.kind === 'cat' && sel.id === a.id ? ' sel' : '') + '" data-i="' + i + '">' +
-        '<div class="n">' + esc(a.name) + '<span class="v">v' + esc(a.version) + '</span><span class="src">[' + esc(a.hub) + ']</span>' + kindBadge + '</div>' +
+        '<div class="n">' + esc(a.name) + '<span class="v">v' + esc(a.version) + '</span><span class="src">[' + esc(a.hub) + ']</span>' + kindBadge + instBadge + '</div>' +
         '<div class="p">' + esc(a.id) + ' · [' + esc((a.permissions || []).join(',')) + ']</div></div>';
     }).join('');
   } else {
@@ -193,7 +213,7 @@ function renderListSel() {
     el.classList.toggle('sel', sel && el.dataset.i && currentList()[+el.dataset.i] && currentList()[+el.dataset.i].id === sel.id);
   });
 }
-function currentList() { return tab === 'catalog' ? catalog : apps; }
+function currentList() { return tab === 'catalog' ? catalogView : apps; }
 
 $('items').addEventListener('click', function (e) {
   var el = e.target.closest('.item');
@@ -215,13 +235,36 @@ function runApp(id) {
   window.parent.postMessage({ type: 'cmd', cmd: '/view ' + id }, '*');
 }
 function uninstallApp(id, name) {
-  if (!confirm('确认卸载 ' + name + '（' + id + '）？')) return;
-  hostApi('/api/market/uninstall', { method: 'POST', body: { id: id } }).then(function () {
-    toast('✓ 已卸载 ' + id, true);
-    sel = null;
-    return load();
-  }).catch(function (e) { toast('卸载失败: ' + e.message, false); });
+  uiConfirm('确认卸载 ' + name + '（' + id + '）？（应用目录将被删除）').then(function (ok) {
+    if (!ok) return;
+    hostApi('/api/market/uninstall', { method: 'POST', body: { id: id } }).then(function () {
+      toast('✓ 已卸载 ' + id, true);
+      sel = null;
+      return load();
+    }).catch(function (e) { toast('卸载失败: ' + e.message, false); });
+  });
 }
+
+// 软确认弹窗：页内 modal（替代原生 confirm），Promise<boolean>
+var ovCb = null;
+function uiConfirm(msg) {
+  return new Promise(function (resolve) {
+    ovCb = resolve;
+    $('ov-msg').textContent = msg;
+    $('overlay').classList.remove('hidden');
+  });
+}
+function closeOv(ok) {
+  $('overlay').classList.add('hidden');
+  var cb = ovCb; ovCb = null;
+  if (cb) cb(ok);
+}
+$('ov-ok').addEventListener('click', function () { closeOv(true); });
+$('ov-cancel').addEventListener('click', function () { closeOv(false); });
+$('overlay').addEventListener('click', function (e) { if (e.target === $('overlay')) closeOv(false); });
+document.addEventListener('keydown', function (e) {
+  if (ovCb && e.key === 'Escape') closeOv(false);
+});
 
 // ---------- 连接 hub ----------
 $('connect').addEventListener('click', function () {
@@ -244,6 +287,11 @@ async function load() {
     hubs = rs[0].hubs || [];
     catalog = rs[1].apps || [];
     apps = rs[2].apps || [];
+    // 优先显示已安装：首次打开且已有已装应用时，默认落在「已安装」Tab（之后跟随用户选择）
+    if (!loadedOnce) {
+      loadedOnce = true;
+      if (apps.length) { tab = 'installed'; sel = null; }
+    }
     render();
   } catch (e) {
     $('items').innerHTML = '<div class="empty">加载失败: ' + esc(e.message) + '</div>';

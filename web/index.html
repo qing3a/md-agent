@@ -147,11 +147,16 @@
   /* 命令参数弹窗（prefill 界面化：点卡片 → 弹参 → 直接执行，不再预填命令到输入框） */
   #pp-overlay { position: fixed; inset: 0; z-index: 400; background: rgba(0,0,0,.45);
     display: flex; align-items: center; justify-content: center; }
-  #pp-overlay[hidden] { display: none; }
-  #pp-box { background: var(--bg2, #1e1e2e); border: 1px solid var(--border); border-radius: 14px;
+  #pp-overlay[hidden], #cf-overlay[hidden] { display: none; }
+  #pp-box, #cf-box { background: var(--bg2, #1e1e2e); border: 1px solid var(--border); border-radius: 14px;
     width: 440px; max-width: 90vw; padding: 18px; box-shadow: 0 12px 40px rgba(0,0,0,.4); }
-  #pp-box h3 { margin: 0 0 4px; font-size: 15px; color: var(--fg); }
+  #pp-box h3, #cf-box h3 { margin: 0 0 4px; font-size: 15px; color: var(--fg); }
   #pp-desc { font-size: 12px; color: var(--muted2); margin-bottom: 12px; }
+  #cf-msg { font-size: 13px; color: var(--fg); line-height: 1.7; }
+  #cf-overlay { position: fixed; inset: 0; z-index: 400; background: rgba(0,0,0,.45);
+    display: flex; align-items: center; justify-content: center; }
+  #cf-ok.danger { background: var(--danger, #f38ba8); color: #fff; border-color: var(--danger, #f38ba8); font-weight: 600; }
+  #cf-ok.danger:hover { color: #fff; }
   #pp-input { width: 100%; box-sizing: border-box; padding: 9px 12px; border-radius: 8px;
     border: 1px solid var(--border); background: var(--chip); color: var(--fg); font-size: 13px; }
   #pp-input:focus { outline: none; border-color: var(--accent); }
@@ -425,6 +430,18 @@
     <div class="pp-actions">
       <button id="pp-cancel">取消</button>
       <button id="pp-run">执行</button>
+    </div>
+  </div>
+</div>
+
+<!-- 软确认弹窗（替代终端 y/n：写操作人审走页面内 modal，不再等按键） -->
+<div id="cf-overlay" hidden>
+  <div id="cf-box">
+    <h3 id="cf-title">确认操作</h3>
+    <div id="cf-msg"></div>
+    <div class="pp-actions">
+      <button id="cf-cancel">取消</button>
+      <button id="cf-ok">确认</button>
     </div>
   </div>
 </div>
