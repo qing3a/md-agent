@@ -54,6 +54,7 @@ pub async fn serve(
         .route("/api/memory/touch", post(memory_touch))
         .route("/api/memory/heat", get(memory_heat))
         .route("/api/experience/propose", post(experience_propose))
+        .route("/api/decide", post(decide_handler))
         .route("/api/dev/read", get(dev_read))
         .route("/api/dev/status", get(dev_status))
         .route("/api/dev/diff", get(dev_diff))
@@ -951,6 +952,29 @@ async fn experience_propose(State(st): State<AppState>, headers: HeaderMap, Json
         }
     });
     Json(json!({ "ok": true, "created": 0, "async": true })).into_response()
+}
+
+// ---------- 未决决策拍板（B3 闭环）：/decide <主题> <结论> ----------
+
+#[derive(Deserialize)]
+struct DecideBody {
+    topic: String,
+    conclusion: String,
+}
+
+async fn decide_handler(State(st): State<AppState>, headers: HeaderMap, Json(b): Json<DecideBody>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let _guard = st.sync_lock.lock().await; // 与写回/补链共用互斥（MEMORY.md 与未决清单都是共享文件）
+    match crate::kb::decide_undecided(&root, &b.topic, &b.conclusion) {
+        Ok(msg) => {
+            crate::activity::record(&root, "decision", &format!("拍板：{}", b.topic), json!({}));
+            Json(json!({ "ok": true, "msg": msg })).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
 }
 
 /// 写经验提案（C2 三分通道）：文件名前缀 EXPERIENCE.<TYPE> 供审批路由（MEMORY 进记忆 / BEHAVIOR 落行为建议 / CODE 落代码 backlog）

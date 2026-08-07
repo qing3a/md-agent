@@ -1017,6 +1017,20 @@
     }
     term.writeln('\x1b[90m切换：点顶栏项目名 · 新建：项目菜单「＋ 新建项目」\x1b[0m');
   }
+  // /decide <主题> <结论>：未决决策拍板（B3 闭环）——从未决清单移除议题、结论入已决 + MEMORY 决策区
+  async function decideCmd(rest) {
+    const topic = String(rest[0] || '').trim();
+    const conclusion = rest.slice(1).join(' ').trim();
+    if (!topic) { term.writeln('\x1b[33m用法: /decide <主题> <结论>（主题从 /view pending 或 notes/决策/未决.md 取）\x1b[0m'); return; }
+    if (!conclusion) { term.writeln('\x1b[33m缺结论: /decide <主题> <结论>\x1b[0m'); return; }
+    try {
+      const r = await api('/api/decide', { method: 'POST', body: JSON.stringify({ topic, conclusion }) });
+      term.writeln('\x1b[32m✓ ' + (r.msg || '已拍板') + '\x1b[0m');
+      refreshStatus();
+    } catch (e) {
+      term.writeln('\x1b[31m' + ((e && e.message) || e) + '\x1b[0m');
+    }
+  }
   // 项目切换器事件绑定（模块级初始化）
   loadProjectState();
   refreshProjects();
@@ -1335,6 +1349,7 @@
       case '/diff': await diffCmd(rest[0], rest[1]); break;
       case '/link': await linkCmd(rest[0], rest[1]); break;
       case '/suggest': await suggest(rest.join(' ')); break;
+      case '/decide': await decideCmd(rest); break;
       case '/sessions': await sessionsCmd(); break;
       case '/resume': await resumeCmd(rest[0]); break;
       case '/dev': await devCmd(rest); break;
@@ -1377,6 +1392,7 @@
     term.writeln('  /link <源> <目标>      补链接（在源文档追加 [[目标]]，人工确认）');
     term.writeln('  /link-all              一键应用 /audit 的全部补链接建议');
     term.writeln('  /suggest <主题>        LLM 补全缺失主题的新文档（进待审）');
+    term.writeln('  /decide <主题> <结论>  未决决策拍板（未决清单 → 已决 + MEMORY 决策区）');
     term.writeln('  /fetch <url> [标题]    抓取网页：阅读视图 / 带标题则沉淀为待审笔记');
     term.writeln('  /page <url> [标题]     动态网页读取（headless Edge/Chrome，等 JS 渲染）');
     term.writeln('  /task                  任务看板（Phase 3-B 引擎）');
@@ -1487,7 +1503,14 @@
   }
 
   // 经验闭环 C1（审视层）：触发信号 → 后端 LLM 审视 → 经验提案进待审（fire-and-forget，零 token 触发）
+  // C1 审视层触发：强信号（纠错 / 工具失败）→ 经验提案进待审（fire-and-forget，零 token 规则信号）
+  // 节流：同信号同主题 5 分钟内只报一次（工具失败可能高频发生，防提案刷屏）
+  const expThrottle = {};
   function touchExperience(signal, context) {
+    const key = signal + '|' + String(context).slice(0, 60);
+    const now = Date.now();
+    if (expThrottle[key] && now - expThrottle[key] < 5 * 60 * 1000) return;
+    expThrottle[key] = now;
     fetch('/api/experience/propose', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ signal, context: String(context || '').slice(0, 500) }),
@@ -1559,7 +1582,14 @@
   async function runTool(name, args) {
     const fn = TOOL_API[name];
     if (!fn) throw new Error('未知工具: ' + name);
-    const r = await fn(args || {});
+    let r;
+    try {
+      r = await fn(args || {});
+    } catch (e) {
+      // C1 触发层：工具失败 = 真实摩擦强信号（零 token）→ 经验提案进待审（后端审视分级决定是否沉淀）
+      touchExperience('tool_failed', '工具 ' + name + ' 失败: ' + ((e && e.message) || e) + (args && args.q ? '（查询: ' + String(args.q).slice(0, 80) + '）' : ''));
+      throw e;
+    }
     // B1 读时整理：收集本次读取的 KB 路径（read_l1/file/graph/search 类）
     const readPaths = [];
     if (name === 'read_l1') { if (args.file) readPaths.push(args.file); }

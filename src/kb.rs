@@ -891,6 +891,127 @@ pub fn resolve_in_kb(root: &Path, rel: &str) -> Option<PathBuf> {
     }
 }
 
+/// 未决决策拍板（B3 闭环）：/decide <主题> <结论>
+/// 从未决清单 notes/决策/未决.md 移除匹配议题小节（标题行模糊匹配），
+/// 结论追加 notes/决策/已决.md；L1 MEMORY「决策待定」区移除对应行、决策区追加记录。
+/// 幂等：未决清单无匹配但已决.md 已含同主题 → 提示已拍板不重复追加。
+pub fn decide_undecided(root: &Path, topic: &str, conclusion: &str) -> Result<String, String> {
+    let topic = topic.trim();
+    let conclusion = conclusion.trim();
+    if topic.is_empty() || conclusion.is_empty() {
+        return Err("主题与结论不能为空".to_string());
+    }
+    let dec_dir = root.join("notes").join("决策");
+    let dec_file = dec_dir.join("未决.md");
+    // 幂等前置：清单缺失（可能已被拍板删档）→ 已决.md 含同主题则视为已拍板
+    let idempotent_done = || -> Option<String> {
+        let done_file = dec_dir.join("已决.md");
+        let done = fs::read_to_string(&done_file).ok()?;
+        if done.contains(topic) {
+            Some("该议题已拍板（notes/决策/已决.md 已有记录）".to_string())
+        } else {
+            None
+        }
+    };
+    let content = match fs::read_to_string(&dec_file) {
+        Ok(c) => c,
+        Err(_) => {
+            if let Some(msg) = idempotent_done() {
+                return Ok(msg);
+            }
+            return Err("未决清单不存在（notes/决策/未决.md）".to_string());
+        }
+    };
+
+    // 行扫描切分：以 "## " 开头的行为新节首；第一个节之前的文字为文件头
+    let mut head = String::new();
+    let mut sections: Vec<String> = Vec::new();
+    for line in content.lines() {
+        if line.starts_with("## ") {
+            sections.push(line.to_string());
+        } else if sections.is_empty() {
+            if !line.trim().is_empty() {
+                head.push_str(line);
+                head.push('\n');
+            }
+        } else {
+            let last = sections.last_mut().unwrap();
+            last.push('\n');
+            last.push_str(line);
+        }
+    }
+    let mut hit: Option<(String, String)> = None; // (标题行, 完整小节)
+    let mut rest: Vec<String> = Vec::new();
+    for s in &sections {
+        let title = s.lines().next().unwrap_or("").trim();
+        if hit.is_none() && title.contains(topic) {
+            hit = Some((title.trim_start_matches("## ").trim().to_string(), s.clone()));
+        } else {
+            rest.push(s.clone());
+        }
+    }
+    let Some((title, _)) = hit else {
+        // 未命中 → 幂等检查：已决.md 已含同主题 → 视为已拍板
+        if let Some(msg) = idempotent_done() {
+            return Ok(msg);
+        }
+        return Err(format!("未决清单中无含「{topic}」的议题（查看 notes/决策/未决.md）"));
+    };
+
+    // 1) 未决.md：移除命中小节；无剩余小节 → 删文件（DECISION 批准路径重建兼容缺失）
+    if rest.is_empty() {
+        fs::remove_file(&dec_file).map_err(|e| format!("清理未决清单失败: {e}"))?;
+    } else {
+        let mut new_content = head;
+        new_content.push_str(&rest.join("\n\n"));
+        fs::write(&dec_file, new_content).map_err(|e| format!("更新未决清单失败: {e}"))?;
+    }
+    // 2) 已决.md 追加（标题行保留原议题 + 结论成节；title 已含 [date] 前缀）
+    let done_file = dec_dir.join("已决.md");
+    let old_done = fs::read_to_string(&done_file).unwrap_or_default();
+    let entry = format!("## {title}\n结论：{conclusion}\n", title = title);
+    let new_done = if old_done.trim().is_empty() {
+        entry
+    } else {
+        format!("{}\n\n{}", old_done.trim_end(), entry)
+    };
+    fs::create_dir_all(&dec_dir).map_err(|e| e.to_string())?;
+    fs::write(&done_file, new_done).map_err(|e| format!("写已决.md 失败: {e}"))?;
+    // 3) L1 MEMORY：决策待定区移除该行 + 决策区追加记录
+    let mem_path = root.join("MEMORY.md");
+    let old_mem = fs::read_to_string(&mem_path).unwrap_or_default();
+    let mut new_mem = String::new();
+    let mut in_undecided = false;
+    let mut removed_line = false;
+    for line in old_mem.lines() {
+        if line.starts_with("## 决策待定") {
+            in_undecided = true;
+        } else if line.starts_with("## ") {
+            in_undecided = false;
+        }
+        let is_undecided_line = in_undecided && line.starts_with("- ") && line.contains("（未决）") && line.contains(topic);
+        if is_undecided_line {
+            removed_line = true;
+            continue; // 移除该指针行
+        }
+        new_mem.push_str(line);
+        new_mem.push('\n');
+    }
+    let bullet = format!("- {title}：{conclusion}");
+    // 决策区标题匹配：排除「## 决策待定」前缀误命中（find 精确到换行）
+    let dec_sec = new_mem.find("## 决策\n");
+    if let Some(hdr) = dec_sec {
+        // 决策区存在 → 首行后插入
+        let nl = new_mem[hdr..].find('\n').map(|i| hdr + i + 1).unwrap_or(new_mem.len());
+        new_mem = format!("{}{}\n{}", &new_mem[..nl], bullet, &new_mem[nl..]);
+    } else {
+        new_mem = format!("{}{}\n\n## 决策\n{}\n", new_mem.trim_end(), "", bullet);
+    }
+    fs::write(&mem_path, new_mem).map_err(|e| format!("写 MEMORY.md 失败: {e}"))?;
+    let _ = removed_line;
+    Ok(format!("已拍板：{title}（未决清单已移除，结论入 MEMORY 决策区）"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1277,6 +1398,60 @@ mod tests {
         assert!(resolve_in_kb(&root, "notes/子目录/目标.md").is_some());
         // 目标不存在但父目录存在 → 仍返回可写路径（用于新建）
         assert!(resolve_in_kb(&root, "notes/子目录/新文件.md").is_some());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn decide_undecided_roundtrip() {
+        let root = test_root("decide");
+        ensure_layout(&root).unwrap();
+        // 未决清单两节（DECISION 批准路径的真实格式：## [date] 议题：xxx）+ MEMORY 决策待定指针
+        fs::create_dir_all(root.join("notes/决策")).unwrap();
+        fs::write(
+            root.join("notes/决策/未决.md"),
+            "## [2026-08-06] 议题：工具选择\n上次方案：A/B/C\n\n## [2026-08-07] 议题：模板命名\n上次方案：lawyer\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("MEMORY.md"),
+            "# 记忆\n\n## 决策待定\n- [2026-08-07] 议题：模板命名（未决）：见 [[notes/决策/未决.md]]\n",
+        )
+        .unwrap();
+        // 拍板：命中「模板命名」
+        let msg = decide_undecided(&root, "模板命名", "用 lawyer").unwrap();
+        assert!(msg.contains("模板命名"));
+        // 未决清单只剩工具选择
+        let dec = fs::read_to_string(root.join("notes/决策/未决.md")).unwrap();
+        assert!(dec.contains("工具选择") && !dec.contains("模板命名"));
+        // 已决.md 有记录
+        let done = fs::read_to_string(root.join("notes/决策/已决.md")).unwrap();
+        assert!(done.contains("模板命名") && done.contains("用 lawyer"));
+        // MEMORY：决策待定指针移除 + 决策区追加
+        let mem = fs::read_to_string(root.join("MEMORY.md")).unwrap();
+        assert!(!mem.contains("（未决）：见"), "指针未移除: {mem}");
+        assert!(mem.contains("## 决策") && mem.contains("议题：模板命名：用 lawyer"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn decide_undecided_idempotent_and_missing() {
+        let root = test_root("decide2");
+        ensure_layout(&root).unwrap();
+        // 空参拒绝
+        assert!(decide_undecided(&root, "", "x").is_err());
+        assert!(decide_undecided(&root, "x", "").is_err());
+        // 清单不存在
+        assert!(decide_undecided(&root, "议题", "结论").is_err());
+        // 命中一次 → 第二次幂等提示
+        fs::create_dir_all(root.join("notes/决策")).unwrap();
+        fs::write(root.join("notes/决策/未决.md"), "## [2026-08-07] 议题：买哪款\n上次方案：A\n").unwrap();
+        decide_undecided(&root, "买哪款", "选 B").unwrap();
+        let again = decide_undecided(&root, "买哪款", "选 B").unwrap();
+        assert!(again.contains("已拍板"));
+        // 未决清单已删（唯一小节移除后）
+        assert!(!root.join("notes/决策/未决.md").exists());
+        // 无关主题 → Err
+        assert!(decide_undecided(&root, "不存在的议题", "x").is_err());
         fs::remove_dir_all(&root).unwrap();
     }
 }
