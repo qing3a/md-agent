@@ -642,8 +642,9 @@ pub fn approve_pending(root: &Path, rel: &str, edited: Option<&str>) -> Result<(
             .get("date")
             .cloned()
             .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
-        let first_line = body
-            .lines()
+        // 标题行 = 第一个非空行（frontmatter 后可能带空行——前端写提案格式 `---\n\n## 议题`）
+        let mut body_lines = body.lines().skip_while(|l| l.trim().is_empty());
+        let first_line = body_lines
             .next()
             .unwrap_or("未决议题")
             .trim()
@@ -654,11 +655,7 @@ pub fn approve_pending(root: &Path, rel: &str, edited: Option<&str>) -> Result<(
         fs::create_dir_all(&dec_dir).map_err(|e| e.to_string())?;
         let dec_file = dec_dir.join("未决.md");
         let old_dec = fs::read_to_string(&dec_file).unwrap_or_default();
-        let body_rest = {
-            let mut lines = body.lines();
-            lines.next();
-            lines.collect::<Vec<_>>().join("\n")
-        };
+        let body_rest = body_lines.collect::<Vec<_>>().join("\n");
         let entry = format!("\n\n## [{date}] {first_line}\n{}\n", body_rest.trim());
         fs::write(&dec_file, format!("{}{}", old_dec.trim_end(), entry)).map_err(|e| e.to_string())?;
         // 2) L1 MEMORY 决策待定指针（已有小节则追加 bullet，否则新建小节）
@@ -1156,16 +1153,19 @@ mod tests {
         // 幂等性：先批准一次（新建小节），再批准第二次（追加 bullet 不重复建节）
         let (t1, _) = approve_pending(&root, "pending/DECISION.s1-1.md", None).unwrap();
         assert_eq!(t1, "notes/决策/未决.md");
+        // 前端真实格式（frontmatter 后带空行）：标题行必须正确提取（非空行）
         write(&root, "pending/DECISION.s1-2.md",
-            "---\ntype: decision\nsource: sessions/s1.md\ndate: 2026-08-05\n---\n## 议题：第二个议题\n上次方案：方案 B\n");
+            "---\ntype: decision\nsource: sessions/s1.md\ndate: 2026-08-05\n---\n\n## 议题：第二个议题\n上次方案：方案 B\n");
         let (_, _) = approve_pending(&root, "pending/DECISION.s1-2.md", None).unwrap();
-        // 明细落 notes/决策/未决.md（两节）
+        // 明细落 notes/决策/未决.md（两节，标题行不带空值）
         let dec = fs::read_to_string(root.join("notes/决策/未决.md")).unwrap();
         assert!(dec.contains("是否做 MCP") && dec.contains("第二个议题"));
+        assert!(!dec.contains("## [2026-08-05] \n"), "标题行为空: {dec}");
         // MEMORY 决策待定小节只有一个 ##，含两条 bullet
         let mem = fs::read_to_string(root.join("MEMORY.md")).unwrap();
         assert_eq!(mem.matches("## 决策待定").count(), 1);
         assert_eq!(mem.matches("（未决）：见 [[notes/决策/未决.md]]").count(), 2);
+        assert!(mem.contains("议题：第二个议题（未决）"), "指针缺议题名: {mem}");
         // preview kind=decision
         write(&root, "pending/DECISION.s2-1.md", "---\ntype: decision\ndate: 2026-08-05\n---\n## 议题：X\n上次方案：Y\n");
         let pv = preview_pending(&root, "pending/DECISION.s2-1.md").unwrap();
