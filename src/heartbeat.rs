@@ -21,6 +21,7 @@ pub struct HeartbeatStatus {
     pub files: usize,
     pub changed: bool,
     pub audit: Option<AuditBrief>,
+    pub risk: Option<crate::risk::RiskBrief>,
 }
 
 /// 知识库指纹：活跃语料（全部 .md，排除 pending/，与检索/图谱口径一致）的

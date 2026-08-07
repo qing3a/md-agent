@@ -16,6 +16,7 @@ mod market;
 mod search;
 mod server;
 mod page;
+mod risk;
 mod task;
 mod activity;
 mod projects;

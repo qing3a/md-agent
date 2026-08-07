@@ -219,7 +219,21 @@
     </div>
   </div>
 
-  <!-- 栏目③ 运营数据（默认折叠） -->
+  <!-- 栏目③ 风控（默认折叠）：律师案件时效/证据缺口/信息缺失（纯规则零 LLM） -->
+  <div class="sec-fold closed" id="sec-risk">
+    <button class="sec-head">⚠️ 风控 <span class="hint">时效 / 证据缺口 / 信息缺失（律师案件，纯规则自动检测）</span><span class="chev">▼</span></button>
+    <div class="sec-body">
+      <p class="desc" style="color:var(--dim);font-size:12px;line-height:1.7;margin-bottom:8px">
+        自动扫描律师项目案件笔记：<b>⏰ 诉讼时效</b>（<code>deadline: YYYY-MM-DD</code> 距今 ≤30 天）、
+        <b>📎 证据待补</b>（证据清单状态含「待补」）、<b>📋 信息缺失</b>（案号/对方当事人/委托方/案由未填）。
+        30s 心跳自动更新；点击条目打开对应笔记。
+      </p>
+      <div id="risk-list"><div class="empty">扫描中…</div></div>
+      <div class="stat" id="risk-sum"></div>
+    </div>
+  </div>
+
+  <!-- 栏目④ 运营数据（默认折叠） -->
   <div class="sec-fold closed" id="sec-ops">
     <button class="sec-head">📊 运营数据 <span class="hint">热度 / 用量 / 趋势 / 时间线</span><span class="chev">▼</span></button>
     <div class="sec-body">
@@ -265,7 +279,50 @@
     loadExp().catch(() => {});
     refresh().catch(() => {});
     auditRefresh().catch(() => {});
+    loadRisk().catch(() => {});
     init();
+  }
+
+  // ================= 栏目③ 风控（律师案件：时效/证据缺口/信息缺失） =================
+  async function loadRisk() {
+    const list = $('risk-list');
+    const sum = $('risk-sum');
+    try {
+      const r = await api('/api/risk');
+      const items = r.items || [];
+      if (!items.length) {
+        list.innerHTML = '<div class="empty">✓ 无风控预警（案件笔记填 <code>deadline: YYYY-MM-DD</code> 后自动检测时效）</div>';
+        sum.textContent = '';
+        return;
+      }
+      // 紧急优先排序：deadline 按天数升序（负数=已过期最前）
+      const sorted = items.slice().sort((a, b) => {
+        const ad = a.kind === 'deadline' ? (a.days == null ? 99 : a.days) : 50;
+        const bd = b.kind === 'deadline' ? (b.days == null ? 99 : b.days) : 50;
+        return ad - bd;
+      });
+      list.innerHTML = '';
+      sorted.forEach((it) => {
+        const urgent = it.kind === 'deadline' && it.days != null && it.days <= 7;
+        const row = document.createElement('div');
+        row.className = 'card' + (urgent ? '' : '');
+        row.style.borderColor = urgent ? 'var(--danger-50)' : 'var(--line)';
+        row.style.background = urgent ? 'var(--danger-07)' : 'var(--panel)';
+        const txt = document.createElement('span');
+        txt.className = 'txt';
+        txt.style.color = urgent ? 'var(--danger)' : 'var(--fg)';
+        txt.textContent = it.label;
+        row.appendChild(txt);
+        row.style.cursor = 'pointer';
+        row.title = '打开 ' + it.path;
+        row.addEventListener('click', () => { window.parent.postMessage({ type: 'cmd', cmd: 'open ' + it.path }, '*'); });
+        list.appendChild(row);
+      });
+      sum.textContent = '共 ' + items.length + ' 条：时效 ' + (r.deadlines || 0) + ' · 证据缺口 ' + (r.evidence_gaps || 0) + ' · 信息缺失 ' + (r.info_missing || 0) + '（30s 心跳自动更新）';
+    } catch (e) {
+      list.innerHTML = '<div class="empty" style="color:var(--danger)">风控加载失败: ' + esc(e.message) + '</div>';
+      sum.textContent = '';
+    }
   }
 
   // ================= 栏目① 自动化控制 =================
@@ -716,6 +773,8 @@
   loadExp().catch(() => {});
   refresh().catch(() => {});
   auditRefresh().catch(() => {});
+  loadRisk().catch(() => {});
+  init();
   init();
 </script>
 </body>

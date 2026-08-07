@@ -78,6 +78,7 @@ pub async fn serve(
         .route("/api/audit", get(audit_report))
         .route("/api/heartbeat", get(heartbeat_get))
         .route("/api/heartbeat", post(heartbeat_set))
+        .route("/api/risk", get(risk_check))
         .route("/api/link", post(link_add))
         .route("/api/link/suggest", post(link_suggest))
         .route("/api/fetch", get(fetch_page))
@@ -181,6 +182,12 @@ fn tools_json() -> Value {
                 {"name": "path", "type": "string", "required": true, "desc": "文档相对 KB 根路径"}
             ],
             "example": "{\"path\":\"notes/架构/托盘应用.md\"}"
+        },
+        {
+            "name": "risk.check",
+            "desc": "风控预警扫描（律师案件：诉讼时效到期/证据待补/案件信息缺失，纯规则零 LLM）——用户问案件风险/时效/缺什么证据时调用",
+            "params": [],
+            "example": "{}"
         },
         {
             "name": "fetch",
@@ -1338,6 +1345,8 @@ async fn heartbeat_loop(state: AppState) {
                 duplicates: a.duplicates.len(),
                 mentions: a.mentions.len(),
             });
+            // 风控预警（纯规则）：仅项目隔离区有案件数据时才有输出；全局个人空间为空不提示
+            let risk = Some(crate::risk::scan(&state.kb_root).brief());
             if let Ok(mut st) = state.hb_status.lock() {
                 st.enabled = true;
                 st.interval_secs = interval;
@@ -1345,6 +1354,7 @@ async fn heartbeat_loop(state: AppState) {
                 st.files = fp.len();
                 st.changed = changed;
                 st.audit = brief;
+                st.risk = risk;
             }
             last_key = Some(key);
         }
@@ -1370,6 +1380,7 @@ async fn heartbeat_get(State(st): State<AppState>) -> Response {
         "files": status.files,
         "changed": status.changed,
         "audit": status.audit,
+        "risk": status.risk,
     }))
     .into_response()
 }
@@ -1380,8 +1391,7 @@ struct HeartbeatSetBody {
     interval_secs: Option<u64>,
 }
 
-async fn heartbeat_set(State(st): State<AppState>, Json(b): Json<HeartbeatSetBody>) -> Response {
-    let mut cfg = crate::config::load();
+async fn heartbeat_set(State(st): State<AppState>, Json(b): Json<HeartbeatSetBody>) -> Response {    let mut cfg = crate::config::load();
     if let Some(e) = b.enabled {
         cfg.heartbeat.enabled = e;
     }
@@ -1397,6 +1407,17 @@ async fn heartbeat_set(State(st): State<AppState>, Json(b): Json<HeartbeatSetBod
     }
     Json(json!({ "ok": true, "enabled": cfg.heartbeat.enabled, "interval_secs": cfg.heartbeat.interval_secs }))
         .into_response()
+}
+
+/// 风控预警（纯规则，零 LLM）：时效到期 / 证据缺口 / 案件信息缺失。
+/// 独立于心跳开关（风控始终可用）；X-Project 支持项目隔离扫描。
+async fn risk_check(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let report = crate::risk::scan(&root);
+    Json(report).into_response()
 }
 
 // ---------- 记忆自组织（Phase 3-A：审计 / 补链接） ----------

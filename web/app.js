@@ -856,7 +856,7 @@
     ['/remember', '手动沉淀到记忆'], ['/graph', '知识图谱/关联簇'], ['/orphans', '孤立文档'],
     ['/tags', '标签统计'], ['/rescan', '重建知识图谱'],
     ['/pending', '查看待审'], ['/preview', '行级预览'], ['/approve', '批准待审'],
-    ['/reject', '拒绝待审'], ['/view', '面板渲染层'], ['/audit', '知识库健康审计'],
+    ['/reject', '拒绝待审'], ['/view', '面板渲染层'], ['/audit', '知识库健康审计'], ['/risk', '风控预警（时效/证据/信息）'],
     ['/conflicts', '冲突检查'], ['/link', '补链接'],
     ['/link-all', '批量补链接'], ['/suggest', '补全缺失文档'], ['/fetch', '抓取网页'],
     ['/page', '动态网页读取'], ['/task', '任务引擎'], ['/market', '应用市场'], ['/clear', '清空多轮记忆'],
@@ -1137,14 +1137,16 @@
 
   // ---- 状态轮询（输入条状态行 + 欢迎横幅状态 + 顶栏模型芯片 + 侧边栏会话指纹；8s） ----
   function refreshStatus() {
+    const px = currentProject ? { 'X-Project': currentProject } : {};
     Promise.all([
-      fetch('/api/health').then((r) => r.json()).catch(() => null),
-      fetch('/api/config').then((r) => r.json()).catch(() => null),
-      fetch('/api/kb/pending').then((r) => r.json()).catch(() => null),
-      fetch('/api/tasks').then((r) => r.json()).catch(() => null),
-      fetch('/api/graph/stats').then((r) => r.json()).catch(() => null),
-      fetch('/api/heartbeat').then((r) => r.json()).catch(() => null),
-    ]).then(([h, c, p, t, g, hb]) => {
+      fetch('/api/health', { headers: px }).then((r) => r.json()).catch(() => null),
+      fetch('/api/config', { headers: px }).then((r) => r.json()).catch(() => null),
+      fetch('/api/kb/pending', { headers: px }).then((r) => r.json()).catch(() => null),
+      fetch('/api/tasks', { headers: px }).then((r) => r.json()).catch(() => null),
+      fetch('/api/graph/stats', { headers: px }).then((r) => r.json()).catch(() => null),
+      fetch('/api/heartbeat', { headers: px }).then((r) => r.json()).catch(() => null),
+      fetch('/api/risk', { headers: px }).then((r) => r.json()).catch(() => null),
+    ]).then(([h, c, p, t, g, hb, rk]) => {
       const ok = !!(h && h.status === 'ok');
       const model = (c && c.llm && c.llm.model) || '未配置 LLM';
       const endpoint = (c && c.llm && c.llm.endpoint) || '';
@@ -1164,6 +1166,16 @@
         if (hb.audit.mentions) auditCount += hb.audit.mentions;
         auditTxt = ' ⚠ 审计：' + parts.join(' · ');
       }
+      // 风控预警（律师案件：时效/证据缺口/信息缺失；/api/risk 项目感知，30s 心跳兜底）
+      let riskTxt = '';
+      let riskCount = 0;
+      if (rk && (rk.deadlines || rk.evidence_gaps || rk.info_missing)) {
+        const rp = [];
+        if (rk.deadlines) { rp.push('⏰时效 ' + rk.deadlines); riskCount += rk.deadlines; }
+        if (rk.evidence_gaps) { rp.push('📎证据 ' + rk.evidence_gaps); riskCount += rk.evidence_gaps; }
+        if (rk.info_missing) { rp.push('📋信息 ' + rk.info_missing); riskCount += rk.info_missing; }
+        riskTxt = ' ⚠风控：' + rp.join(' · ');
+      }
       updateBadges(typeof pend === 'number' ? pend : 0, auditCount); // 侧边栏徽标（待审红/审计黄）
       updateModelChip(model, endpoint);
       const verEl = document.getElementById('sb-ver-num');
@@ -1173,7 +1185,8 @@
         '\x1b[90m · 模型 ' + model + ' · KB ' + kb + ' · 待审 ' + pend +
         ' · 任务 ' + todo + ' · 图谱 ' + gs +
         (hbTxt ? ' · ' + hbTxt : '') +
-        (auditTxt ? '\x1b[33m' + auditTxt + '\x1b[0m' : '') + '\x1b[0m',
+        (auditTxt ? '\x1b[33m' + auditTxt + '\x1b[0m' : '') +
+        (riskTxt ? '\x1b[31m' + riskTxt + '\x1b[0m' : '') + '\x1b[0m',
         trueCols() - 1);
       drawStatusRow();
       // 欢迎横幅状态行（R2：与输入条状态行同源，随轮询更新）
@@ -1415,6 +1428,7 @@
       case '/consolidate': await consolidateCmd(rest[0]); break;
       case '/skills': await skillsCmd(); break;
       case '/audit': await auditCmd(); break;
+      case '/risk': await riskCmd(); break;
       case '/conflicts': await conflicts(); break;
       case '/diff': await diffCmd(rest[0], rest[1]); break;
       case '/link': await linkCmd(rest[0], rest[1]); break;
@@ -1548,6 +1562,13 @@
     'read_l1': (a) => api('/api/l1/read?file=' + encodeURIComponent(a.file || '') + '&q=' + encodeURIComponent(a.q || '') + '&max=' + (a.max_chars || 1200)),
     'graph.linked': (a) => api('/api/graph/linked?path=' + encodeURIComponent(a.path || '')),
     'graph.backlinks': (a) => api('/api/graph/backlinks?path=' + encodeURIComponent(a.path || '')),
+    'risk.check': async () => {
+      // 风控预警：律师案件时效/证据缺口/信息缺失（纯规则，零 token）
+      const r = await api('/api/risk');
+      const items = (r.items || []).slice(0, 20);
+      if (!items.length) return '无风控预警';
+      return items.map((i) => i.label + ' [' + i.path + ']').join('\n');
+    },
     'fetch': (a) => api('/api/fetch?url=' + encodeURIComponent(a.url || '')),
     'page': (a) => api('/api/page?url=' + encodeURIComponent(a.url || '')),
     'file': (a) => api('/api/file?path=' + encodeURIComponent(a.path || '')),
@@ -1700,6 +1721,7 @@
       return (r.linked || []).map((l) => '[[目标]] ' + (l.dst || '') + (l.resolved ? ' → ' + l.dst_path : ' (悬空)')).join('\n') || '(无出链)';
     }
     if (name === 'graph.backlinks') return (r.backlinks || []).join('\n') || '(无入链)';
+    if (name === 'risk.check') return r; // TOOL_API 已格式化为文本清单（label + [path] 每行一条）
     if (name === 'fetch' || name === 'page') return '标题: ' + (r.title || '') + '\n' + String(r.text || '').slice(0, 2000); // 方向 4：3000→2000 摘要注入
     if (name === 'file') return String(r.content || '').slice(0, 2000); // 方向 4：3000→2000 摘要注入
     if (name === 'tasks') {
@@ -3423,6 +3445,28 @@
       term.writeln('\x1b[32m✓ 知识库健康，无盲区无冲突\x1b[0m');
     }
     term.writeln('\x1b[90m(图形版: /view automation 审核栏目 · 补链建议一键应用 · 审计按钮/状态行 ⚠ 直达)\x1b[0m');
+  }
+
+  // /risk：风控预警（律师案件：时效到期/证据缺口/信息缺失；纯规则零 LLM）
+  async function riskCmd() {
+    term.writeln('风控扫描中...');
+    const r = await api('/api/risk');
+    const items = r.items || [];
+    if (!items.length) {
+      term.writeln('\x1b[32m✓ 无风控预警（律师项目案件笔记的 deadline/证据状态会自动检测）\x1b[0m');
+      return;
+    }
+    // 紧急优先：已过期/7 天内时效排前
+    const sorted = items.slice().sort((a, b) => {
+      const ad = a.kind === 'deadline' ? (a.days == null ? 99 : a.days) : 50;
+      const bd = b.kind === 'deadline' ? (b.days == null ? 99 : b.days) : 50;
+      return ad - bd;
+    });
+    for (const it of sorted) {
+      const color = it.kind === 'deadline' && it.days != null && it.days <= 7 ? '\x1b[31m' : '\x1b[33m';
+      term.writeln(color + '⚠ ' + it.label + '\x1b[0m  \x1b[90m[' + it.path + ']\x1b[0m');
+    }
+    term.writeln('\x1b[90m(共 ' + items.length + ' 条：时效 ' + (r.deadlines || 0) + ' · 证据缺口 ' + (r.evidence_gaps || 0) + ' · 信息缺失 ' + (r.info_missing || 0) + '；打开对应笔记补充即可消除)\x1b[0m');
   }
 
   // /conflicts：重复标题（带路径）+ 悬空链接
