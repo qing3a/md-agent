@@ -70,6 +70,8 @@
   <button id="refresh">刷新</button>
 </header>
 <div id="main">
+  <div class="sec-title">▸ 项目空间 · 完全隔离</div>
+  <div class="grid" id="g-projects"></div>
   <div class="sec-title">▸ 面板 · 重交互</div>
   <div class="grid" id="g-panels"></div>
   <div class="sec-title">▸ 命令 · 快速动作</div>
@@ -159,6 +161,20 @@ function render(st) {
   $('g-panels').innerHTML = PANELS.map(function (c, i) { return cardHtml(c, 'bp' + i); }).join('');
   $('g-cmds').innerHTML = CMDS.map(cardHtml).join('');
 
+  // 项目空间（完全隔离）：个人空间（默认库）+ 各业务项目，点击切换
+  var prjs = (st.projects && st.projects.projects) ? st.projects.projects : [];
+  var phtml = '<div class="card" data-prj="" data-name="个人空间">' +
+    '<div class="n">🗂️ 个人空间</div><div class="d">默认知识库（所有旧内容）</div></div>';
+  phtml += prjs.map(function (p) {
+    var ic = p.template === 'lawyer' ? '⚖️' : p.template === 'headhunter' ? '🎯' : '📁';
+    return '<div class="card" data-prj="' + esc(p.id) + '" data-name="' + esc(p.name) + '">' +
+      '<div class="n">' + ic + ' ' + esc(p.name) + '</div>' +
+      '<div class="d">模板: ' + esc(p.template) + ' · 创建于 ' + esc(new Date(p.created * 1000).toISOString().slice(0, 10)) + '</div>' +
+      '<div class="run">点击进入（与其它项目完全隔离）</div></div>';
+  }).join('');
+  phtml += '<div class="card" data-prj-new="" style="border-style:dashed;color:var(--blue)"><div class="n">＋ 新建项目</div><div class="d">客户 / 案件 / 独立工作空间</div></div>';
+  $('g-projects').innerHTML = phtml;
+
   // 已装应用
   var apps = (st.apps && st.apps.apps) ? st.apps.apps : [];
   if (!apps.length) {
@@ -208,8 +224,9 @@ function load() {
     hostApi('/api/graph/stats').catch(function () { return null; }),
     hostApi('/api/heartbeat').catch(function () { return null; }),
     hostApi('/api/apps').catch(function () { return null; }),
+    hostApi('/api/projects').catch(function () { return null; }),
   ]).then(function (rs) {
-    render({ pending: rs[0], audit: rs[1], tasks: rs[2], graph: rs[3], hb: rs[4], apps: rs[5] });
+    render({ pending: rs[0], audit: rs[1], tasks: rs[2], graph: rs[3], hb: rs[4], apps: rs[5], projects: rs[6] });
   }).catch(function () { toast('状态加载失败', false); });
 }
 
@@ -217,6 +234,16 @@ function load() {
 document.addEventListener('click', function (e) {
   var el = e.target.closest('.card');
   if (!el) return;
+  if (el.dataset.prjNew !== undefined) {
+    // 新建项目：复用宿主「＋ 新建项目」流程（阶段3 升级为模板向导）
+    window.parent.postMessage({ type: 'cmd', cmd: '/newproject' }, '*');
+    return;
+  }
+  if (el.dataset.prj !== undefined) {
+    window.parent.postMessage({ type: 'project', id: el.dataset.prj || null, name: el.dataset.name || '个人空间' }, '*');
+    toast('已切换项目：' + (el.dataset.name || '个人空间'), true);
+    return;
+  }
   var prefill = el.dataset.prefill;
   var run = el.dataset.run;
   if (prefill) {

@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>开始使用</title>
+<style>
+  :root { --bg:var(--bg); --panel:var(--chip); --panel2:var(--chip3); --line:var(--chip4);
+          --fg:var(--fg); --dim:var(--muted); --green:var(--ok); --red:var(--danger);
+          --yellow:var(--warn); --blue:var(--accent); }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg);
+    font: 14px/1.7 "Segoe UI", "Microsoft YaHei", sans-serif;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 10px; padding: 12px 18px;
+    border-bottom: 1px solid var(--line); }
+  h1 { font-size: 15px; color: var(--blue); }
+  .sp { flex: 1; }
+  #skip { background: none; border: none; color: var(--dim); font-size: 12px; cursor: pointer; padding: 4px 8px; }
+  #skip:hover { color: var(--fg); }
+  .steps { display: flex; gap: 6px; padding: 10px 18px 0; }
+  .steps .st { flex: 1; height: 4px; border-radius: 2px; background: var(--line); }
+  .steps .st.on { background: var(--blue); }
+  #main { flex: 1; overflow: auto; padding: 20px 18px 24px; max-width: 640px; margin: 0 auto; width: 100%; }
+  .step-title { font-size: 17px; font-weight: 700; margin-bottom: 4px; }
+  .step-sub { color: var(--dim); font-size: 12.5px; margin-bottom: 16px; }
+  label.f { display: block; font-size: 12px; color: var(--dim); margin: 12px 0 5px; }
+  input[type=text], input[type=password] { width: 100%; padding: 10px 12px; border-radius: 9px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--fg); font-size: 13.5px; }
+  input:focus { outline: none; border-color: var(--blue); }
+  .row { display: flex; gap: 8px; }
+  .row input { flex: 1; }
+  .hint { font-size: 11.5px; color: var(--dim); margin-top: 6px; }
+  .hint code { color: var(--yellow); }
+  .tpls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 14px 0; }
+  .tpl { border: 1px solid var(--line); border-radius: 11px; padding: 14px 10px; cursor: pointer;
+    background: var(--panel); text-align: center; transition: border-color .15s, background .15s; }
+  .tpl:hover { border-color: var(--blue); }
+  .tpl.sel { border-color: var(--blue); background: var(--panel2); }
+  .tpl .ti { font-size: 26px; }
+  .tpl .tn { font-weight: 600; margin-top: 6px; }
+  .tpl .td { font-size: 11px; color: var(--dim); margin-top: 3px; line-height: 1.45; }
+  .btn { display: inline-block; padding: 11px 26px; border-radius: 10px; border: none;
+    background: var(--blue); color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; }
+  .btn:hover { filter: brightness(1.1); }
+  .btn.ghost { background: var(--panel); color: var(--fg2); border: 1px solid var(--line); }
+  .msg { margin-top: 10px; font-size: 12.5px; min-height: 20px; }
+  .msg.ok { color: var(--green); }
+  .msg.err { color: var(--red); }
+  #done { text-align: center; padding-top: 40px; }
+  #done .big { font-size: 40px; }
+  #done h2 { margin: 12px 0 6px; }
+  #done p { color: var(--dim); font-size: 13px; margin-bottom: 24px; }
+  footer { padding: 12px 18px; border-top: 1px solid var(--line); display: flex; justify-content: space-between;
+    align-items: center; }
+  .privacy { font-size: 11px; color: var(--dim); }
+  .privacy b { color: var(--green); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🚀 开始使用 md-agent</h1>
+  <span class="sp"></span>
+  <button id="skip">跳过引导</button>
+</header>
+<div class="steps"><div class="st" id="s1"></div><div class="st" id="s2"></div><div class="st" id="s3"></div></div>
+
+<div id="main">
+  <!-- Step 1: 连接 -->
+  <div id="step1">
+    <div class="step-title">第 1 步 · 连接你的 AI 大脑</div>
+    <div class="step-sub">md-agent 调用 DeepSeek 大模型为你工作。填入你的 API Key（在 DeepSeek 开放平台申请），数据只在本机处理。</div>
+    <label class="f">接口地址（默认即可）</label>
+    <input id="cfg-endpoint" type="text" value="https://api.deepseek.com/v1">
+    <label class="f">模型</label>
+    <input id="cfg-model" type="text" value="deepseek-v4-flash">
+    <label class="f">API Key</label>
+    <input id="cfg-key" type="password" placeholder="sk-…">
+    <div class="msg" id="conn-msg"></div>
+    <div style="margin-top:18px;display:flex;gap:10px;justify-content:flex-end">
+      <button class="btn ghost" id="btn-test">测试连接</button>
+      <button class="btn" id="btn-save-conn">保存并继续 →</button>
+    </div>
+    <div class="hint">没有 Key？到 <code>platform.deepseek.com</code> 注册后「API Keys」创建。也可以先用 <code>/config</code> 稍后配置。</div>
+  </div>
+
+  <!-- Step 2: 项目 -->
+  <div id="step2" style="display:none">
+    <div class="step-title">第 2 步 · 创建第一个项目</div>
+    <div class="step-sub">每个项目是一个完全隔离的工作空间。按你的职业选一个模板，例如「律师案件」或「猎头项目」。</div>
+    <div class="tpls" id="tpls"></div>
+    <label class="f">项目名称</label>
+    <input id="prj-name" type="text" placeholder="例如：张先生的劳动仲裁案 / XX 公司研发总监招聘" maxlength="60">
+    <div class="msg" id="prj-msg"></div>
+    <div style="margin-top:18px;display:flex;gap:10px;justify-content:flex-end">
+      <button class="btn ghost" id="btn-back1">← 上一步</button>
+      <button class="btn" id="btn-create">创建并进入 →</button>
+    </div>
+    <div class="hint">项目之间完全隔离：笔记、对话、记忆互不串用。你也可以稍后在顶栏随时新建。</div>
+  </div>
+
+  <!-- Step 3: 完成 -->
+  <div id="done" style="display:none">
+    <div class="big">🎉</div>
+    <h2>准备好了！</h2>
+    <p>连接已保存，项目已创建。你可以开始提问，或先去功能首页逛逛。</p>
+    <button class="btn" id="btn-finish">开始使用 →</button>
+  </div>
+</div>
+
+<footer>
+  <span class="privacy">🔒 <b>数据安全</b>：所有笔记、对话只保存在本机，不上传任何云服务</span>
+  <span class="privacy">v0.1 引导</span>
+</footer>
+
+<script>
+  // ---- 桥与工具（宿主注入 BRIDGE 后 hostApi 可用） ----
+  var step = 1;
+  var selTpl = 'blank';
+  function $(id) { return document.getElementById(id); }
+  function setStep(n) {
+    step = n;
+    $('s1').className = 'st' + (n >= 1 ? ' on' : '');
+    $('s2').className = 'st' + (n >= 2 ? ' on' : '');
+    $('s3').className = 'st' + (n >= 3 ? ' on' : '');
+    $('step1').style.display = n === 1 ? '' : 'none';
+    $('step2').style.display = n === 2 ? '' : 'none';
+    $('done').style.display = n === 3 ? '' : 'none';
+  }
+  function msg(id, text, ok) {
+    var el = $(id);
+    el.textContent = text || '';
+    el.className = 'msg ' + (ok ? 'ok' : 'err');
+  }
+  // 模板卡
+  var TEMPLATES = [
+    { id: 'blank', icon: '📁', name: '空白项目', desc: '通用空间，自由组织' },
+    { id: 'lawyer', icon: '⚖️', name: '律师案件', desc: '案件总览 · 证据清单 · 时间线 · 法律研究' },
+    { id: 'headhunter', icon: '🎯', name: '猎头项目', desc: '职位需求 · 候选人台账 · 客户 · 沟通记录' },
+  ];
+  function renderTpls() {
+    $('tpls').innerHTML = '';
+    TEMPLATES.forEach(function (t) {
+      var el = document.createElement('div');
+      el.className = 'tpl' + (t.id === selTpl ? ' sel' : '');
+      el.dataset.tpl = t.id;
+      el.innerHTML = '<div class="ti">' + t.icon + '</div><div class="tn">' + t.name + '</div><div class="td">' + t.desc + '</div>';
+      el.addEventListener('click', function () {
+        selTpl = t.id;
+        document.querySelectorAll('.tpl').forEach(function (x) { x.classList.toggle('sel', x.dataset.tpl === t.id); });
+      });
+      $('tpls').appendChild(el);
+    });
+  }
+  function flagSet(key, val) {
+    window.parent.postMessage({ type: 'flag', set: val, key: key }, '*');
+  }
+  function closeView() { window.parent.postMessage({ type: 'escape' }, '*'); }
+
+  // ---- Step 1: 连接 ----
+  $('btn-test').addEventListener('click', function () {
+    var key = $('cfg-key').value.trim();
+    if (!key) { msg('conn-msg', '请先填入 API Key', false); return; }
+    msg('conn-msg', '测试中…', true);
+    hostApi('/api/llm', { method: 'POST', body: {
+      messages: [{ role: 'user', content: '回复ok即可' }], stream: false
+    }}).then(function () {
+      msg('conn-msg', '✓ 连接成功，模型可正常回复', true);
+    }).catch(function (e) {
+      msg('conn-msg', '连接失败：' + (e && e.message ? e.message : e), false);
+    });
+  });
+  $('btn-save-conn').addEventListener('click', function () {
+    var endpoint = $('cfg-endpoint').value.trim();
+    var model = $('cfg-model').value.trim();
+    var key = $('cfg-key').value.trim();
+    if (!key) { msg('conn-msg', '请先填入 API Key（可先点「测试连接」）', false); return; }
+    hostApi('/api/config', { method: 'POST', body: { llm: { endpoint: endpoint, model: model, api_key: key } } })
+      .then(function () {
+        msg('conn-msg', '✓ 已保存', true);
+        setStep(2); renderTpls();
+      })
+      .catch(function (e) { msg('conn-msg', '保存失败：' + (e && e.message ? e.message : e), false); });
+  });
+
+  // ---- Step 2: 项目 ----
+  $('btn-back1').addEventListener('click', function () { setStep(1); });
+  $('btn-create').addEventListener('click', function () {
+    var name = $('prj-name').value.trim();
+    if (!name) { msg('prj-msg', '请给项目起个名字', false); return; }
+    hostApi('/api/projects', { method: 'POST', body: { name: name, template: selTpl } })
+      .then(function (r) {
+        flagSet('md-agent-onboarded', '1');
+        // 进入新项目（宿主 switchProject）→ 完成页
+        window.parent.postMessage({ type: 'project', id: r.project.id, name: r.project.name }, '*');
+        msg('prj-msg', '✓ 项目已创建', true);
+        setStep(3);
+      })
+      .catch(function (e) { msg('prj-msg', '创建失败：' + (e && e.message ? e.message : e), false); });
+  });
+
+  // ---- Step 3 / 跳过 ----
+  $('btn-finish').addEventListener('click', function () {
+    flagSet('md-agent-onboarded', '1');
+    closeView();
+    window.parent.postMessage({ type: 'cmd', cmd: '/view home' }, '*');
+  });
+  $('skip').addEventListener('click', function () {
+    flagSet('md-agent-onboarded', '1');
+    closeView();
+  });
+
+  setStep(1);
+  renderTpls();
+  // 若已配置连接（老用户手动打开引导），跳过第 1 步直接到第 2 步
+  hostApi('/api/config').then(function (cfg) {
+    if (cfg && cfg.llm && cfg.llm.endpoint) {
+      $('cfg-endpoint').value = cfg.llm.endpoint;
+      $('cfg-model').value = cfg.llm.model || 'deepseek-v4-flash';
+      if (cfg.llm.keyHint) msg('conn-msg', '已有连接配置（' + (cfg.llm.keyHint || '') + '），可直接进入下一步', true);
+      setStep(2); renderTpls();
+    }
+  }).catch(function () {});
+</script>
+</body>
+</html>

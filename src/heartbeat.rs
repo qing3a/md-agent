@@ -29,8 +29,12 @@ pub fn fingerprint(root: &Path) -> Vec<(String, i64, u64)> {
     let mut entries = Vec::new();
     let walk = ignore::WalkBuilder::new(root)
         .hidden(false)
-        // pending 待审 + sessions 会话快照（流水非知识）不参与指纹，避免其变更触发重建
-        .filter_entry(|e| e.file_name() != "pending" && e.file_name() != "sessions")
+        // pending 待审 + sessions 会话快照（流水非知识）不参与指纹，避免其变更触发重建；
+        // projects/ 是项目制隔离区（各项目独立 mini-kb，有自己的图谱/活动库），不污染全局指纹
+        .filter_entry(|e| {
+            let n = e.file_name();
+            n != "pending" && n != "sessions" && n != "projects"
+        })
         .build();
     for ent in walk.flatten() {
         let is_file = ent.file_type().map(|t| t.is_file()).unwrap_or(false);

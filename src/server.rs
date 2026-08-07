@@ -1,7 +1,7 @@
 //! Axum HTTP 服务：托管 xterm.js 前端 + 知识库接口（同源，免 CORS）。
 
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
@@ -104,6 +104,14 @@ pub async fn serve(
         .route("/api/market/install", post(market_install))
         .route("/api/market/uninstall", post(market_uninstall))
         .route("/api/market/update", post(market_update))
+        // 项目制（多项目硬隔离）：项目列表/详情/创建/重命名/删除
+        .route("/api/projects", get(projects_list).post(projects_create))
+        .route(
+            "/api/projects/{id}",
+            get(projects_get)
+                .delete(projects_delete)
+                .patch(projects_rename),
+        )
         // 应用市场（阶段 0）：kb/apps/ 静态挂载到 /apps/*——沙箱 iframe 加载 app 的 HTML+assets（脚本子资源不受 CORS 限制）；/api/* 仍只走桥（沙箱 opaque origin 直连被拦，权限白名单在桥层）
         .nest_service("/apps", tower_http::services::ServeDir::new(state.kb_root.join("apps")))
         .fallback_service(tower_http::services::ServeDir::new(state.web_dir.clone()))
@@ -265,12 +273,16 @@ struct ConsolidateParams {
     llm: String,
 }
 
-async fn consolidate_handler(State(st): State<AppState>, Query(q): Query<ConsolidateParams>) -> Response {
-    let audit = match crate::graph::audit(&st.kb_root) {
+async fn consolidate_handler(State(st): State<AppState>, headers: HeaderMap, Query(q): Query<ConsolidateParams>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let audit = match crate::graph::audit(&root) {
         Ok(a) => a,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     };
-    let mut created = match crate::consolidate::generate_proposals(&st.kb_root, &audit) {
+    let mut created = match crate::consolidate::generate_proposals(&root, &audit) {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -281,7 +293,7 @@ async fn consolidate_handler(State(st): State<AppState>, Query(q): Query<Consoli
         }
     };
     if matches!(q.llm.as_str(), "1" | "true" | "on" | "yes") {
-        match crate::consolidate::generate_llm_proposals(&st.kb_root, &audit).await {
+        match crate::consolidate::generate_llm_proposals(&root, &audit).await {
             Ok(mut llm_created) => created.append(&mut llm_created),
             Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
         }
@@ -316,26 +328,34 @@ fn ctx_enabled(ctx: &str) -> bool {
 }
 
 async fn search_handler(
-    State(st): State<AppState>,
+    State(st): State<AppState>, headers: HeaderMap,
     Query(p): Query<SearchParams>,
 ) -> Response {
-    match crate::search::search(&st.kb_root, &p.q, &p.layer, ctx_enabled(&p.ctx)) {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    match crate::search::search(&root, &p.q, &p.layer, ctx_enabled(&p.ctx)) {
         Ok(r) => {
             // R4 活动埋点：仅记命中数，不记 query 全文（防隐私）
-            crate::activity::record(&st.kb_root, "search", &format!("检索命中 {} 条", r.hit_count), json!({ "hits": r.hit_count }));
+            crate::activity::record(&root, "search", &format!("检索命中 {} 条", r.hit_count), json!({ "hits": r.hit_count }));
             Json(r).into_response()
         }
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     }
 }
 
-async fn l1_handler(State(st): State<AppState>, Query(p): Query<L1Params>) -> Json<serde_json::Value> {
+async fn l1_handler(State(st): State<AppState>, headers: HeaderMap, Query(p): Query<L1Params>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
     let full = matches!(p.full.as_str(), "1" | "true" | "on" | "yes");
-    let files: Vec<serde_json::Value> = crate::kb::list_l1(&st.kb_root, full)
+    let files: Vec<serde_json::Value> = crate::kb::list_l1(&root, full)
         .into_iter()
         .map(|f| json!({ "name": f.name, "path": f.path, "head": f.head, "content": f.content }))
         .collect();
-    Json(json!({ "l1": files }))
+    Json(json!({ "l1": files })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -358,7 +378,11 @@ struct L1ReadParams {
 /// read_l1（上下文组装 v2：LLM 显式工具取用 L1 规范/记忆/索引层）。
 /// 参数行为矩阵：无 file → 400；file+无 q → head+章节清单；file+q 命中 → 小节原文；未命中 → 章节清单。
 /// 白名单外 → 400；返回源文件原文（memory_summary 是允许读的派生产物）。
-async fn l1_read_handler(State(st): State<AppState>, Query(p): Query<L1ReadParams>) -> Response {
+async fn l1_read_handler(State(st): State<AppState>, headers: HeaderMap, Query(p): Query<L1ReadParams>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
     let Some(file) = p.file.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -367,7 +391,7 @@ async fn l1_read_handler(State(st): State<AppState>, Query(p): Query<L1ReadParam
             .into_response();
     };
     let max = p.max.unwrap_or(1200).min(20_000);
-    match crate::kb::read_l1(&st.kb_root, file, p.q.as_deref(), max) {
+    match crate::kb::read_l1(&root, file, p.q.as_deref(), max) {
         Ok(r) => Json(r).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     }
@@ -378,8 +402,12 @@ struct FileParams {
     path: String,
 }
 
-async fn file_read(State(st): State<AppState>, Query(p): Query<FileParams>) -> Response {
-    match crate::kb::resolve_in_kb(&st.kb_root, &p.path) {
+async fn file_read(State(st): State<AppState>, headers: HeaderMap, Query(p): Query<FileParams>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    match crate::kb::resolve_in_kb(&root, &p.path) {
         Some(pb) if pb.is_file() => match tokio::fs::read_to_string(&pb).await {
             Ok(content) => Json(json!({ "path": p.path, "content": content })).into_response(),
             Err(e) => (
@@ -402,8 +430,12 @@ struct FileWriteBody {
     content: String,
 }
 
-async fn file_write(State(st): State<AppState>, Json(body): Json<FileWriteBody>) -> Response {
-    let Some(pb) = crate::kb::resolve_in_kb(&st.kb_root, &body.path) else {
+async fn file_write(State(st): State<AppState>, headers: HeaderMap, Json(body): Json<FileWriteBody>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let Some(pb) = crate::kb::resolve_in_kb(&root, &body.path) else {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({ "error": "路径超出 KB 范围" })),
@@ -430,7 +462,11 @@ async fn file_write(State(st): State<AppState>, Json(body): Json<FileWriteBody>)
 }
 
 // 会话文件删除（仅限 kb/sessions/ 下，防误删笔记/记忆；路径经 resolve_in_kb 防逃逸）
-async fn file_delete(State(st): State<AppState>, Query(p): Query<FileParams>) -> Response {
+async fn file_delete(State(st): State<AppState>, headers: HeaderMap, Query(p): Query<FileParams>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
     if !p.path.starts_with("sessions/") || !p.path.ends_with(".md") {
         return (
             StatusCode::FORBIDDEN,
@@ -438,7 +474,7 @@ async fn file_delete(State(st): State<AppState>, Query(p): Query<FileParams>) ->
         )
             .into_response();
     }
-    match crate::kb::resolve_in_kb(&st.kb_root, &p.path) {
+    match crate::kb::resolve_in_kb(&root, &p.path) {
         Some(pb) => match tokio::fs::remove_file(&pb).await {
             Ok(()) => Json(json!({ "ok": true, "path": p.path })).into_response(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
@@ -462,8 +498,12 @@ async fn file_delete(State(st): State<AppState>, Query(p): Query<FileParams>) ->
 
 // ---------- 会话管理（A2）：lite 枚举 kb/sessions/（frontmatter 元数据，不读全文） ----------
 // 列表/恢复是"实体层"操作；sessions 流水本身仍三排除（不入图谱/检索/指纹）
-async fn sessions_list(State(st): State<AppState>) -> Response {
-    let dir = st.kb_root.join("sessions");
+async fn sessions_list(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let dir = root.join("sessions");
     let mut items: Vec<Value> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for e in rd.flatten() {
@@ -574,11 +614,15 @@ struct MemoryTouchBody {
     paths: Option<Vec<String>>,
 }
 
-async fn memory_touch(State(st): State<AppState>, Json(b): Json<MemoryTouchBody>) -> Response {
+async fn memory_touch(State(st): State<AppState>, headers: HeaderMap, Json(b): Json<MemoryTouchBody>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
     let paths = b.paths.unwrap_or_default();
     // 自动补链会写文档，与 /api/link 共用互斥
     let _guard = st.sync_lock.lock().await;
-    let (mut heat, created, applied) = apply_memory_touch(&st.kb_root, &paths);
+    let (mut heat, created, applied) = apply_memory_touch(&root, &paths);
     drop(_guard);
     // B2 LLM 推理层（阈值 5 + 已配置 + 未做过）：后台分析热文档 → 矛盾/盲区/整合提案
     let cfg = crate::config::load();
@@ -594,13 +638,13 @@ async fn memory_touch(State(st): State<AppState>, Json(b): Json<MemoryTouchBody>
             if should_run_llm_analysis(&heat, rel, count, &fp) {
                 // 先标记防重复（后台任务只写提案，不再动 heat）
                 heat["paths"][rel]["organized_llm_fp"] = json!(fp);
-                let root = st.kb_root.clone();
+                let root = root.clone();
                 let rel2 = rel.to_string();
                 tokio::spawn(async move { analyze_hot_doc(&root, &rel2).await });
             }
         }
     }
-    let _ = save_heat(&st.kb_root, &heat);
+    let _ = save_heat(&root, &heat);
     Json(json!({ "ok": true, "touched": paths.len(), "created": created, "applied": applied })).into_response()
 }
 
@@ -850,8 +894,12 @@ fn apply_memory_touch(root: &Path, paths: &[String]) -> (Value, Vec<String>, Vec
     (heat, created, applied)
 }
 
-async fn memory_heat(State(st): State<AppState>) -> Json<Value> {
-    Json(load_heat(&st.kb_root))
+async fn memory_heat(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    Json(load_heat(&root)).into_response()
 }
 
 // ---------- 经验闭环 C1（审视层）：触发信号 → LLM 审视 → 经验提案进 pending ----------
@@ -863,7 +911,11 @@ struct ExperienceProposeBody {
     context: Option<String>,
 }
 
-async fn experience_propose(State(st): State<AppState>, Json(b): Json<ExperienceProposeBody>) -> Response {
+async fn experience_propose(State(st): State<AppState>, headers: HeaderMap, Json(b): Json<ExperienceProposeBody>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
     let signal = b.signal.unwrap_or_default();
     let context = b.context.unwrap_or_default();
     if signal.is_empty() || context.is_empty() {
@@ -873,10 +925,10 @@ async fn experience_propose(State(st): State<AppState>, Json(b): Json<Experience
     let cfg = crate::config::load();
     if cfg.llm.endpoint.trim().is_empty() {
         // 无 LLM：规则占位提案（信号本身即记录）
-        let created = write_experience_proposal(&st.kb_root, &signal, &context, None);
+        let created = write_experience_proposal(&root, &signal, &context, None);
         return Json(json!({ "ok": true, "created": created })).into_response();
     }
-    let root = st.kb_root.clone();
+    let root = root.clone();
     let signal2 = signal.clone();
     let context2 = context.clone();
     tokio::spawn(async move {
@@ -1182,11 +1234,15 @@ fn restore_backups(proj: &Path, backups: &[(String, PathBuf)]) {
     }
 }
 
-async fn kb_sync(State(st): State<AppState>) -> Response {
+async fn kb_sync(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
     let _guard = st.sync_lock.lock().await; // 与心跳共用互斥，防并发写
-    match crate::kb::sync_index(&st.kb_root) {
+    match crate::kb::sync_index(&root) {
         Ok(r) => {
-            let _ = crate::kb::sync_skills(&st.kb_root); // 技能注册表顺带重建（技能提案经 approve 安装）
+            let _ = crate::kb::sync_skills(&root); // 技能注册表顺带重建（技能提案经 approve 安装）
             Json(json!({ "ok": true, "index": r.index_path, "files": r.files })).into_response()
         }
         Err(e) => (
@@ -1309,15 +1365,19 @@ async fn heartbeat_set(State(st): State<AppState>, Json(b): Json<HeartbeatSetBod
 
 // ---------- 记忆自组织（Phase 3-A：审计 / 补链接） ----------
 
-async fn audit_report(State(st): State<AppState>) -> Response {
-    if let Err(e) = ensure_graph(&st.kb_root) {
+async fn audit_report(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    if let Err(e) = ensure_graph(&root) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
     }
-    match crate::graph::audit(&st.kb_root) {
+    match crate::graph::audit(&root) {
         Ok(r) => {
             let mut v = serde_json::to_value(&r).unwrap_or_else(|_| json!({}));
             // 自组织审计：最近被自动补链的文档数（读时整理规则层标记，前端审计徽标可见）
-            let heat = load_heat(&st.kb_root);
+            let heat = load_heat(&root);
             let n = heat["paths"]
                 .as_object()
                 .map(|m| m.values().filter(|x| x.get("auto_linked").is_some()).count())
@@ -1337,12 +1397,16 @@ struct LinkBody {
 
 /// 补链接：在 src 文档末尾追加 `- 关联：[[dst]]`，重建 INDEX + 图谱。
 /// 由用户主动调用 = 已人工确认（不进待审）。
-async fn link_add(State(st): State<AppState>, Json(body): Json<LinkBody>) -> Response {
+async fn link_add(State(st): State<AppState>, headers: HeaderMap, Json(body): Json<LinkBody>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
     let _guard = st.sync_lock.lock().await; // 与心跳共用互斥
-    if let Err(e) = ensure_graph(&st.kb_root) {
+    if let Err(e) = ensure_graph(&root) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
     }
-    let src = match crate::graph::resolve_doc(&st.kb_root, &body.src) {
+    let src = match crate::graph::resolve_doc(&root, &body.src) {
         Ok(Some(p)) => p,
         Ok(None) => {
             return (
@@ -1353,7 +1417,7 @@ async fn link_add(State(st): State<AppState>, Json(body): Json<LinkBody>) -> Res
         }
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     };
-    let dst = match crate::graph::resolve_doc(&st.kb_root, &body.dst) {
+    let dst = match crate::graph::resolve_doc(&root, &body.dst) {
         Ok(Some(p)) => p,
         Ok(None) => {
             return (
@@ -1369,12 +1433,12 @@ async fn link_add(State(st): State<AppState>, Json(body): Json<LinkBody>) -> Res
     }
 
     // 写文档复用公共函数（人工 /link 与读时整理自动补链同一条写路径）
-    match apply_link_to_doc(&st.kb_root, &src, &dst) {
+    match apply_link_to_doc(&root, &src, &dst) {
         Ok(Some(link_line)) => {
             // R4 活动埋点：补链（图谱写操作）
-            crate::activity::record(&st.kb_root, "doc", &format!("补链 {} → {}", body.src, body.dst), json!({ "src": body.src, "dst": body.dst }));
-            let _ = crate::kb::sync_index(&st.kb_root);
-            let _ = crate::graph::sync_graph(&st.kb_root);
+            crate::activity::record(&root, "doc", &format!("补链 {} → {}", body.src, body.dst), json!({ "src": body.src, "dst": body.dst }));
+            let _ = crate::kb::sync_index(&root);
+            let _ = crate::graph::sync_graph(&root);
             Json(json!({ "ok": true, "src": src, "dst": dst, "link": link_line })).into_response()
         }
         Ok(None) => Json(json!({ "ok": false, "note": "链接已存在", "src": src, "dst": dst })).into_response(),
@@ -1393,8 +1457,12 @@ struct LinkSuggestBody {
     content: String,
 }
 
-async fn link_suggest(State(st): State<AppState>, Json(body): Json<LinkSuggestBody>) -> Response {
-    match crate::search::suggest_links(&st.kb_root, &body.content, 3, &[]) {
+async fn link_suggest(State(st): State<AppState>, headers: HeaderMap, Json(body): Json<LinkSuggestBody>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    match crate::search::suggest_links(&root, &body.content, 3, &[]) {
         Ok(links) => Json(json!({ "ok": true, "links": links })).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1442,12 +1510,20 @@ async fn page_act(Json(b): Json<PageActBody>) -> Response {
 
 // ---------- 待审机制 ----------
 
-async fn kb_pending_list(State(st): State<AppState>) -> Json<serde_json::Value> {
-    Json(json!({ "pending": crate::kb::list_pending(&st.kb_root) }))
+async fn kb_pending_list(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    Json(json!({ "pending": crate::kb::list_pending(&root) })).into_response()
 }
 
-async fn kb_pending_preview(State(st): State<AppState>, Query(p): Query<GraphPathParams>) -> Response {
-    match crate::kb::preview_pending(&st.kb_root, &p.path) {
+async fn kb_pending_preview(State(st): State<AppState>, headers: HeaderMap, Query(p): Query<GraphPathParams>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    match crate::kb::preview_pending(&root, &p.path) {
         Ok(prev) => Json(prev).into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "error": e }))).into_response(),
     }
@@ -1460,10 +1536,14 @@ struct PendingBody {
     content: Option<String>,
 }
 
-async fn kb_pending_approve(State(st): State<AppState>, Json(body): Json<PendingBody>) -> Response {
+async fn kb_pending_approve(State(st): State<AppState>, headers: HeaderMap, Json(body): Json<PendingBody>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
     let _guard = st.sync_lock.lock().await; // 与心跳共用互斥
     let paths: Vec<String> = if body.path == "all" {
-        crate::kb::list_pending(&st.kb_root).into_iter().map(|p| p.path).collect()
+        crate::kb::list_pending(&root).into_iter().map(|p| p.path).collect()
     } else {
         vec![body.path]
     };
@@ -1473,25 +1553,29 @@ async fn kb_pending_approve(State(st): State<AppState>, Json(body): Json<Pending
     let mut ok: Vec<serde_json::Value> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     for p in paths {
-        match crate::kb::approve_pending(&st.kb_root, &p, body.content.as_deref()) {
+        match crate::kb::approve_pending(&root, &p, body.content.as_deref()) {
             Ok((target, note)) => ok.push(json!({ "path": p, "target": target, "note": note })),
             Err(e) => errors.push(format!("{p}: {e}")),
         }
     }
     if !ok.is_empty() {
-        let _ = crate::kb::sync_index(&st.kb_root);
-        let _ = crate::graph::sync_graph(&st.kb_root);
+        let _ = crate::kb::sync_index(&root);
+        let _ = crate::graph::sync_graph(&root);
         // R4 活动埋点：批准待审（人审落地，图谱重建由 graph_sync 埋点另记）
-        crate::activity::record(&st.kb_root, "pending", &format!("批准待审 {} 条", ok.len()), json!({ "count": ok.len() }));
+        crate::activity::record(&root, "pending", &format!("批准待审 {} 条", ok.len()), json!({ "count": ok.len() }));
     }
     Json(json!({ "ok": ok, "errors": errors })).into_response()
 }
 
-async fn kb_pending_reject(State(st): State<AppState>, Json(body): Json<PendingBody>) -> Response {
-    match crate::kb::reject_pending(&st.kb_root, &body.path) {
+async fn kb_pending_reject(State(st): State<AppState>, headers: HeaderMap, Json(body): Json<PendingBody>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    match crate::kb::reject_pending(&root, &body.path) {
         Ok(n) => {
             // R4 活动埋点：拒绝待审
-            crate::activity::record(&st.kb_root, "pending", &format!("拒绝待审 {}", body.path), json!({}));
+            crate::activity::record(&root, "pending", &format!("拒绝待审 {}", body.path), json!({}));
             Json(json!({ "ok": [json!({ "path": body.path, "removed": n })], "errors": [] })).into_response()
         }
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "error": e }))).into_response(),
@@ -1509,12 +1593,16 @@ fn ensure_graph(root: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-async fn graph_sync(State(st): State<AppState>) -> Response {
+async fn graph_sync(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
     let _guard = st.sync_lock.lock().await; // 与心跳共用互斥
-    match crate::graph::sync_graph(&st.kb_root) {
+    match crate::graph::sync_graph(&root) {
         Ok(r) => {
             // R4 活动埋点：图谱重建（docs/links 数取自报告）
-            crate::activity::record(&st.kb_root, "doc", &format!("图谱重建：{} 篇 · {} 链", r.docs, r.links), json!({ "docs": r.docs, "links": r.links }));
+            crate::activity::record(&root, "doc", &format!("图谱重建：{} 篇 · {} 链", r.docs, r.links), json!({ "docs": r.docs, "links": r.links }));
             Json(json!({ "ok": true, "graph": r })).into_response()
         }
         Err(e) => (
@@ -1525,21 +1613,29 @@ async fn graph_sync(State(st): State<AppState>) -> Response {
     }
 }
 
-async fn graph_stats(State(st): State<AppState>) -> Response {
-    if let Err(e) = ensure_graph(&st.kb_root) {
+async fn graph_stats(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    if let Err(e) = ensure_graph(&root) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
     }
-    match crate::graph::stats(&st.kb_root) {
+    match crate::graph::stats(&root) {
         Ok(s) => Json(s).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
 }
 
-async fn graph_graph(State(st): State<AppState>) -> Response {
-    if let Err(e) = ensure_graph(&st.kb_root) {
+async fn graph_graph(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    if let Err(e) = ensure_graph(&root) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
     }
-    match crate::graph::graph_data(&st.kb_root) {
+    match crate::graph::graph_data(&root) {
         Ok(d) => Json(d).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
@@ -1550,61 +1646,85 @@ struct GraphPathParams {
     path: String,
 }
 
-async fn graph_backlinks(State(st): State<AppState>, Query(p): Query<GraphPathParams>) -> Response {
-    if let Err(e) = ensure_graph(&st.kb_root) {
+async fn graph_backlinks(State(st): State<AppState>, headers: HeaderMap, Query(p): Query<GraphPathParams>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    if let Err(e) = ensure_graph(&root) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
     }
-    match crate::graph::backlinks(&st.kb_root, &p.path) {
+    match crate::graph::backlinks(&root, &p.path) {
         Ok(v) => Json(json!({ "path": p.path, "backlinks": v })).into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "error": e }))).into_response(),
     }
 }
 
-async fn graph_linked(State(st): State<AppState>, Query(p): Query<GraphPathParams>) -> Response {
-    if let Err(e) = ensure_graph(&st.kb_root) {
+async fn graph_linked(State(st): State<AppState>, headers: HeaderMap, Query(p): Query<GraphPathParams>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    if let Err(e) = ensure_graph(&root) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
     }
-    match crate::graph::linked(&st.kb_root, &p.path) {
+    match crate::graph::linked(&root, &p.path) {
         Ok(v) => Json(json!({ "path": p.path, "linked": v })).into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "error": e }))).into_response(),
     }
 }
 
-async fn graph_related(State(st): State<AppState>, Query(p): Query<GraphPathParams>) -> Response {
-    if let Err(e) = ensure_graph(&st.kb_root) {
+async fn graph_related(State(st): State<AppState>, headers: HeaderMap, Query(p): Query<GraphPathParams>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    if let Err(e) = ensure_graph(&root) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
     }
-    match crate::graph::related(&st.kb_root, &p.path) {
+    match crate::graph::related(&root, &p.path) {
         Ok(v) => Json(json!({ "path": p.path, "related": v })).into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "error": e }))).into_response(),
     }
 }
 
-async fn graph_orphans(State(st): State<AppState>) -> Response {
-    if let Err(e) = ensure_graph(&st.kb_root) {
+async fn graph_orphans(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    if let Err(e) = ensure_graph(&root) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
     }
-    match crate::graph::orphans(&st.kb_root) {
+    match crate::graph::orphans(&root) {
         Ok(v) => Json(json!({ "orphans": v })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
 }
 
-async fn graph_tags(State(st): State<AppState>) -> Response {
-    if let Err(e) = ensure_graph(&st.kb_root) {
+async fn graph_tags(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    if let Err(e) = ensure_graph(&root) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
     }
-    match crate::graph::tags(&st.kb_root) {
+    match crate::graph::tags(&root) {
         Ok(v) => Json(json!({ "tags": v })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
 }
 
-async fn graph_projects(State(st): State<AppState>) -> Response {
-    if let Err(e) = ensure_graph(&st.kb_root) {
+async fn graph_projects(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    if let Err(e) = ensure_graph(&root) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
     }
-    match crate::graph::projects(&st.kb_root) {
+    match crate::graph::projects(&root) {
         Ok(v) => Json(json!({ "projects": v })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
@@ -1633,7 +1753,11 @@ struct IngestBody {
     dry_run: Option<bool>,
 }
 
-async fn ingest_handler(State(st): State<AppState>, Json(body): Json<IngestBody>) -> Response {
+async fn ingest_handler(State(st): State<AppState>, headers: HeaderMap, Json(body): Json<IngestBody>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
     let bytes = match base64_decode(&body.content_base64) {
         Ok(b) => b,
         Err(e) => {
@@ -1659,12 +1783,12 @@ async fn ingest_handler(State(st): State<AppState>, Json(body): Json<IngestBody>
         };
     }
     let _guard = st.sync_lock.lock().await;
-    match crate::ingest::ingest_to_notes(&st.kb_root, &bytes, &body.name) {
+    match crate::ingest::ingest_to_notes(&root, &bytes, &body.name) {
         Ok((rel, md)) => {
-            let _ = crate::kb::sync_index(&st.kb_root);
-            let _ = crate::graph::sync_graph(&st.kb_root);
+            let _ = crate::kb::sync_index(&root);
+            let _ = crate::graph::sync_graph(&root);
             crate::activity::record(
-                &st.kb_root,
+                &root,
                 "ingest",
                 &format!("摄入文档 {}", body.name),
                 json!({ "path": rel }),
@@ -1679,6 +1803,69 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine as _;
     STANDARD.decode(s).map_err(|e| e.to_string())
+}
+
+// ---------- 项目制（多项目硬隔离） ----------
+// 项目 = kb_root/projects/<id>/ 独立迷你 kb（自己的 L1/notes/sessions/图谱库）；
+// 「个人空间」默认项目 = 全局 kb 根本身（X-Project 为空/"default"）。隔离边界由 proj_root() 返回的 root 决定。
+
+/// 从请求头 X-Project 解析项目根——项目级 API 的唯一切换入口
+fn proj_root(st: &AppState, headers: &HeaderMap) -> Result<PathBuf, Response> {
+    let pid = headers
+        .get("x-project")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string());
+    crate::projects::resolve_project_root(&st.kb_root, pid.as_deref())
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response())
+}
+
+async fn projects_list(State(st): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({ "projects": crate::projects::list_projects(&st.kb_root) }))
+}
+
+#[derive(Deserialize)]
+struct ProjectCreateReq {
+    name: String,
+    #[serde(default)]
+    template: Option<String>,
+}
+
+async fn projects_create(State(st): State<AppState>, Json(req): Json<ProjectCreateReq>) -> Response {
+    let template = req.template.as_deref().unwrap_or("blank");
+    match crate::projects::create_project(&st.kb_root, &req.name, template) {
+        Ok(m) => (StatusCode::CREATED, Json(json!({ "project": m }))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+async fn projects_get(State(st): State<AppState>, AxumPath(id): AxumPath<String>) -> Response {
+    match crate::projects::load_meta(&st.kb_root, &id) {
+        Some(m) => Json(json!({ "project": m })).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "项目不存在" }))).into_response(),
+    }
+}
+
+async fn projects_delete(State(st): State<AppState>, AxumPath(id): AxumPath<String>) -> Response {
+    match crate::projects::delete_project(&st.kb_root, &id) {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ProjectRenameReq {
+    name: String,
+}
+
+async fn projects_rename(
+    State(st): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(req): Json<ProjectRenameReq>,
+) -> Response {
+    match crate::projects::rename_project(&st.kb_root, &id, &req.name) {
+        Ok(m) => Json(json!({ "project": m })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
 }
 
 async fn config_get() -> Json<serde_json::Value> {
@@ -1812,39 +1999,55 @@ struct TaskUpdateBody {
     deps: Option<Vec<String>>,
 }
 
-async fn tasks_list(State(s): State<AppState>) -> Response {
-    match crate::task::list(&s.kb_root) {
-        Ok(t) => Json(json!({ "tasks": t, "stats": crate::task::stats(&s.kb_root).unwrap_or(json!({})) }))
+async fn tasks_list(State(s): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&s, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    match crate::task::list(&root) {
+        Ok(t) => Json(json!({ "tasks": t, "stats": crate::task::stats(&root).unwrap_or(json!({})) }))
             .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
 }
 
-async fn tasks_stats(State(s): State<AppState>) -> Response {
-    match crate::task::stats(&s.kb_root) {
+async fn tasks_stats(State(s): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&s, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    match crate::task::stats(&root) {
         Ok(v) => Json(v).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
 }
 
-async fn tasks_create(State(s): State<AppState>, Json(b): Json<TaskCreateBody>) -> Response {
-    match crate::task::create(&s.kb_root, &b.goal, &b.title) {
+async fn tasks_create(State(s): State<AppState>, headers: HeaderMap, Json(b): Json<TaskCreateBody>) -> Response {
+    let root = match proj_root(&s, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    match crate::task::create(&root, &b.goal, &b.title) {
         Ok(t) => (StatusCode::CREATED, Json(json!({ "task": t }))).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     }
 }
 
 async fn tasks_update(
-    State(s): State<AppState>,
+    State(s): State<AppState>, headers: HeaderMap,
     AxumPath(id): AxumPath<i64>,
     Json(b): Json<TaskUpdateBody>,
 ) -> Response {
-    match crate::task::update(&s.kb_root, id, b.status.as_deref(), b.note.as_deref(), b.deps.as_deref()) {
+    let root = match proj_root(&s, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    match crate::task::update(&root, id, b.status.as_deref(), b.note.as_deref(), b.deps.as_deref()) {
         Ok(t) => {
             // R4 活动埋点：任务状态流转（kind=task）
             let status = b.status.clone().unwrap_or_default();
             if !status.is_empty() {
-                crate::activity::record(&s.kb_root, "task", &format!("任务 #{} → {}", t.id, status), json!({ "id": t.id, "status": status }));
+                crate::activity::record(&root, "task", &format!("任务 #{} → {}", t.id, status), json!({ "id": t.id, "status": status }));
             }
             Json(json!({ "task": t })).into_response()
         }
@@ -1852,8 +2055,12 @@ async fn tasks_update(
     }
 }
 
-async fn tasks_delete(State(s): State<AppState>, AxumPath(id): AxumPath<i64>) -> Response {
-    match crate::task::remove(&s.kb_root, id) {
+async fn tasks_delete(State(s): State<AppState>, headers: HeaderMap, AxumPath(id): AxumPath<i64>) -> Response {
+    let root = match proj_root(&s, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    match crate::task::remove(&root, id) {
         Ok(true) => Json(json!({ "ok": true })).into_response(),
         Ok(false) => (StatusCode::NOT_FOUND, Json(json!({ "error": format!("任务 #{id} 不存在") }))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
@@ -2309,7 +2516,11 @@ struct ContextLogBody {
     fp_user: Option<String>,
 }
 
-async fn context_log(State(s): State<AppState>, Json(b): Json<ContextLogBody>) -> Response {
+async fn context_log(State(s): State<AppState>, headers: HeaderMap, Json(b): Json<ContextLogBody>) -> Response {
+    let root = match proj_root(&s, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
     let line = json!({
         "ts": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
         "kind": b.kind.unwrap_or_else(|| "question".to_string()),
@@ -2328,7 +2539,7 @@ async fn context_log(State(s): State<AppState>, Json(b): Json<ContextLogBody>) -
         "fp_mid": b.fp_mid.unwrap_or_default(),
         "fp_user": b.fp_user.unwrap_or_default(),
     });
-    let path = s.kb_root.join(".context-log.jsonl");
+    let path = root.join(".context-log.jsonl");
     use std::io::Write;
     match std::fs::OpenOptions::new()
         .create(true)
@@ -2349,8 +2560,12 @@ async fn context_log(State(s): State<AppState>, Json(b): Json<ContextLogBody>) -
     Json(json!({ "ok": true })).into_response()
 }
 
-async fn context_stats(State(s): State<AppState>) -> Response {
-    let path = s.kb_root.join(".context-log.jsonl");
+async fn context_stats(State(s): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&s, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let path = root.join(".context-log.jsonl");
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(_) => {
@@ -2491,8 +2706,12 @@ fn default_activity_limit() -> i64 {
     100
 }
 
-async fn activity_list(State(s): State<AppState>, Query(q): Query<ActivityListParams>) -> Response {
-    match crate::activity::list(&s.kb_root, q.limit) {
+async fn activity_list(State(s): State<AppState>, headers: HeaderMap, Query(q): Query<ActivityListParams>) -> Response {
+    let root = match proj_root(&s, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    match crate::activity::list(&root, q.limit) {
         Ok(v) => Json(v).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
@@ -2503,8 +2722,12 @@ struct ActivitySinceParams {
     id: i64,
 }
 
-async fn activity_since(State(s): State<AppState>, Query(q): Query<ActivitySinceParams>) -> Response {
-    match crate::activity::since(&s.kb_root, q.id, 200) {
+async fn activity_since(State(s): State<AppState>, headers: HeaderMap, Query(q): Query<ActivitySinceParams>) -> Response {
+    let root = match proj_root(&s, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    match crate::activity::since(&root, q.id, 200) {
         Ok(v) => Json(v).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
@@ -2519,7 +2742,11 @@ struct ActivityPostBody {
 }
 
 /// 前端埋点入口（工具行状态 / 会话恢复等宿主侧事件）：fire-and-forget 落盘
-async fn activity_post(State(s): State<AppState>, Json(b): Json<ActivityPostBody>) -> Response {
-    crate::activity::record(&s.kb_root, &b.kind, &b.text, b.meta);
+async fn activity_post(State(s): State<AppState>, headers: HeaderMap, Json(b): Json<ActivityPostBody>) -> Response {
+    let root = match proj_root(&s, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    crate::activity::record(&root, &b.kind, &b.text, b.meta);
     Json(json!({ "ok": true })).into_response()
 }

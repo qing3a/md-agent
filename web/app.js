@@ -66,6 +66,13 @@
   let history = loadHistory(); // 多轮对话记忆（localStorage 持久化，刷新不丢）
   const MAX_HISTORY = 8; // 最近 4 轮
 
+  // 项目制（多项目硬隔离）：当前项目 id（null = 个人空间默认库）+ 项目列表。
+  // 当前项目仅存前端（localStorage），后端按请求头 X-Project 解析隔离根——多窗口各管各的，无共享可变状态
+  const PROJECT_KEY = 'md-agent-current-project';
+  let currentProject = null;   // null|'default' = 个人空间；否则项目 id
+  let currentProjectName = '个人空间';
+  let projectList = [];        // [{id,name,template,created}]
+
   // L0 会话快照（轻量，步骤①）：本页会话的「问题+回答」对，空闲防抖写入 kb/sessions/<时间>.md。
   // 流水非知识——后端已排除 sessions/ 于图谱/检索/心跳指纹；为未来提炼流水线（task.rs 蒸馏 → pending 人审）存原料。
   const MAX_SESSION_LOG = 50;
@@ -851,9 +858,9 @@
   function printBanner() {
     const bannerRow = term.appendCard(
       '<div class="welcome">' +
-        '<div class="w-title">md-agent</div>' +
+        '<div class="w-title">md-agent' + (currentProject ? ' · ' + currentProjectName : '') + '</div>' +
         '<div class="w-hello">有什么我能帮你的吗？</div>' +
-        '<div class="w-line dim">私人 AI 运营中心 · 你的 AI 做了什么，永远可查</div>' +
+        '<div class="w-line dim">' + (currentProject ? '项目空间：' + currentProjectName + '（与其它项目完全隔离）' : '私人 AI 运营中心 · 你的 AI 做了什么，永远可查') + '</div>' +
         '<div class="w-chips">' +
           '<button data-cmd="/view home">🏠 功能首页</button>' +
           '<button data-cmd="/view pending">📥 待审</button>' +
@@ -867,6 +874,185 @@
     // 状态汇总改由 refreshStatus（8s 轮询）填充：banner 状态行与输入条状态行同源
   }
   printBanner();
+
+  // ---- 项目制（多项目硬隔离）：项目切换器 + 新建项目 ----
+  function loadProjectState() {
+    try {
+      const saved = localStorage.getItem(PROJECT_KEY);
+      currentProject = saved && saved !== 'default' ? saved : null;
+    } catch (e) { currentProject = null; }
+  }
+  function templateIcon(tpl) {
+    return tpl === 'lawyer' ? '⚖️' : tpl === 'headhunter' ? '🎯' : '📁';
+  }
+  async function refreshProjects() {
+    const r = await api('/api/projects').catch(() => ({ projects: [] }));
+    projectList = (r && r.projects) || [];
+    if (currentProject && !projectList.some((p) => p.id === currentProject)) {
+      currentProject = null; // 项目已删 → 回退个人空间
+      try { localStorage.setItem(PROJECT_KEY, 'default'); } catch (e) {}
+    }
+    const cur = projectList.find((p) => p.id === currentProject);
+    currentProjectName = cur ? cur.name : '个人空间';
+    renderProjectChip();
+    return projectList;
+  }
+  function renderProjectChip() {
+    const chip = document.getElementById('project-chip');
+    if (!chip) return;
+    const cur = projectList.find((p) => p.id === currentProject);
+    chip.textContent = (currentProject ? templateIcon(cur ? cur.template : '') : '🗂️') + ' ' + currentProjectName;
+  }
+  function renderProjectMenu() {
+    const list = document.getElementById('pm-list');
+    if (!list) return;
+    list.innerHTML = '';
+    const mk = (id, name, icon, active, tag) => {
+      const b = document.createElement('button');
+      if (active) b.className = 'active';
+      b.innerHTML = '<span class="pm-ico"></span><span class="pm-name"></span>' + (tag ? '<span class="pm-tag"></span>' : '');
+      b.querySelector('.pm-ico').textContent = icon;
+      b.querySelector('.pm-name').textContent = name;
+      if (tag) b.querySelector('.pm-tag').textContent = tag;
+      b.addEventListener('click', () => switchProject(id, name));
+      list.appendChild(b);
+    };
+    mk(null, '个人空间', '🗂️', !currentProject, '默认');
+    for (const p of projectList) mk(p.id, p.name, templateIcon(p.template), currentProject === p.id, '');
+  }
+  function toggleProjectMenu(force) {
+    const menu = document.getElementById('project-menu');
+    if (!menu) return;
+    const show = force !== undefined ? force : menu.hidden;
+    if (show) {
+      renderProjectMenu();
+      const chip = document.getElementById('project-chip');
+      const r = chip ? chip.getBoundingClientRect() : null;
+      menu.style.top = ((r ? r.bottom : 48) + 6) + 'px';
+      menu.style.right = '16px';
+      menu.hidden = false;
+    } else {
+      menu.hidden = true;
+    }
+  }
+  function closeProjectMenu() { toggleProjectMenu(false); }
+  async function switchProject(id, name) {
+    const target = id || null;
+    if (target === currentProject) { closeProjectMenu(); return; }
+    closeProjectMenu();
+    try {
+      if (sessionLog.length && !sessionArchived) await archiveSession(); // 旧会话归档进旧项目（await 确保落盘完成）
+    } catch (e) { /* 归档失败不阻断切换 */ }
+    currentProject = target;
+    try { localStorage.setItem(PROJECT_KEY, target || 'default'); } catch (e) {}
+    const cur = projectList.find((p) => p.id === target);
+    currentProjectName = cur ? cur.name : '个人空间';
+    // 重置会话上下文（新项目新会话；分节缓存不复用旧项目前缀）
+    history = []; saveHistory(); Core.resetSectionCache();
+    sessionFile = null; sessionLog = []; sessionArchived = false;
+    sbCache = null; sbFingerprint = '';
+    if (topbarTitle) topbarTitle.textContent = '新对话';
+    renderProjectChip();
+    term.clear();
+    printBanner();
+    paintSidebar();
+    refreshStatus();
+    logActivity('project', '切换项目 → ' + currentProjectName, { id: target });
+  }
+  // 新建项目向导：模板三卡（空白/律师/猎头）+ 命名 → 创建并进入
+  const PROJECT_TEMPLATES = [
+    { id: 'blank', icon: '📁', name: '空白项目', desc: '通用空间，自由组织' },
+    { id: 'lawyer', icon: '⚖️', name: '律师案件', desc: '案件总览 · 证据清单 · 时间线 · 法律研究' },
+    { id: 'headhunter', icon: '🎯', name: '猎头项目', desc: '职位需求 · 候选人台账 · 客户 · 沟通记录' },
+  ];
+  let npwSel = 'blank';
+  function openNewProjectWizard() {
+    closeProjectMenu();
+    const box = document.getElementById('npw-overlay');
+    if (!box) return;
+    const wrap = document.getElementById('npw-tpls');
+    wrap.innerHTML = '';
+    npwSel = 'blank';
+    for (const t of PROJECT_TEMPLATES) {
+      const el = document.createElement('div');
+      el.className = 'npw-tpl' + (t.id === npwSel ? ' sel' : '');
+      el.dataset.tpl = t.id;
+      el.innerHTML = '<div class="ti">' + t.icon + '</div><div class="tn">' + t.name + '</div><div class="td">' + t.desc + '</div>';
+      el.addEventListener('click', () => {
+        npwSel = t.id;
+        wrap.querySelectorAll('.npw-tpl').forEach((x) => x.classList.toggle('sel', x.dataset.tpl === t.id));
+      });
+      wrap.appendChild(el);
+    }
+    const name = document.getElementById('npw-name');
+    name.value = '';
+    box.hidden = false;
+    setTimeout(() => name.focus(), 50);
+  }
+  function closeNewProjectWizard() {
+    const box = document.getElementById('npw-overlay');
+    if (box) box.hidden = true;
+  }
+  async function newProjectFlow() {
+    closeProjectMenu();
+    const name = (document.getElementById('npw-name').value || '').trim();
+    if (!name) { document.getElementById('npw-name').focus(); return; }
+    try {
+      const r = await api('/api/projects', { method: 'POST', body: JSON.stringify({ name, template: npwSel }) });
+      closeNewProjectWizard();
+      await refreshProjects();
+      await switchProject(r.project.id, r.project.name);
+      term.writeln('\x1b[32m✓ 项目已创建：' + r.project.name + '（模板 ' + npwSel + '）\x1b[0m');
+    } catch (e) {
+      term.writeln('\x1b[31m新建项目失败: ' + e + '\x1b[0m');
+    }
+  }
+  async function spacesCmd(arg) {
+    // /spaces：列出全部项目空间（注意 /projects 是图谱的笔记目录统计，两者不同）
+    await refreshProjects();
+    term.writeln('\x1b[1;36m──── 项目空间 ────\x1b[0m');
+    term.writeln(' 🗂️ 个人空间（默认）' + (currentProject ? '' : '  \x1b[32m← 当前\x1b[0m'));
+    for (const p of projectList) {
+      term.writeln(' ' + templateIcon(p.template) + ' ' + p.name + '  \x1b[90m[' + p.template + ']\x1b[0m' + (currentProject === p.id ? '  \x1b[32m← 当前\x1b[0m' : ''));
+    }
+    term.writeln('\x1b[90m切换：点顶栏项目名 · 新建：项目菜单「＋ 新建项目」\x1b[0m');
+  }
+  // 项目切换器事件绑定（模块级初始化）
+  loadProjectState();
+  refreshProjects();
+  (function bindProjectUI() {
+    const chip = document.getElementById('project-chip');
+    if (chip) chip.addEventListener('click', (e) => { e.stopPropagation(); toggleProjectMenu(); });
+    const pmNew = document.getElementById('pm-new');
+    if (pmNew) pmNew.addEventListener('click', openNewProjectWizard);
+    const npwCancel = document.getElementById('npw-cancel');
+    if (npwCancel) npwCancel.addEventListener('click', closeNewProjectWizard);
+    const npwCreate = document.getElementById('npw-create');
+    if (npwCreate) npwCreate.addEventListener('click', newProjectFlow);
+    const npwName = document.getElementById('npw-name');
+    if (npwName) npwName.addEventListener('keydown', (e) => { if (e.key === 'Enter') newProjectFlow(); });
+    const npwOv = document.getElementById('npw-overlay');
+    if (npwOv) npwOv.addEventListener('click', (e) => { if (e.target === npwOv) closeNewProjectWizard(); });
+    document.addEventListener('click', (e) => {
+      const menu = document.getElementById('project-menu');
+      if (menu && !menu.hidden && !menu.contains(e.target) && e.target.id !== 'project-chip') closeProjectMenu();
+    });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeProjectMenu(); });
+  })();
+  // 新手引导：首次启动且未配置连接 → 自动打开引导面板（老用户/已配置跳过）
+  function maybeRunOnboarding() {
+    try {
+      if (localStorage.getItem('md-agent-onboarded') === '1') return;
+    } catch (e) { return; }
+    api('/api/config').then((cfg) => {
+      if (cfg && cfg.llm && cfg.llm.endpoint) {
+        try { localStorage.setItem('md-agent-onboarded', '1'); } catch (e) {}
+        return;
+      }
+      viewCmd('onboarding').catch(() => {});
+    }).catch(() => {});
+  }
+  setTimeout(maybeRunOnboarding, 800);
 
   // ---- 状态轮询（输入条状态行 + 欢迎横幅状态 + 顶栏模型芯片 + 侧边栏会话指纹；8s） ----
   function refreshStatus() {
@@ -1098,7 +1284,14 @@
   }
 
   async function api(path, opts) {
-    const res = await fetch(path, opts);
+    // 项目制：统一附加 X-Project 头（无当前项目 → 后端回退全局「个人空间」根）；
+    // 有 body 但未显式 Content-Type → 默认 JSON（部分调用方未传 headers 曾致 415）
+    const o = opts || {};
+    const hdrs = Object.assign({}, o.headers || {});
+    if (o.body !== undefined && !hdrs['Content-Type']) hdrs['Content-Type'] = 'application/json';
+    if (currentProject) hdrs['X-Project'] = currentProject;
+    o.headers = hdrs;
+    const res = await fetch(path, o);
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error((body && body.error) || 'HTTP ' + res.status);
     return body;
@@ -1124,6 +1317,8 @@
       case '/graph': await graph(rest.join(' ')); break;
       case '/orphans': await orphans(); break;
       case '/projects': await projects(); break;
+      case '/spaces': await spacesCmd(rest[0]); break;
+      case '/newproject': await newProjectFlow(); break;
       case '/tags': await tags(); break;
       case '/rescan': await rescan(); break;
       case '/pending': await pendingList(); break;
@@ -2611,6 +2806,11 @@
       if (!tab.appId && msg.cmd) panelCmd(msg.cmd);
       return;
     }
+    if (msg.type === 'project') {
+      // 面板 → 宿主：切换项目（首页「项目空间」卡片；仅内置面板）
+      if (!tab.appId) switchProject(msg.id || null, msg.name || '个人空间');
+      return;
+    }
     if (msg.type === 'prefill') {
       // 面板 → 宿主：预填终端输入行（功能首页命令卡片「打开功能」= 命令打到输入框，补参后回车）
       if (!tab.appId && !busy && atPrompt) { line = msg.cmd || ''; redrawInput(); term.focus(); }
@@ -2662,7 +2862,8 @@
     try {
       const res = await fetch(msg.path, {
         method: msg.method || 'GET',
-        headers: { 'Content-Type': 'application/json' },
+        // 项目制：面板请求跟随宿主当前项目（隔离根由后端 X-Project 解析）
+        headers: { 'Content-Type': 'application/json', 'X-Project': currentProject || '' },
         body: msg.body ? JSON.stringify(msg.body) : undefined,
       });
       const data = await res.json().catch(() => ({}));
@@ -2690,13 +2891,13 @@
       closeView();
       return;
     }
-    if (arg === 'graph' || arg === 'board' || arg === 'pending' || arg === 'audit' || arg === 'market' || arg === 'home' || arg === 'sessions' || arg === 'ops' || arg === 'config' || arg === 'automation') {
+    if (arg === 'graph' || arg === 'board' || arg === 'pending' || arg === 'audit' || arg === 'market' || arg === 'home' || arg === 'sessions' || arg === 'ops' || arg === 'config' || arg === 'automation' || arg === 'onboarding') {
       const dup = findView('builtin', arg);
       if (dup) { activateView(dup.id); return; }
-      const path = arg === 'config' ? '/config.html' : '/views/' + arg + '.html';
+      const path = arg === 'config' ? '/config.html' : arg === 'onboarding' ? '/onboarding.html' : '/views/' + arg + '.html';
       const r = await fetch(path);
       if (!r.ok) throw new Error('内置视图加载失败: HTTP ' + r.status);
-      const titles = { graph: '知识库结构导航', board: '任务看板', pending: '待审审核', audit: '知识库健康审计', market: '应用市场', home: '功能首页', sessions: '历史会话', ops: '运营中心', config: '设置', automation: '自动化' };
+      const titles = { graph: '知识库结构导航', board: '任务看板', pending: '待审审核', audit: '知识库健康审计', market: '应用市场', home: '功能首页', sessions: '历史会话', ops: '运营中心', config: '设置', automation: '自动化', onboarding: '开始使用' };
       openView(titles[arg], await r.text(), null, { kind: 'builtin', arg });
       return;
     }

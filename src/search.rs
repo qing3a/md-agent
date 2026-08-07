@@ -70,21 +70,24 @@ pub fn search(root: &Path, query: &str, layer: &str, ctx: bool) -> Result<Search
     let mut file_stats: HashMap<String, (usize, usize)> = HashMap::new();
 
     if dir.exists() {
-        let mut walker = ignore::WalkBuilder::new(&dir)
-            .hidden(false)
-            .git_ignore(false)
-            .git_global(false)
-            .git_exclude(false)
-            .build();
-        if let Some(d) = max_depth {
-            walker = ignore::WalkBuilder::new(&dir)
-                .hidden(false)
+        let walker = |d: &std::path::Path, depth: Option<usize>| {
+            let mut b = ignore::WalkBuilder::new(d);
+            b.hidden(false)
                 .git_ignore(false)
                 .git_global(false)
-                .git_exclude(false)
-                .max_depth(Some(d))
-                .build();
-        }
+                .git_exclude(false);
+            // 项目制隔离区（projects/ 各项目独立 mini-kb）不参与全局检索：硬隔离由遍历范围保证
+            b.filter_entry(|e| e.file_name() != "projects");
+            if let Some(md) = depth {
+                b.max_depth(Some(md));
+            }
+            b.build()
+        };
+        let mut walker = if let Some(d) = max_depth {
+            walker(&dir, Some(d))
+        } else {
+            walker(&dir, None)
+        };
         for entry in walker {
             let Ok(entry) = entry else { continue };
             let Some(ft) = entry.file_type() else { continue };
@@ -92,7 +95,8 @@ pub fn search(root: &Path, query: &str, layer: &str, ctx: bool) -> Result<Search
                 continue;
             }
             let path = entry.path();
-            // 待审目录不参与检索（pending 待确认后才落地）；L0 会话快照（sessions/）是流水非知识，也不进检索
+            // 待审目录不参与检索（pending 待确认后才落地）；L0 会话快照（sessions/）是流水非知识，也不进检索。
+            // 注意：不能用绝对路径组件判断 "projects"——项目根自身就位于 kb_root/projects/ 下（隔离由上方 filter_entry 排除目录保证）
             if path.components().any(|c| c.as_os_str() == "pending" || c.as_os_str() == "sessions") {
                 continue;
             }

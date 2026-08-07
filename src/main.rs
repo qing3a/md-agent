@@ -18,6 +18,7 @@ mod server;
 mod page;
 mod task;
 mod activity;
+mod projects;
 
 use std::path::{Path, PathBuf};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
