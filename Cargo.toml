@@ -8,8 +8,9 @@ license = "MIT"
 [dependencies]
 # HTTP 服务
 axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["rt-multi-thread", "fs", "net"] }
-tower-http = { version = "0.6", features = ["fs"] }
+tower-http = { version = "0.6", features = ["fs", "set-header"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 检索引擎（内嵌 ripgrep 内核：grep 为元 crate，ignore 负责文件遍历）

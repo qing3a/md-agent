@@ -116,7 +116,15 @@ pub async fn serve(
         )
         // 应用市场（阶段 0）：kb/apps/ 静态挂载到 /apps/*——沙箱 iframe 加载 app 的 HTML+assets（脚本子资源不受 CORS 限制）；/api/* 仍只走桥（沙箱 opaque origin 直连被拦，权限白名单在桥层）
         .nest_service("/apps", tower_http::services::ServeDir::new(state.kb_root.join("apps")))
-        .fallback_service(tower_http::services::ServeDir::new(state.web_dir.clone()))
+        // 前端静态资源：no-cache（浏览器每次重新验证，Last-Modified 变了立即拉新——开发实时读源码，改前端刷新即生效）
+        .fallback_service(
+            tower::ServiceBuilder::new()
+                .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+                    axum::http::header::CACHE_CONTROL,
+                    axum::http::HeaderValue::from_static("no-cache"),
+                ))
+                .service(tower_http::services::ServeDir::new(state.web_dir.clone())),
+        )
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
