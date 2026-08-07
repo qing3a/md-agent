@@ -289,6 +289,7 @@
     linkHover: null,  // 树行悬停联动（同 hover 语义，来源不同）
     nodeDrag: null,   // 正在拖拽的节点 {path, moved}
     fixed: {},        // 拖拽固定的节点（重建局部图时保留屏幕位置）
+    fullMode: false,  // 全图模式（打开即全库大图；双击节点切局部聚焦）
     anim: null,       // 相机平滑居中动画 {ox0,oy0,ox1,oy1,t0,dur}
     intro: null };    // 入场动画 {t0,dur}
   var gpCanvas = document.getElementById('gp-canvas');
@@ -340,6 +341,7 @@
     var n = state.byPath[path];
     if (!n) return;
     gp.center = path;
+    gp.fullMode = false; // 局部聚焦模式（滑块深度生效）
     gp.depth = parseInt(document.getElementById('gp-depth').value, 10) || 1;
     gp.pathSet = null;
     buildLocalGraph();
@@ -353,6 +355,65 @@
     gpTip.style.display = 'none'; // 关面板清残留 tooltip
     var cur = document.querySelector('.file-line.gp-hov');
     if (cur) cur.classList.remove('gp-hov');
+  }
+  // 全库图谱：以度数最高的节点为 hub 展开全部连通节点，孤立节点补最外环（Obsidian 全图式）
+  function buildFullGraph() {
+    var nodes = {}, edges = [];
+    var add = function (p) { if (!(p in nodes) && state.byPath[p]) nodes[p] = { path: p, x: 0, y: 0, hop: 0 }; };
+    var hub = null, hubDeg = -1;
+    state.nodes.forEach(function (n) {
+      var d = n.in_degree + n.out_degree;
+      if (d > hubDeg) { hubDeg = d; hub = n.path; }
+    });
+    if (!hub) return;
+    gp.center = hub;
+    add(hub);
+    var seen = {};
+    function expand(p, hop, maxHop) {
+      if (hop > maxHop || seen[p]) return;
+      seen[p] = true;
+      var out = state.edges.filter(function (e) { return e.src === p && e.dst_path; });
+      out.forEach(function (e) {
+        edges.push({ s: p, t: e.dst_path });
+        add(e.dst_path);
+        if (hop + 1 <= maxHop) expand(e.dst_path, hop + 1, maxHop);
+      });
+      var inc = state.edges.filter(function (e) { return e.dst_path === p; });
+      inc.forEach(function (e) {
+        edges.push({ s: e.src, t: p });
+        add(e.src);
+        if (hop + 1 <= maxHop) expand(e.src, hop + 1, maxHop);
+      });
+    }
+    expand(hub, 0, 3);
+    // 未达节点（不连通/孤立）补入，标记 hop=99 → 布局放最外环
+    state.nodes.forEach(function (n) {
+      if (!(n.path in nodes)) { nodes[n.path] = { path: n.path, x: 0, y: 0, hop: 99 }; }
+    });
+    gp.nodes = Object.keys(nodes).map(function (k) { return nodes[k]; });
+    gp.edges = edges.filter(function (e, i, arr) {
+      return arr.findIndex(function (x) { return x.s === e.s && x.t === e.t; }) === i;
+    });
+    var conn = {};
+    gp.nodes.forEach(function (n) { conn[n.path] = 0; });
+    gp.edges.forEach(function (e) { conn[e.s] = (conn[e.s] || 0) + 1; conn[e.t] = (conn[e.t] || 0) + 1; });
+    gp.nodes.forEach(function (n) { n.conn = conn[n.path] || 0; });
+    document.getElementById('gp-title').textContent = '全库图谱';
+    document.getElementById('gp-meta').textContent = gp.nodes.length + ' 节点 · ' + gp.edges.length + ' 边';
+    layoutGp();
+  }
+  // 打开全库图谱并默认全屏大图（打开图谱页即见图，树/侧栏隐藏，可切「双栏」）
+  function openFullGraph() {
+    gp.fullMode = true; // 全图模式：滑块深度不生效（全图=全部节点）
+    document.getElementById('gp-depth').value = '3';
+    buildFullGraph();
+    gpPanel.classList.remove('hidden');
+    if (!document.body.classList.contains('gp-full')) {
+      document.body.classList.add('gp-full');
+      gpFullBtn.classList.add('on');
+      gpFullBtn.textContent = '⛶ 双栏';
+    }
+    scheduleGpFrame();
   }
   function buildLocalGraph() {
     var nodes = {}, edges = [];
@@ -394,7 +455,12 @@
     if (!center) return;
     center.tx = 0; center.ty = 0;
     var hops = {};
-    gp.nodes.forEach(function (n) { hops[n.path] = n.path === gp.center ? 0 : 1; });
+    gp.nodes.forEach(function (n) {
+      if (n.path === gp.center) { hops[n.path] = 0; return; }
+      // 无边节点（全图模式补入的孤立）→ 最外环；其余初始 1 由 BFS 松弛
+      var hasEdge = gp.edges.some(function (e) { return e.s === n.path || e.t === n.path; });
+      hops[n.path] = hasEdge ? 1 : 99;
+    });
     var changed = true;
     while (changed) {
       changed = false;
@@ -411,10 +477,11 @@
     });
     // 布局半径随画布尺寸自适应（全屏大图时半径放大，图更饱满）
     var R = Math.max(66, gpCanvas.clientHeight * (document.body.classList.contains('gp-full') ? 0.26 : 0.24));
+    var maxH = Math.max.apply(null, Object.keys(layers).map(Number));
     Object.keys(layers).forEach(function (h) {
       var arr = layers[h];
       if (h === '0') return;
-      var r = R * parseInt(h, 10);
+      var r = R * (h === '99' ? maxH + 0.6 : parseInt(h, 10)); // 孤立层放最外环
       arr.forEach(function (n, i) {
         var ang = (i / arr.length) * Math.PI * 2 - Math.PI / 2;
         n.tx = Math.cos(ang) * r;
@@ -647,6 +714,7 @@
     scheduleGpFrame();
   });
   document.getElementById('gp-depth').addEventListener('input', function () {
+    if (gp.fullMode) return; // 全图模式：深度固定为全量
     gp.depth = parseInt(this.value, 10) || 1;
     if (gp.center) buildLocalGraph();
   });
@@ -1074,6 +1142,8 @@
     renderLegend();
     renderTree();
     renderHealth();
+    // 打开图谱页即见全库大图（默认全屏；「⛶ 双栏」可切回树+图布局）
+    openFullGraph();
   }
 
   document.getElementById('gfilter-orphans').addEventListener('click', function () {
