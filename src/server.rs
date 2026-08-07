@@ -71,6 +71,7 @@ pub async fn serve(
         .route("/api/graph/backlinks", get(graph_backlinks))
         .route("/api/graph/linked", get(graph_linked))
         .route("/api/graph/related", get(graph_related))
+        .route("/api/graph/paths", get(graph_paths))
         .route("/api/graph/orphans", get(graph_orphans))
         .route("/api/graph/tags", get(graph_tags))
         .route("/api/graph/projects", get(graph_projects))
@@ -1711,6 +1712,29 @@ async fn graph_related(State(st): State<AppState>, headers: HeaderMap, Query(p):
     }
     match crate::graph::related(&root, &p.path) {
         Ok(v) => Json(json!({ "path": p.path, "related": v })).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct GraphPathsParams {
+    from: String,
+    to: String,
+    max_depth: Option<usize>,
+}
+
+/// A 和 B 什么关系：BFS 最短路径链（无向边，max_depth 默认 6）
+async fn graph_paths(State(st): State<AppState>, headers: HeaderMap, Query(p): Query<GraphPathsParams>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    if let Err(e) = ensure_graph(&root) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
+    }
+    let max_depth = p.max_depth.unwrap_or(6).min(10);
+    match crate::graph::paths(&root, &p.from, &p.to, max_depth) {
+        Ok(chain) => Json(json!({ "from": p.from, "to": p.to, "path": chain })).into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "error": e }))).into_response(),
     }
 }

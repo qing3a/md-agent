@@ -180,6 +180,9 @@
   /* 助手/工具消息（整宽左对齐文本块） */
   .msg.assistant, .msg.tool { width: 100%; margin-bottom: 14px; }
   .msg.assistant .stream-row:last-child, .msg.tool .stream-row:last-child { margin-bottom: 0; }
+  /* 回答内引用 [文件:行号] → 可点击跳图谱 */
+  .ref-link { color: var(--accent); cursor: pointer; border-bottom: 1px dashed var(--accent-40, rgba(137,180,250,.4)); }
+  .ref-link:hover { background: var(--accent-10); }
 
   /* 深度思考折叠块（DeepSeek 式：reasoning 折叠展示） */
   .think-card { margin: 2px 0 10px; }

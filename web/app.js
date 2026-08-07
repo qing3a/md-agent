@@ -2152,7 +2152,74 @@
         term.writeln('\x1b[90m' + k + '  ' + (h.section || '') + '\x1b[0m');
       }
     }
+    enhanceRefs(); // 回答渲染完成后：把 [文件:行号] 引用增强为可点击（点击 → 图谱高亮）
     term.endMsg(); // 关闭本轮回答气泡（工具轮无气泡，无操作）
+  }
+
+  // ---------- 引用增强：回答/工具结果中的 [文件:行号] → 可点击（点击打开图谱并高亮该文档局部图） ----------
+  // 遍历 #stream 内所有行与工具卡展开内容（.stream-row / .tr-body）的文本节点替换，
+  // 不动 ANSI→HTML 渲染链路；命中路径在图谱中才可点击。工具轮气泡已关闭，
+  // 故不能只查 currentMsg，需全流扫描（只处理本轮新增：增强过的行有 .ref-link 会跳过）。
+  const REF_RE = /\[([^\s\]]+?\.md):(\d+)[^\]]*\]/g;
+  function enhanceRefs() {
+    const rows = document.querySelectorAll('#stream .stream-row, #stream .tr-body');
+    for (const row of rows) {
+      walkTextNodes(row, (node) => {
+        const txt = node.nodeValue;
+        if (!txt || !REF_RE.test(txt)) return;
+        REF_RE.lastIndex = 0;
+        const frag = document.createDocumentFragment();
+        let last = 0, m;
+        while ((m = REF_RE.exec(txt))) {
+          if (m.index > last) frag.appendChild(document.createTextNode(txt.slice(last, m.index)));
+          const path = m[1];
+          const a = document.createElement('span');
+          a.className = 'ref-link';
+          a.dataset.path = path;
+          a.textContent = m[0];
+          a.title = '在知识图谱中查看「' + path + '」';
+          frag.appendChild(a);
+          last = m.index + m[0].length;
+        }
+        if (last < txt.length) frag.appendChild(document.createTextNode(txt.slice(last)));
+        node.parentNode.replaceChild(frag, node);
+      });
+    }
+  }
+  // 遍历文本节点（跳过已有 .ref-link）
+  function walkTextNodes(root, fn) {
+    const it = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(n) {
+        if (n.parentNode && n.parentNode.classList && n.parentNode.classList.contains('ref-link')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    let n;
+    const targets = [];
+    while ((n = it.nextNode())) targets.push(n);
+    for (const t of targets) fn(t);
+  }
+  // 点击引用 → 打开图谱面板 + 高亮（图谱加载完成后经 postMessage 通知；BRIDGE 无 highlight 需宿主转发）
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest('.ref-link');
+    if (!el || !el.dataset.path) return;
+    e.preventDefault();
+    openViewForPath(el.dataset.path);
+  });
+  let graphHighlightPending = null;
+  async function openViewForPath(path) {
+    try {
+      await viewCmd('graph');
+      graphHighlightPending = path;
+      // 等图谱 iframe 加载 + 数据就绪后注入高亮
+      setTimeout(() => {
+        if (!currentView || currentView.specArg !== 'graph') return;
+        try {
+          currentView.iframe.contentWindow.postMessage({ type: 'highlight', path }, '*');
+        } catch (err) { /* iframe 未就绪则跳过 */ }
+        graphHighlightPending = null;
+      }, 400);
+    } catch (err) { /* 打开失败静默 */ }
   }
 
   // ---------- 写回（Agent 沉淀） ----------
@@ -2944,7 +3011,7 @@
       const path = arg === 'config' ? '/config.html' : arg === 'onboarding' ? '/onboarding.html' : '/views/' + arg + '.html';
       const r = await fetch(path);
       if (!r.ok) throw new Error('内置视图加载失败: HTTP ' + r.status);
-      const titles = { graph: '知识库结构导航', board: '任务看板', automation: '自动化（控制 / 审核 / 运营数据）', market: '应用市场', home: '功能首页', sessions: '历史会话', config: '设置', onboarding: '开始使用' };
+      const titles = { graph: '知识图谱', board: '任务看板', automation: '自动化（控制 / 审核 / 运营数据）', market: '应用市场', home: '功能首页', sessions: '历史会话', config: '设置', onboarding: '开始使用' };
       openView(titles[arg], await r.text(), null, { kind: 'builtin', arg });
       return;
     }
@@ -3131,7 +3198,7 @@
   // 命令面板候选：内置视图 + / 命令 + @KB 文档 + 已装应用（均以「可执行的命令串」为 run）
   const VIEW_TARGETS = [
     { k: '首页', d: '功能总览（全部功能一键进入）', run: '/view home' },
-    { k: '图谱', d: '知识库结构导航', run: '/view graph' },
+    { k: '图谱', d: '知识图谱（类型化/局部图/关系探索）', run: '/view graph' },
     { k: '自动化', d: '自动化控制 + 审核 + 运营数据', run: '/view automation' },
     { k: '看板', d: '任务看板', run: '/view board' },
     { k: '市场', d: '应用市场（SkillHub 管理端）', run: '/view market' },

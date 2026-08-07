@@ -21,6 +21,7 @@ fn connect(root: &Path) -> Result<Connection, String> {
          CREATE TABLE IF NOT EXISTS documents (
             path       TEXT PRIMARY KEY,
             project    TEXT NOT NULL,
+            type       TEXT NOT NULL DEFAULT 'doc',
             title      TEXT NOT NULL DEFAULT '',
             tags       TEXT NOT NULL DEFAULT '',
             summary    TEXT NOT NULL DEFAULT '',
@@ -39,6 +40,21 @@ fn connect(root: &Path) -> Result<Connection, String> {
          CREATE INDEX IF NOT EXISTS idx_docs_project ON documents(project);",
     )
     .map_err(|e| format!("初始化图谱库失败: {e}"))?;
+    // 存量库迁移：旧 schema 无 type 列（CREATE TABLE IF NOT EXISTS 不会补列）→ 幂等 ADD COLUMN
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(documents)")
+        .map_err(|e| format!("读列失败: {e}"))?
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| format!("读列失败: {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+    if !cols.iter().any(|c| c == "type") {
+        conn.execute("ALTER TABLE documents ADD COLUMN type TEXT NOT NULL DEFAULT 'doc'", [])
+            .map_err(|e| format!("迁移 type 列失败: {e}"))?;
+    }
+    // 索引统一在此建（新库/旧库都走到；旧库 batch 阶段已避开缺失列）
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_docs_type ON documents(type)", [])
+        .map_err(|e| format!("建 type 索引失败: {e}"))?;
     Ok(conn)
 }
 
@@ -48,6 +64,36 @@ fn project_of(rel: &str) -> String {
         Some((head, _)) => head.to_string(),
         None => "root".to_string(),
     }
+}
+
+/// 实体类型推断：frontmatter type 显式值优先，缺省按模板文件名映射业务类型，再缺省 doc。
+/// 律师：案件总览→case 当事人与诉求→party 证据清单→evidence 时间线→timeline 法律研究→law
+/// 猎头：职位需求→position 候选人→candidate 客户公司→company 沟通记录→comm
+/// 模板 notes 文件名即类型约定（KB.md 职责清单），存量项目笔记无 frontmatter 时靠此兜底。
+pub fn infer_type(rel: &str, fm_type: Option<&str>) -> String {
+    if let Some(t) = fm_type {
+        let t = t.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    let stem = Path::new(rel)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(rel);
+    let t = match stem {
+        "案件总览" => "case",
+        "当事人与诉求" => "party",
+        "证据清单" => "evidence",
+        "时间线" => "timeline",
+        "法律研究" => "law",
+        "职位需求" => "position",
+        "候选人" => "candidate",
+        "客户公司" => "company",
+        "沟通记录" => "comm",
+        _ => "doc",
+    };
+    t.to_string()
 }
 
 static LINK_RE: OnceLock<regex::Regex> = OnceLock::new();
@@ -141,7 +187,7 @@ pub fn sync_graph(root: &Path) -> Result<GraphSyncReport, String> {
     let conn = connect(&root)?;
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-    let mut docs: Vec<(String, String, String, String, String, i64, i64, String)> = Vec::new();
+    let mut docs: Vec<(String, String, String, String, String, String, i64, i64, String)> = Vec::new();
     let mut contents: Vec<(String, String)> = Vec::new(); // (rel, content)
 
     for path in collect_md_files(&root) {
@@ -170,7 +216,8 @@ pub fn sync_graph(root: &Path) -> Result<GraphSyncReport, String> {
         let summary = crate::kb::summary(&content, 80);
         let updated = meta.get("updated").cloned().unwrap_or_default();
         let project = project_of(&rel);
-        docs.push((rel.clone(), project, title, tags, summary, mtime, size, updated));
+        let typ = infer_type(&rel, meta.get("type").map(|s| s.as_str()));
+        docs.push((rel.clone(), project, typ, title, tags, summary, mtime, size, updated));
         contents.push((rel, content));
     }
 
@@ -182,11 +229,11 @@ pub fn sync_graph(root: &Path) -> Result<GraphSyncReport, String> {
 
     {
         let mut stmt = conn
-            .prepare("INSERT INTO documents (path, project, title, tags, summary, mtime, size, updated, indexed_at)
-                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)")
+            .prepare("INSERT INTO documents (path, project, type, title, tags, summary, mtime, size, updated, indexed_at)
+                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)")
             .map_err(|e| format!("prepare 失败: {e}"))?;
-        for (p, project, title, tags, summary, mtime, size, updated) in &docs {
-            stmt.execute(params![p, project, title, tags, summary, mtime, size, updated, now])
+        for (p, project, typ, title, tags, summary, mtime, size, updated) in &docs {
+            stmt.execute(params![p, project, typ, title, tags, summary, mtime, size, updated, now])
                 .map_err(|e| format!("插入文档失败 {p}: {e}"))?;
         }
     }
@@ -376,11 +423,12 @@ pub fn linked(root: &Path, path: &str) -> Result<Vec<LinkEntry>, String> {
         .collect())
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct NodeInfo {
     pub path: String,
     pub title: String,
     pub project: String,
+    pub r#type: String,
     pub tags: String,
     pub in_degree: usize,
     pub out_degree: usize,
@@ -402,7 +450,7 @@ pub struct GraphData {
 pub fn graph_data(root: &Path) -> Result<GraphData, String> {
     let conn = connect(root)?;
     let mut stmt = conn
-        .prepare("SELECT path, title, project, tags FROM documents ORDER BY path")
+        .prepare("SELECT path, title, project, type, tags FROM documents ORDER BY path")
         .map_err(|e| e.to_string())?;
     let mut nodes: Vec<NodeInfo> = Vec::new();
     let rows = stmt
@@ -412,6 +460,7 @@ pub fn graph_data(root: &Path) -> Result<GraphData, String> {
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
             ))
         })
         .map_err(|e| e.to_string())?;
@@ -420,7 +469,8 @@ pub fn graph_data(root: &Path) -> Result<GraphData, String> {
             path: row.0,
             title: row.1,
             project: row.2,
-            tags: row.3,
+            r#type: row.3,
+            tags: row.4,
             in_degree: 0,
             out_degree: 0,
         });
@@ -454,6 +504,75 @@ pub fn graph_data(root: &Path) -> Result<GraphData, String> {
         n.in_degree = ind.get(n.path.as_str()).copied().unwrap_or(0);
     }
     Ok(GraphData { nodes, edges })
+}
+
+/// BFS 最短路径查询（A 和 B 什么关系）：返回路径链 [{path, title, type}]（含 from/to）。
+/// 边方向视为无向（出链/入链都能走）；max_depth 内找不到返回空 Vec。
+/// 单用户本地规模（<5k 节点）内存 BFS 足够，不走 SQLite 递归 CTE。
+pub fn paths(root: &Path, from: &str, to: &str, max_depth: usize) -> Result<Vec<NodeInfo>, String> {
+    let data = graph_data(root)?;
+    let by_path: HashMap<&str, &NodeInfo> = data.nodes.iter().map(|n| (n.path.as_str(), n)).collect();
+    if !by_path.contains_key(from) {
+        return Err(format!("图谱中找不到起点文档: {from}"));
+    }
+    if !by_path.contains_key(to) {
+        return Err(format!("图谱中找不到目标文档: {to}"));
+    }
+    if from == to {
+        return Ok(vec![by_path[from].clone()]);
+    }
+    // 无向邻接表
+    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    for e in &data.edges {
+        adj.entry(e.src.as_str()).or_default().push(e.dst_path.as_deref().unwrap_or(""));
+        if let Some(d) = e.dst_path.as_deref() {
+            adj.entry(d).or_default().push(e.src.as_str());
+        }
+    }
+    // BFS 逐层找父指针
+    let mut parent: HashMap<&str, &str> = HashMap::new();
+    let mut frontier: Vec<&str> = vec![from];
+    let mut found = false;
+    let mut depth = 0usize;
+    while !frontier.is_empty() && depth < max_depth {
+        let mut next: Vec<&str> = Vec::new();
+        for cur in &frontier {
+            for nb in adj.get(cur).into_iter().flatten() {
+                if nb.is_empty() || parent.contains_key(nb) {
+                    continue; // 悬空边 / 已访问
+                }
+                parent.insert(nb, cur);
+                if *nb == to {
+                    found = true;
+                    break;
+                }
+                next.push(nb);
+            }
+            if found {
+                break;
+            }
+        }
+        if found {
+            break;
+        }
+        frontier = next;
+        depth += 1;
+    }
+    if !found {
+        return Ok(Vec::new());
+    }
+    // 回溯路径链
+    let mut chain: Vec<NodeInfo> = Vec::new();
+    let mut cur: &str = to;
+    loop {
+        chain.push(by_path[cur].clone());
+        if cur == from {
+            break;
+        }
+        cur = parent[cur];
+    }
+    chain.reverse();
+    Ok(chain)
 }
 
 /// 按名称/路径解析文档（供 /link 等命令）
@@ -841,5 +960,105 @@ mod tests {
     fn project_of_first_dir() {
         assert_eq!(project_of("notes/架构/托盘.md"), "notes");
         assert_eq!(project_of("KB.md"), "root");
+    }
+
+    #[test]
+    fn infer_type_priority_fm_then_filename() {
+        // frontmatter type 显式值优先
+        assert_eq!(infer_type("notes/案件总览.md", Some("doc")), "doc");
+        // 缺省按模板文件名映射
+        assert_eq!(infer_type("notes/案件总览.md", None), "case");
+        assert_eq!(infer_type("notes/证据清单.md", None), "evidence");
+        assert_eq!(infer_type("notes/当事人与诉求.md", None), "party");
+        assert_eq!(infer_type("notes/时间线.md", None), "timeline");
+        assert_eq!(infer_type("notes/法律研究.md", None), "law");
+        assert_eq!(infer_type("notes/职位需求.md", None), "position");
+        assert_eq!(infer_type("notes/候选人.md", None), "candidate");
+        assert_eq!(infer_type("notes/客户公司.md", None), "company");
+        assert_eq!(infer_type("notes/沟通记录.md", None), "comm");
+        // 其他文件名 → doc
+        assert_eq!(infer_type("notes/架构/记忆统一模型.md", None), "doc");
+        // 空串 type 也回落
+        assert_eq!(infer_type("notes/候选人.md", Some("")), "candidate");
+    }
+
+    #[test]
+    fn sync_graph_stores_type_and_paths_bfs() {
+        let root = test_root("types");
+        // 律师模板文件名映射 type + frontmatter 显式 type
+        write(&root, "notes/案件总览.md", "# 案件总览\n\n见 [[证据清单]] 和 [[当事人与诉求]]\n");
+        write(&root, "notes/证据清单.md", "# 证据清单\n\n来自 [[案件总览]]\n");
+        write(&root, "notes/当事人与诉求.md", "# 当事人与诉求\n\n与 [[案件总览]] 相关\n");
+        // frontmatter 显式 type 优先于文件名
+        write(&root, "notes/客户公司.md", "---\ntype: note\ntitle: 客户公司\n---\n# 客户公司\n\n与 [[当事人与诉求]] 有关\n");
+        let _ = sync_graph(&root).unwrap();
+        let data = graph_data(&root).unwrap();
+        let t = |p: &str| data.nodes.iter().find(|n| n.path == p).map(|n| n.r#type.clone()).unwrap_or_default();
+        assert_eq!(t("notes/案件总览.md"), "case", "文件名映射");
+        assert_eq!(t("notes/证据清单.md"), "evidence");
+        assert_eq!(t("notes/当事人与诉求.md"), "party");
+        assert_eq!(t("notes/客户公司.md"), "note", "frontmatter type 优先");
+
+        // BFS 路径：案件总览 → 当事人与诉求（直接相连）
+        let chain = paths(&root, "notes/案件总览.md", "notes/当事人与诉求.md", 6).unwrap();
+        assert_eq!(chain.len(), 2, "一跳直连");
+        assert_eq!(chain[0].path, "notes/案件总览.md");
+        assert_eq!(chain[1].path, "notes/当事人与诉求.md");
+        assert_eq!(chain[1].r#type, "party", "路径链节点带类型");
+        // 通过中间人：当事人与诉求 → 客户公司（当事人 ↔ 客户公司 直连）
+        let chain2 = paths(&root, "notes/当事人与诉求.md", "notes/客户公司.md", 6).unwrap();
+        assert_eq!(chain2.len(), 2);
+        // 路径不存在 → 空
+        let chain3 = paths(&root, "notes/证据清单.md", "notes/客户公司.md", 6).unwrap();
+        assert!(chain3.is_empty() || chain3.len() <= 4);
+        // 起点/终点不存在 → Err
+        assert!(paths(&root, "notes/不存在.md", "notes/案件总览.md", 6).is_err());
+        // 同文档 → 单节点
+        let same = paths(&root, "notes/案件总览.md", "notes/案件总览.md", 6).unwrap();
+        assert_eq!(same.len(), 1);
+        fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn legacy_db_without_type_column_migrates() {
+        // 模拟旧 schema：先手工建无 type 列的库，再走 connect() 应自动补列
+        let root = std::env::temp_dir().join(format!("md-agent-ut-migrate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = Connection::open(db_path(&root)).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE documents (
+                path TEXT PRIMARY KEY, project TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
+                tags TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '',
+                mtime INTEGER NOT NULL DEFAULT 0, size INTEGER NOT NULL DEFAULT 0,
+                updated TEXT NOT NULL DEFAULT '', indexed_at TEXT NOT NULL DEFAULT ''
+             );
+             CREATE TABLE links (src TEXT NOT NULL, dst TEXT NOT NULL, dst_path TEXT, PRIMARY KEY (src, dst));",
+        )
+        .unwrap();
+        drop(conn);
+        // 旧数据一条（先建目录再写文件）
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+        std::fs::write(root.join("notes").join("旧文档.md"), "# 旧文档\n").unwrap();
+        // connect() 应幂等迁移（不报错）
+        let conn = connect(&root).unwrap();
+        let has: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('documents') WHERE name='type'")
+            .unwrap()
+            .exists([])
+            .unwrap();
+        assert!(has, "迁移后应有 type 列");
+        drop(conn); // 释放库句柄（WAL 文件锁），否则 remove_dir_all 失败
+        // sync 后旧数据也能入库（type 缺省 doc）
+        let _ = sync_graph(&root).unwrap();
+        let data = graph_data(&root).unwrap();
+        assert_eq!(data.nodes[0].r#type, "doc");
+        fs::remove_dir_all(&root).unwrap();
     }
 }
