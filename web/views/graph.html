@@ -2,19 +2,21 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>知识库结构导航</title>
+<title>知识图谱</title>
 <style>
   body { margin: 0; background: var(--bg3); color: var(--fg);
          font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; overflow: hidden; }
   #wrap { display: flex; height: 100vh; }
-  #treebox { flex: 1; min-width: 0; overflow: auto; padding: 14px; box-sizing: border-box; }
+  #main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #treebox { flex: 1; min-height: 0; overflow: auto; padding: 14px; box-sizing: border-box; }
   #side { width: 300px; padding: 14px; border-left: 1px solid var(--border);
           overflow: auto; font-size: 12px; box-sizing: border-box; background: var(--bg4); }
   h1 { font-size: 14px; color: var(--rose); margin: 0; }
-  #head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-  #refresh { background: var(--border); color: var(--fg); border: none; border-radius: 6px;
-             padding: 4px 10px; font-size: 12px; cursor: pointer; }
-  #refresh:hover { background: var(--border2); }
+  #head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  #head h1 { margin-right: auto; }
+  #head button { background: var(--border); color: var(--fg); border: none; border-radius: 6px;
+                 padding: 4px 10px; font-size: 12px; cursor: pointer; }
+  #head button:hover { background: var(--border2); }
   #stats div { margin: 3px 0; }
 
   /* 文件树 */
@@ -43,24 +45,70 @@
   #detail ul { margin: 2px 0 0; padding-left: 16px; }
   #detail li { cursor: pointer; }
   #detail li:hover { color: var(--accent); }
-  #orphans { margin-top: 12px; color: var(--danger); }
-  #orphans ul { margin: 4px 0 0; padding-left: 16px; }
-  #orphans li { cursor: pointer; }
+
+  /* 健康度工作台 */
+  #health { margin-top: 12px; }
+  #health .h-sec { margin-bottom: 8px; }
+  #health .h-sec > div:first-child { color: var(--muted); margin-bottom: 2px; }
+  #health .h-sec b { color: var(--warn); }
+  #health ul { margin: 0; padding-left: 16px; }
+  #health li { cursor: pointer; color: var(--fg2); }
+  #health li:hover { color: var(--accent); }
+  #health .h-ok { color: var(--ok); }
+
+  /* 局部图（canvas 力导向） */
+  #graph-panel { flex: none; border-bottom: 1px solid var(--border); background: var(--bg3); }
+  #graph-panel.hidden { display: none; }
+  #gp-head { display: flex; align-items: center; gap: 8px; padding: 6px 14px 2px; font-size: 12px; }
+  #gp-head b { color: var(--accent); }
+  #gp-close { margin-left: auto; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 13px; }
+  #gp-close:hover { color: var(--danger); }
+  #gp-controls { display: flex; align-items: center; gap: 8px; padding: 0 14px 4px; font-size: 11px; color: var(--muted); }
+  #gp-controls input[type=range] { width: 120px; accent-color: var(--accent); }
+  #graph-panel canvas { display: block; width: 100%; height: 220px; cursor: grab; }
+  #graph-panel canvas:active { cursor: grabbing; }
+  #gp-hint { padding: 0 14px 6px; font-size: 10.5px; color: var(--muted2, #7f849c); }
 </style>
 </head>
 <body>
 <div id="wrap">
-  <div id="treebox"><div id="head"><h1>知识库结构导航</h1><button id="refresh" title="重新加载图谱">↻ 刷新</button></div><div id="tree">加载中…</div></div>
+  <div id="main">
+    <div id="treebox">
+      <div id="head">
+        <h1>知识图谱</h1>
+        <button id="gfilter-orphans" title="过滤：只看孤立文档">孤立</button>
+        <button id="gfilter-hang" title="过滤：只看含悬空链接的文档">悬空</button>
+        <button id="refresh" title="重新加载图谱">↻ 刷新</button>
+      </div>
+      <div id="tree">加载中…</div>
+    </div>
+    <!-- 局部图（点击文档聚焦，canvas 力导向） -->
+    <div id="graph-panel" class="hidden">
+      <div id="gp-head">
+        <b id="gp-title">局部图</b>
+        <span id="gp-meta"></span>
+        <button id="gp-close" title="关闭局部图">×</button>
+      </div>
+      <div id="gp-controls">
+        <label>深度 <input type="range" id="gp-depth" min="1" max="2" step="1" value="1"></label>
+        <span id="gp-nodes"></span>
+        <span style="margin-left:auto">拖拽画布 · 滚轮缩放 · 双击节点打开文档</span>
+      </div>
+      <canvas id="gp-canvas"></canvas>
+      <div id="gp-hint">中心节点 = 当前聚焦文档；一/二跳邻居按出链入链展开，节点大小 ∝ 连接数</div>
+    </div>
+  </div>
   <div id="side">
     <div id="stats"></div>
     <div id="detail"></div>
-    <div id="orphans"></div>
+    <div id="health"></div>
   </div>
 </div>
 <script>
   var COLORS = ['#89b4fa', '#a6e3a1', '#f9e2af', '#f38ba8', '#cba6f7', '#94e2d5', '#fab387', '#eba0ac'];
 
-  var state = { nodes: [], edges: [], pcolor: {}, byPath: {}, sel: null };
+  var state = { nodes: [], edges: [], pcolor: {}, byPath: {}, sel: null, filter: null };
+  var gfilter = { orphans: false, hang: false };
 
   function nodeColor(p) {
     if (!(p in state.pcolor)) state.pcolor[p] = COLORS[Object.keys(state.pcolor).length % COLORS.length];
@@ -70,13 +118,194 @@
     var i = COLORS.indexOf(nodeColor(p));
     return 'dot p' + i;
   }
+  function isOrphan(n) { return n.in_degree === 0 && n.out_degree === 0; }
+  function hasHang(n) {
+    return state.edges.some(function (e) { return e.src === n.path && !e.dst_path; });
+  }
+  function passFilter(n) {
+    if (gfilter.orphans && !isOrphan(n)) return false;
+    if (gfilter.hang && !hasHang(n)) return false;
+    return true;
+  }
 
-  // 选中文档 → 详情（出链/入链/关联簇）
+  // ---------- 局部图（力导向，canvas） ----------
+  var gp = {
+    nodes: [], edges: [], center: null, depth: 1,
+    w: 0, h: 220, scale: 1, ox: 0, oy: 0, dragging: false, lx: 0, ly: 0,
+  };
+  var gpCanvas = document.getElementById('gp-canvas');
+  var gpCtx = gpCanvas.getContext('2d');
+  var gpPanel = document.getElementById('graph-panel');
+  var gpTimer = null;
+
+  function openLocalGraph(path) {
+    var n = state.byPath[path];
+    if (!n) return;
+    gp.center = path;
+    gp.depth = parseInt(document.getElementById('gp-depth').value, 10) || 1;
+    buildLocalGraph();
+    gpPanel.classList.remove('hidden');
+    gpCanvas.scrollIntoView({ block: 'nearest' });
+    scheduleGpFrame();
+  }
+  function closeLocalGraph() {
+    gpPanel.classList.add('hidden');
+    gp.nodes = []; gp.edges = []; gp.center = null;
+  }
+  // 一/二跳子图：中心 + 出链邻居 + 入链邻居（深度 2 时再展开一层）
+  function buildLocalGraph() {
+    var nodes = {}, edges = [];
+    var add = function (p) { if (!(p in nodes) && state.byPath[p]) nodes[p] = { path: p, x: 0, y: 0, hop: 0 }; };
+    add(gp.center);
+    var seen = {};
+    function expand(p, hop, maxHop) {
+      if (hop > maxHop || seen[p]) return;
+      seen[p] = true;
+      var out = state.edges.filter(function (e) { return e.src === p && e.dst_path; });
+      out.forEach(function (e) {
+        edges.push({ s: p, t: e.dst_path });
+        add(e.dst_path);
+        if (hop + 1 <= maxHop) expand(e.dst_path, hop + 1, maxHop);
+      });
+      var inc = state.edges.filter(function (e) { return e.dst_path === p; });
+      inc.forEach(function (e) {
+        edges.push({ s: e.src, t: p });
+        add(e.src);
+        if (hop + 1 <= maxHop) expand(e.src, hop + 1, maxHop);
+      });
+    }
+    expand(gp.center, 0, gp.depth);
+    gp.nodes = Object.keys(nodes).map(function (k) { return nodes[k]; });
+    gp.edges = edges.filter(function (e, i, arr) {
+      return arr.findIndex(function (x) { return x.s === e.s && x.t === e.t; }) === i;
+    });
+    // 节点大小 ∝ 连接数
+    var conn = {};
+    gp.nodes.forEach(function (n) { conn[n.path] = 0; });
+    gp.edges.forEach(function (e) { conn[e.s] = (conn[e.s] || 0) + 1; conn[e.t] = (conn[e.t] || 0) + 1; });
+    gp.nodes.forEach(function (n) { n.conn = conn[n.path] || 0; });
+    document.getElementById('gp-title').textContent = state.byPath[gp.center].title || gp.center.split('/').pop();
+    document.getElementById('gp-meta').textContent = gp.nodes.length + ' 节点 · ' + gp.edges.length + ' 边';
+    document.getElementById('gp-nodes').textContent = '';
+    layoutGp();
+  }
+  // 圆形 + 同心层布局（确定性，免力导向抖动；一/二跳分层）
+  function layoutGp() {
+    var center = gp.nodes.find(function (n) { return n.path === gp.center; });
+    if (!center) return;
+    center.x = 0; center.y = 0;
+    var hops = {};
+    gp.nodes.forEach(function (n) { hops[n.path] = n.path === gp.center ? 0 : 1; });
+    // 用边传播跳数（BFS，从中心）
+    var changed = true;
+    while (changed) {
+      changed = false;
+      gp.edges.forEach(function (e) {
+        var a = hops[e.s], b = hops[e.t];
+        if (a + 1 < b) { hops[e.t] = a + 1; changed = true; }
+        if (b + 1 < a) { hops[e.s] = b + 1; changed = true; }
+      });
+    }
+    var layers = {};
+    gp.nodes.forEach(function (n) {
+      var h = hops[n.path] || 0;
+      (layers[h] = layers[h] || []).push(n);
+    });
+    var R = 60;
+    Object.keys(layers).forEach(function (h) {
+      var arr = layers[h];
+      if (h === '0') return;
+      var r = R * parseInt(h, 10);
+      arr.forEach(function (n, i) {
+        var ang = (i / arr.length) * Math.PI * 2 - Math.PI / 2;
+        n.x = Math.cos(ang) * r;
+        n.y = Math.sin(ang) * r;
+      });
+    });
+    gp.scale = 1; gp.ox = 0; gp.oy = 0;
+  }
+  function gpNodeR(n) { return n.path === gp.center ? 10 : 4 + Math.min(8, (n.conn || 0) * 1.5); }
+  function gpRender() {
+    var dpr = window.devicePixelRatio || 1;
+    var w = gpCanvas.clientWidth || 600, h = 220;
+    gpCanvas.width = w * dpr; gpCanvas.height = h * dpr;
+    gpCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    gpCtx.clearRect(0, 0, w, h);
+    var cx = w / 2 + gp.ox, cy = h / 2 + gp.oy;
+    gpCtx.save();
+    gpCtx.translate(cx, cy);
+    gpCtx.scale(gp.scale, gp.scale);
+    gp.edges.forEach(function (e) {
+      var a = gp.nodes.find(function (n) { return n.path === e.s; });
+      var b = gp.nodes.find(function (n) { return n.path === e.t; });
+      if (!a || !b) return;
+      gpCtx.strokeStyle = 'rgba(137,180,250,0.35)';
+      gpCtx.lineWidth = 1;
+      gpCtx.beginPath(); gpCtx.moveTo(a.x, a.y); gpCtx.lineTo(b.x, b.y); gpCtx.stroke();
+    });
+    gp.nodes.forEach(function (n) {
+      var isC = n.path === gp.center;
+      gpCtx.beginPath();
+      gpCtx.arc(n.x, n.y, gpNodeR(n), 0, Math.PI * 2);
+      gpCtx.fillStyle = isC ? '#f38ba8' : nodeColor(n.path);
+      gpCtx.globalAlpha = isC ? 1 : 0.85;
+      gpCtx.fill();
+      gpCtx.globalAlpha = 1;
+      if (n.path !== gp.center) {
+        gpCtx.fillStyle = '#cdd6f4';
+        gpCtx.font = '9px Consolas, monospace';
+        gpCtx.textAlign = 'center';
+        gpCtx.fillText((state.byPath[n.path].title || n.path.split('/').pop()).slice(0, 10), n.x, n.y - gpNodeR(n) - 3);
+      }
+    });
+    gpCtx.restore();
+  }
+  function scheduleGpFrame() {
+    clearTimeout(gpTimer);
+    gpTimer = setTimeout(gpRender, 30);
+  }
+  // 交互：拖拽平移 + 滚轮缩放 + 双击节点打开文档
+  var gpDragStart = null;
+  gpCanvas.addEventListener('mousedown', function (e) {
+    gp.dragging = true;
+    gpDragStart = { x: e.clientX, y: e.clientY, ox: gp.ox, oy: gp.oy };
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', function (e) {
+    if (!gp.dragging || gpPanel.classList.contains('hidden') || !gpDragStart) return;
+    gp.ox = gpDragStart.ox + (e.clientX - gpDragStart.x);
+    gp.oy = gpDragStart.oy + (e.clientY - gpDragStart.y);
+    scheduleGpFrame();
+  });
+  window.addEventListener('mouseup', function () { gp.dragging = false; gpDragStart = null; });
+  gpCanvas.addEventListener('wheel', function (e) {
+    e.preventDefault();
+    gp.scale = Math.max(0.4, Math.min(3, gp.scale * (e.deltaY < 0 ? 1.1 : 0.9)));
+    scheduleGpFrame();
+  }, { passive: false });
+  gpCanvas.addEventListener('dblclick', function (e) {
+    var r = gpCanvas.getBoundingClientRect();
+    var x = (e.clientX - r.left - r.width / 2 - gp.ox) / gp.scale;
+    var y = (e.clientY - r.top - r.height / 2 - gp.oy) / gp.scale;
+    var hit = gp.nodes.find(function (n) {
+      var dx = n.x - x, dy = n.y - y;
+      return dx * dx + dy * dy <= (gpNodeR(n) + 4) * (gpNodeR(n) + 4);
+    });
+    if (hit && hit.path !== gp.center) { openLocalGraph(hit.path); selectDoc(hit.path); }
+  });
+  document.getElementById('gp-close').addEventListener('click', closeLocalGraph);
+  document.getElementById('gp-depth').addEventListener('input', function () {
+    gp.depth = parseInt(this.value, 10) || 1;
+    if (gp.center) buildLocalGraph();
+  });
+
+  // ---------- 详情 + 选中文档 ----------
   async function showDetail(path) {
     var d = document.getElementById('detail');
     var n = state.byPath[path];
     if (!n) { d.style.display = 'none'; return; }
-    var orphan = n.in_degree === 0 && n.out_degree === 0;
+    var orphan = isOrphan(n);
+    var hang = hasHang(n);
     d.style.display = 'block';
     d.innerHTML =
       '<b>' + (n.title || path.split('/').pop()) + '</b><br>' +
@@ -84,7 +313,10 @@
       '项目: ' + n.project + '<br>' +
       '标签: ' + (n.tags || '-') + '<br>' +
       '入链: ' + n.in_degree + ' / 出链: ' + n.out_degree +
-      (orphan ? '<br><span style="color:#f38ba8">⚠ 孤立文档：无入链也无出链，可 /link 补链</span>' : '');
+      (orphan ? '<br><span style="color:#f38ba8">⚠ 孤立文档：无入链也无出链</span>' : '') +
+      (hang ? '<br><span style="color:#f9e2af">⚠ 含悬空链接</span>' : '') +
+      '<div class="sec"><button id="btn-local" style="background:var(--border);color:var(--fg);border:none;border-radius:5px;padding:3px 10px;font-size:11px;cursor:pointer">🕸 局部图聚焦</button></div>';
+    document.getElementById('btn-local').addEventListener('click', function () { openLocalGraph(path); });
     // 出链（含悬空）
     var out = state.edges.filter(function (e) { return e.src === path; });
     if (out.length) {
@@ -124,10 +356,13 @@
     showDetail(path);
   }
 
-  // 渲染文件树（目录层级 → 缩进）
+  // ---------- 渲染文件树（过滤感知） ----------
   function renderTree() {
     var root = {};
+    var visible = {};
     state.nodes.forEach(function (n) {
+      if (!passFilter(n)) return;
+      visible[n.path] = true;
       var parts = n.path.split('/');
       var cur = root;
       for (var i = 0; i < parts.length - 1; i++) {
@@ -139,7 +374,7 @@
     });
     var box = document.getElementById('tree');
     box.innerHTML = '';
-    function walk(node, container, depth) {
+    function walk(node, container, depth, pathPrefix) {
       if (node.dirs) {
         Object.keys(node.dirs).sort().forEach(function (d) {
           var row = document.createElement('div');
@@ -160,14 +395,14 @@
           });
           container.appendChild(row);
           container.appendChild(kids);
-          walk(node.dirs[d], kids, depth + 1);
+          walk(node.dirs[d], kids, depth + 1, pathPrefix + d + '/');
         });
       }
       if (node.files) {
         node.files.sort(function (a, b) { return a.path < b.path ? -1 : 1; });
         node.files.forEach(function (n) {
-          var orphan = n.in_degree === 0 && n.out_degree === 0;
-          var hang = state.edges.some(function (e) { return e.src === n.path && !e.dst_path; });
+          var orphan = isOrphan(n);
+          var hang = hasHang(n);
           var row = document.createElement('div');
           row.className = 'file-line' + (orphan ? ' orphan' : '');
           row.setAttribute('data-path', n.path);
@@ -190,30 +425,91 @@
         });
       }
     }
-    walk(root, box, 0);
-    // 统计
+    walk(root, box, 0, '');
+    if (Object.keys(visible).length === 0 && state.nodes.length) {
+      box.innerHTML = '<div style="color:#7f849c;padding:10px">（过滤后无匹配文档）</div>';
+    }
+    renderStats();
+  }
+
+  function renderStats() {
     var stats = document.getElementById('stats');
     var dangling = state.edges.length - state.edges.filter(function (e) { return e.dst_path; }).length;
+    var orphans = state.nodes.filter(isOrphan);
+    var single = state.nodes.filter(function (n) { return (n.in_degree + n.out_degree) === 1; });
+    var filTxt = (gfilter.orphans ? ' · 过滤:孤立' : '') + (gfilter.hang ? ' · 过滤:悬空' : '');
     stats.innerHTML =
       '<div>文档: <b>' + state.nodes.length + '</b></div>' +
       '<div>链接: <b>' + state.edges.length + '</b>（悬空 ' + dangling + '）</div>' +
-      '<div style="margin-top:6px;color:#7f849c">点击左侧文档查看出链/入链</div>';
-    // 孤立列表
-    var orphans = state.nodes.filter(function (n) { return n.in_degree === 0 && n.out_degree === 0; });
-    var ol = document.getElementById('orphans');
-    ol.innerHTML = '';
-    if (orphans.length) {
-      ol.innerHTML = '<div><b>孤立文档 (' + orphans.length + ')</b></div><ul>';
-      orphans.forEach(function (n) {
-        var li = document.createElement('li');
-        li.textContent = n.path;
-        li.addEventListener('click', function () { selectDoc(n.path); });
-        ol.appendChild(li);
-      });
-      ol.innerHTML += '</ul>';
-    }
+      '<div>孤立: <b style="color:#f38ba8">' + orphans.length + '</b> · 单连接: ' + single.length + '</div>' +
+      (filTxt ? '<div style="color:#f9e2af">' + filTxt + '</div>' : '') +
+      '<div style="margin-top:6px;color:#7f849c">点击文档查看详情 / 局部图聚焦</div>';
   }
 
+  // ---------- 健康度工作台 ----------
+  function renderHealth() {
+    var h = document.getElementById('health');
+    var danglingEdges = state.edges.filter(function (e) { return !e.dst_path; });
+    var orphans = state.nodes.filter(isOrphan);
+    var single = state.nodes.filter(function (n) { return (n.in_degree + n.out_degree) === 1; });
+    var dup = {};
+    state.nodes.forEach(function (n) {
+      var t = (n.title || n.path.split('/').pop());
+      dup[t] = (dup[t] || 0) + 1;
+    });
+    var dups = Object.keys(dup).filter(function (t) { return dup[t] > 1; });
+    var html = '<div style="color:var(--muted);margin-bottom:6px;font-weight:600">🩺 结构健康度</div>';
+    html += '<div class="h-sec"><div>悬空链接 <b>' + danglingEdges.length + '</b></div>';
+    if (!danglingEdges.length) html += '<div class="h-ok">✓ 无</div>';
+    else {
+      html += '<ul>';
+      danglingEdges.slice(0, 12).forEach(function (e) {
+        html += '<li data-path="' + escAttr(e.src) + '" data-jump="1">' + esc(e.src) + ' → [[?]]</li>';
+      });
+      if (danglingEdges.length > 12) html += '<li style="color:#7f849c">…共 ' + danglingEdges.length + ' 条</li>';
+      html += '</ul>';
+    }
+    html += '</div>';
+    html += '<div class="h-sec"><div>孤立文档 <b style="color:#f38ba8">' + orphans.length + '</b></div>';
+    if (!orphans.length) html += '<div class="h-ok">✓ 无</div>';
+    else {
+      html += '<ul>';
+      orphans.slice(0, 12).forEach(function (n) {
+        html += '<li data-path="' + escAttr(n.path) + '" data-jump="1">' + esc(n.path) + '</li>';
+      });
+      if (orphans.length > 12) html += '<li style="color:#7f849c">…共 ' + orphans.length + ' 个</li>';
+      html += '</ul>';
+    }
+    html += '</div>';
+    html += '<div class="h-sec"><div>单连接（入链或出链仅 1） <b>' + single.length + '</b></div>';
+    if (!single.length) html += '<div class="h-ok">✓ 无</div>';
+    else {
+      html += '<ul>';
+      single.slice(0, 8).forEach(function (n) {
+        html += '<li data-path="' + escAttr(n.path) + '" data-jump="1">' + esc(n.path) + '</li>';
+      });
+      if (single.length > 8) html += '<li style="color:#7f849c">…共 ' + single.length + ' 个</li>';
+      html += '</ul>';
+    }
+    html += '</div>';
+    html += '<div class="h-sec"><div>重复标题 <b>' + dups.length + '</b></div>';
+    if (!dups.length) html += '<div class="h-ok">✓ 无</div>';
+    else html += '<ul>' + dups.slice(0, 8).map(function (t) { return '<li>' + esc(t) + ' ×' + dup[t] + '</li>'; }).join('') + '</ul>';
+    html += '</div>';
+    h.innerHTML = html;
+    h.querySelectorAll('li[data-path]').forEach(function (li) {
+      li.addEventListener('click', function () { selectDoc(li.dataset.path); });
+    });
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function escAttr(s) { return esc(s).replace(/"/g, '&quot;'); }
+
+  // ---------- 加载 ----------
   async function load() {
     var box = document.getElementById('tree');
     box.innerHTML = '<div style="color:#7f849c">加载中…</div>';
@@ -229,8 +525,22 @@
       return;
     }
     renderTree();
+    renderHealth();
   }
 
+  // 过滤按钮
+  document.getElementById('gfilter-orphans').addEventListener('click', function () {
+    gfilter.orphans = !gfilter.orphans;
+    this.style.background = gfilter.orphans ? 'var(--accent)' : 'var(--border)';
+    this.style.color = gfilter.orphans ? '#fff' : 'var(--fg)';
+    renderTree();
+  });
+  document.getElementById('gfilter-hang').addEventListener('click', function () {
+    gfilter.hang = !gfilter.hang;
+    this.style.background = gfilter.hang ? 'var(--accent)' : 'var(--border)';
+    this.style.color = gfilter.hang ? '#fff' : 'var(--fg)';
+    renderTree();
+  });
   document.getElementById('refresh').addEventListener('click', function () {
     this.disabled = true;
     load().catch(function (e) {

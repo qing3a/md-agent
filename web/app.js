@@ -10,7 +10,7 @@
   // 终端壳重做（demo 结构）：DOM 消息流替代 xterm（stream.js），接口保持 writeln/write/onData 等
   const term = new StreamTerm();
   // 多行串安全写屏：行级渲染，统一换行（stream.js 已按 \n 分行，这里只做兼容规范化）
-  // DeepSeek 式原生 textarea：输入事件同步 line（无字符流事件）；草稿防抖落盘；打字计入活动（30min 归档判定）
+  // DeepSeek 式原生 textarea：输入事件同步 line（无字符流事件）；草稿防抖落盘；打字计入活动（7 天归档判定）
   term._input.addEventListener('input', () => {
     line = term._input.value;
     touchActivity();
@@ -78,6 +78,7 @@
   const MAX_SESSION_LOG = 50;
   let sessionLog = [];      // [{q, a, ts}]
   let sessionFile = null;   // 本会话固定文件名（首次落盘时定）
+  let sessionTaskId = null; // 任务驱动会话：绑定任务 id（新任务+对话=新会话；frontmatter 记 task 字段）
   let l0Timer = null;
   function sessionStamp() {
     const d = new Date();
@@ -92,9 +93,9 @@
     const body = sessionLog.map((s) =>
       '## Q: ' + String(s.q || '').slice(0, 300) + '\nA: ' + String(s.a || '(无回答/中断)').slice(0, 3000)
     ).join('\n\n');
-    // A1 会话实体化：frontmatter 元数据（title=首问截断 30 字 / status / count）——/api/sessions lite 枚举数据源
+    // A1 会话实体化：frontmatter 元数据（title=首问截断 30 字 / status / count / task=任务驱动会话）——/api/sessions lite 枚举数据源
     const title = String((sessionLog[0] && sessionLog[0].q) || '').slice(0, 30);
-    const content = '---\ntype: session\ndate: ' + localToday() + '\ntitle: ' + title + '\nstatus: ' + (archived ? 'archived' : 'active') + '\ncount: ' + sessionLog.length + '\n---\n\n# 会话记录\n\n' + body + '\n';
+    const content = '---\ntype: session\ndate: ' + localToday() + '\ntitle: ' + title + '\nstatus: ' + (archived ? 'archived' : 'active') + '\ncount: ' + sessionLog.length + (sessionTaskId ? '\ntask: ' + sessionTaskId : '') + '\n---\n\n# 会话记录\n\n' + body + '\n';
     return api('/api/file', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: sessionFile, content }),
@@ -179,22 +180,25 @@
     sessionFile = 'sessions/' + hit.id + '.md';
     sessionLog = parsed.map((p) => ({ q: p.q, a: p.a || '(无回答/中断)', ts: Date.now() })).slice(-MAX_SESSION_LOG);
     sessionArchived = false;
+    sessionTaskId = hit.task ? String(hit.task) : null; // 任务驱动会话：恢复时还原任务绑定
     // 切换对话页语义：清屏 + 渲染历史 Q/A 到消息流（像打开了那个对话页），继续提问即续写
     renderHistory(parsed);
-    term.writeln('\x1b[32m✓ 已切换至历史对话：' + (hit.title || hit.id) + '（' + parsed.length + ' 轮）\x1b[0m');
+    term.writeln('\x1b[32m✓ 已切换至历史对话：' + (hit.title || hit.id) + '（' + parsed.length + ' 轮）\x1b[0m' + (sessionTaskId ? ' · 任务 #' + sessionTaskId : ''));
     term.writeln('\x1b[90m继续提问即续写此对话；/clear 开始新对话\x1b[0m');
     if (topbarTitle) topbarTitle.textContent = String(hit.title || hit.id).slice(0, 30);
   }
 
   // ---------- 会话收尾归档（A4 自动归档 + B3 未决决策，合并落地） ----------
-  // 触发器：30min 空闲 / /clear（beforeunload 只标记 archived，不生成摘要）
-  const SESSION_IDLE_MS = 30 * 60 * 1000;
+  // 触发器：7 天无活动 / /clear（beforeunload 只标记 archived，不生成摘要）
+  // 调研结论：30min 是 Web 连接级空闲超时标准值，对本地知识库无意义；会话是持久线程，
+  // 归档阈值取 7 天（业界无自动收尾惯例，快照常驻、标记 + 摘要可逆可续）
+  const SESSION_IDLE_MS = 7 * 24 * 60 * 60 * 1000;
   let lastActivityAt = Date.now();
   let sessionArchived = false;
   function touchActivity() { lastActivityAt = Date.now(); }
   setInterval(() => {
     if (!sessionArchived && sessionLog.length && Date.now() - lastActivityAt > SESSION_IDLE_MS) {
-      term.writeln('\x1b[90m(30 分钟无操作 → 会话收尾归档)\x1b[0m');
+      term.writeln('\x1b[90m(7 天无操作 → 会话收尾归档)\x1b[0m');
       archiveSession();
     }
   }, 60000);
@@ -666,7 +670,7 @@
   }
 
   // ---------- 左侧会话边栏（DeepSeek 式：新建/搜索/恢复/归档；E1：标签条版改名 archiveSessionStatus，
-  //            不再覆盖 137 行完整归档版 archiveSession——/clear 与 30min 空闲归档随之复活） ----------
+  //            不再覆盖 137 行完整归档版 archiveSession——/clear 与 7 天空闲归档随之复活） ----------
   const sbList = document.getElementById('sb-list');
   const sbSearchEl = document.getElementById('sb-search');
   let sbSearchTxt = '';
@@ -1245,7 +1249,7 @@
 
   // 输入提交（原生 textarea：字符编辑/IME 组合由浏览器处理，line 经 input 事件同步；这里只接 Enter）
   term.onData((data) => {
-    touchActivity(); // A4 收尾归档：任意输入 = 活动（30min 空闲判定）
+    touchActivity(); // A4 收尾归档：任意输入 = 活动（7 天空闲判定）
     if (data === '\r') {
       const cmd = line.trim();
       submitCmd(cmd); // 统一提交入口（提交块 + run + finally showPrompt）
@@ -1389,7 +1393,7 @@
       case '/config': await cfg(); break;
       case '/remember': await remember(rest); break;
       case '/digest': await digest(rest.join(' ')); break;
-      case '/clear': if (sessionLog.length && !sessionArchived) archiveSession(); history = []; saveHistory(); Core.resetSectionCache(); sessionFile = null; sessionLog = []; sessionArchived = false; term.writeln('多轮记忆已清空（系统提示词分节缓存已重置）'); break;
+      case '/clear': if (sessionLog.length && !sessionArchived) archiveSession(); history = []; saveHistory(); Core.resetSectionCache(); sessionFile = null; sessionLog = []; sessionArchived = false; sessionTaskId = null; term.writeln('多轮记忆已清空（系统提示词分节缓存已重置）'); break;
       case '/link-all': await linkAll(); break;
       case '/fetch': await fetchCmd(rest); break;
       case '/page': await pageCmd(rest); break;
@@ -2209,6 +2213,22 @@
     term.writeln('\x1b[33m💾 已进入待审: \x1b[0m' + saved + '  （/view automation 审核 · /approve 确认 · /reject 丢弃）');
   }
 
+  // 任务驱动会话（调研结论：会话按任务/主题划分，不用空闲时钟切分）：
+  // 新建任务成功 → 若当前会话有对话则归档收尾 → 开新会话并绑定任务 id（frontmatter task: <id>）。
+  // 同一任务后续对话续用本会话；/resume 恢复时按 frontmatter task 还原绑定。
+  function beginTaskSession(taskId, title) {
+    if (sessionLog.length && !sessionArchived) archiveSession().catch(() => {});
+    history = [];
+    saveHistory();
+    Core.resetSectionCache();
+    sessionFile = null;
+    sessionLog = [];
+    sessionArchived = false;
+    sessionTaskId = String(taskId);
+    term.writeln('\x1b[90m(已开启任务会话 #' + taskId + '：后续对话归入此会话，frontmatter 记录 task: ' + taskId + ')\x1b[0m');
+    if (topbarTitle) topbarTitle.textContent = String(title || '任务 #' + taskId).slice(0, 30);
+  }
+
   // /task —— Phase 3-B 任务引擎：文字看板 + 流转/依赖/日志（HTML 看板: /task board）
   async function taskCmd(parts) {
     const sub = parts[0] || 'list';
@@ -2225,6 +2245,7 @@
       if (!goal) { term.writeln('\x1b[33m用法: /task new <目标> [--title <标题>]\x1b[0m'); return; }
       const r = await api('/api/tasks', { method: 'POST', body: JSON.stringify({ goal, title }) });
       term.writeln('\x1b[32m✓ 新任务 #' + r.task.id + '\x1b[0m ' + (r.task.title || r.task.goal));
+      beginTaskSession(r.task.id, title || goal); // 任务驱动会话：新任务=新会话
       return;
     }
     if (sub === 'board') { await viewCmd('board'); return; }
@@ -2287,6 +2308,7 @@
         prev = r.task.id;
       }
       term.writeln('\x1b[32m✓ 任务链已创建: #' + main.task.id + ' → ' + items.length + ' 个子任务（/task 查看，可删改；依赖未完成时无法流转）\x1b[0m');
+      beginTaskSession(main.task.id, goal); // 任务驱动会话：新任务链=新会话
       refreshStatus();
       return;
     }

@@ -532,13 +532,14 @@ async fn sessions_list(State(st): State<AppState>, headers: HeaderMap) -> Respon
                     String::from_utf8_lossy(&b[..n]).to_string()
                 })
                 .unwrap_or_default();
-            let (title, status, count, date) = parse_session_frontmatter(&head, &id);
+            let (title, status, count, date, task) = parse_session_frontmatter(&head, &id);
             items.push(json!({
                 "id": id,
                 "title": title,
                 "status": status,
                 "count": count,
                 "date": date,
+                "task": task,
                 "mtime": mtime,
             }));
         }
@@ -547,13 +548,14 @@ async fn sessions_list(State(st): State<AppState>, headers: HeaderMap) -> Respon
     Json(json!({ "sessions": items, "total": items.len() })).into_response()
 }
 
-/// 解析会话文件头 frontmatter（title/status/count/date）；旧文件缺字段容错。
+/// 解析会话文件头 frontmatter（title/status/count/date/task）；旧文件缺字段容错。
 /// title 缺省回退：首条 `## Q:` 截断 30 字 → 仍空则用文件名；status 缺省 archived（历史会话）
-fn parse_session_frontmatter(head: &str, id: &str) -> (String, String, u64, String) {
+fn parse_session_frontmatter(head: &str, id: &str) -> (String, String, u64, String, Option<String>) {
     let mut title = String::new();
     let mut status = "archived".to_string();
     let mut count = 0u64;
     let mut date = String::new();
+    let mut task: Option<String> = None;
     let fm = head.split("---").nth(1).unwrap_or("");
     for line in fm.lines() {
         if let Some((k, v)) = line.split_once(':') {
@@ -562,6 +564,7 @@ fn parse_session_frontmatter(head: &str, id: &str) -> (String, String, u64, Stri
                 "status" => status = v.trim().to_string(),
                 "count" => count = v.trim().parse().unwrap_or(0),
                 "date" => date = v.trim().to_string(),
+                "task" => task = Some(v.trim().to_string()),
                 _ => {}
             }
         }
@@ -575,7 +578,7 @@ fn parse_session_frontmatter(head: &str, id: &str) -> (String, String, u64, Stri
             title = id.to_string();
         }
     }
-    (title, status, count, date)
+    (title, status, count, date, task)
 }
 
 // ---------- 读时整理（B1）：热度 + 规则层（零 LLM，fire-and-forget 旁路） ----------
@@ -2224,21 +2227,23 @@ mod app_data_tests {
 
     #[test]
     fn session_frontmatter_parse() {
-        // 新格式：完整 frontmatter
-        let head = "---\ntype: session\ndate: 2026-08-05\ntitle: 如何配置 LLM？\nstatus: active\ncount: 3\n---\n\n# 会话记录\n\n## Q: 如何配置 LLM？\nA: 打开 config.html\n";
-        let (t, s, c, d) = parse_session_frontmatter(head, "2026-08-05-120000");
+        // 新格式：完整 frontmatter（含任务驱动会话 task 字段）
+        let head = "---\ntype: session\ndate: 2026-08-05\ntitle: 如何配置 LLM？\nstatus: active\ncount: 3\ntask: 7\n---\n\n# 会话记录\n\n## Q: 如何配置 LLM？\nA: 打开 config.html\n";
+        let (t, s, c, d, tk) = parse_session_frontmatter(head, "2026-08-05-120000");
         assert_eq!(t, "如何配置 LLM？");
         assert_eq!(s, "active");
         assert_eq!(c, 3);
         assert_eq!(d, "2026-08-05");
-        // 旧格式：无 frontmatter → title 回退首条 ## Q:（截断 30 字），status 缺省 archived
+        assert_eq!(tk.as_deref(), Some("7"));
+        // 旧格式：无 frontmatter → title 回退首条 ## Q:（截断 30 字），status 缺省 archived，task 缺省 None
         let old = "# 会话记录\n\n## Q: 这是一条很长的问题用来验证标题截断逻辑是否正确生效啊啊啊啊啊啊啊啊\nA: 回答\n";
-        let (t2, s2, c2, _d2) = parse_session_frontmatter(old, "2026-08-04-154440");
+        let (t2, s2, c2, _d2, tk2) = parse_session_frontmatter(old, "2026-08-04-154440");
         assert_eq!(s2, "archived");
         assert_eq!(c2, 0);
         assert_eq!(t2.chars().count(), 30);
+        assert!(tk2.is_none());
         // 空文件 → title 回退文件名
-        let (t3, s3, _, _) = parse_session_frontmatter("", "2026-08-04-154440");
+        let (t3, s3, _, _, _) = parse_session_frontmatter("", "2026-08-04-154440");
         assert_eq!(t3, "2026-08-04-154440");
         assert_eq!(s3, "archived");
     }
