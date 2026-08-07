@@ -144,6 +144,23 @@
   .npw-actions button:hover { border-color: var(--accent); color: var(--fg); }
   #npw-create { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
   #npw-create:hover { color: #fff; }
+  /* 命令参数弹窗（prefill 界面化：点卡片 → 弹参 → 直接执行，不再预填命令到输入框） */
+  #pp-overlay { position: fixed; inset: 0; z-index: 400; background: rgba(0,0,0,.45);
+    display: flex; align-items: center; justify-content: center; }
+  #pp-overlay[hidden] { display: none; }
+  #pp-box { background: var(--bg2, #1e1e2e); border: 1px solid var(--border); border-radius: 14px;
+    width: 440px; max-width: 90vw; padding: 18px; box-shadow: 0 12px 40px rgba(0,0,0,.4); }
+  #pp-box h3 { margin: 0 0 4px; font-size: 15px; color: var(--fg); }
+  #pp-desc { font-size: 12px; color: var(--muted2); margin-bottom: 12px; }
+  #pp-input { width: 100%; box-sizing: border-box; padding: 9px 12px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--chip); color: var(--fg); font-size: 13px; }
+  #pp-input:focus { outline: none; border-color: var(--accent); }
+  .pp-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+  .pp-actions button { padding: 7px 16px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--chip); color: var(--fg2); cursor: pointer; font-size: 12.5px; }
+  .pp-actions button:hover { border-color: var(--accent); color: var(--fg); }
+  #pp-run { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
+  #pp-run:hover { color: #fff; }
 
   /* ---- 消息流（气泡容器，独立滚动，内容居中 820px） ---- */
   #stream { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 16px 24px;
@@ -410,6 +427,19 @@
     <div class="npw-actions">
       <button id="npw-cancel">取消</button>
       <button id="npw-create">创建并进入 →</button>
+    </div>
+  </div>
+</div>
+
+<!-- 命令参数弹窗（界面操作：点卡片 → 输入参数 → 直接执行） -->
+<div id="pp-overlay" hidden>
+  <div id="pp-box">
+    <h3 id="pp-title">输入参数</h3>
+    <div id="pp-desc"></div>
+    <input id="pp-input" type="text" autocomplete="off">
+    <div class="pp-actions">
+      <button id="pp-cancel">取消</button>
+      <button id="pp-run">执行</button>
     </div>
   </div>
 </div>

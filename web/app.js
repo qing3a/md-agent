@@ -127,6 +127,26 @@
     term.writeln('\x1b[90m恢复: /resume <id 或标题关键词> · 面板: /view sessions\x1b[0m');
   }
 
+  // 恢复会话 = 切换到该对话页：清屏并把历史 Q/A 渲染为消息流（用户气泡 + 助手气泡），之后可继续对话。
+  // 历史内容为纯文本（可能含历史 ANSI），term.write 走 ansiToHtml（已 HTML 转义），安全。
+  function renderHistory(parsed) {
+    term.clear();
+    for (const p of parsed) {
+      if (String(p.q || '').trim()) {
+        term.beginMsg('user');
+        term.appendCard(escHtml(p.q));
+        term.endMsg();
+      }
+      const a = String(p.a || '').trim();
+      if (a && a !== '(无回答/中断)') {
+        term.beginMsg('assistant');
+        term.write(a);
+        term.endMsg(true);
+      }
+    }
+    if (!parsed.length) term.writeln('（空会话，无内容可显示）');
+  }
+
   async function resumeCmd(arg) {
     if (!arg) {
       term.writeln('\x1b[33m用法: /resume <会话 id 或标题关键词>\x1b[0m（先 /sessions 查看列表）');
@@ -159,8 +179,10 @@
     sessionFile = 'sessions/' + hit.id + '.md';
     sessionLog = parsed.map((p) => ({ q: p.q, a: p.a || '(无回答/中断)', ts: Date.now() })).slice(-MAX_SESSION_LOG);
     sessionArchived = false;
-    term.writeln('\x1b[32m✓ 已恢复会话 ' + hit.id + '（' + parsed.length + ' 轮 → 载入最近 ' + Math.floor(history.length / 2) + ' 轮）\x1b[0m');
-    term.writeln('\x1b[90m继续提问即引用前文；/clear 退出恢复态\x1b[0m');
+    // 切换对话页语义：清屏 + 渲染历史 Q/A 到消息流（像打开了那个对话页），继续提问即续写
+    renderHistory(parsed);
+    term.writeln('\x1b[32m✓ 已切换至历史对话：' + (hit.title || hit.id) + '（' + parsed.length + ' 轮）\x1b[0m');
+    term.writeln('\x1b[90m继续提问即续写此对话；/clear 开始新对话\x1b[0m');
     if (topbarTitle) topbarTitle.textContent = String(hit.title || hit.id).slice(0, 30);
   }
 
@@ -746,7 +768,7 @@
       }
     };
     group(active, '进行中');
-    group(archived, '已归档');
+    group(archived, '历史对话');
     if (!list.length) {
       const e = document.createElement('div');
       e.className = 'sb-empty';
@@ -825,18 +847,18 @@
     redrawInput();
   }
 
-  // ---------- 命令补全面板 ----------
+  // ---------- 命令补全面板（界面优先：仅保留常用命令；开发者命令 /l1 /diff /health /open /projects 已移出） ----------
   const COMMANDS = [
-    ['/help', '命令列表'], ['/search', '检索双层库'], ['open', '查看 KB 内 MD 文件'],
-    ['/l1', '查看 L1 规范/索引/记忆层'], ['/sync', '重建 INDEX.md'], ['/digest', '整理新笔记'],
+    ['/help', '使用指引'], ['/search', '检索双层库'], ['/spaces', '项目空间'],
+    ['/sync', '重建 INDEX.md'], ['/digest', '整理新笔记'],
     ['/remember', '手动沉淀到记忆'], ['/graph', '知识图谱/关联簇'], ['/orphans', '孤立文档'],
-    ['/projects', '项目统计'], ['/tags', '标签统计'], ['/rescan', '重建知识图谱'],
+    ['/tags', '标签统计'], ['/rescan', '重建知识图谱'],
     ['/pending', '查看待审'], ['/preview', '行级预览'], ['/approve', '批准待审'],
     ['/reject', '拒绝待审'], ['/view', '面板渲染层'], ['/audit', '知识库健康审计'],
-    ['/conflicts', '冲突检查'], ['/diff', '行级对比'], ['/link', '补链接'],
+    ['/conflicts', '冲突检查'], ['/link', '补链接'],
     ['/link-all', '批量补链接'], ['/suggest', '补全缺失文档'], ['/fetch', '抓取网页'],
     ['/page', '动态网页读取'], ['/task', '任务引擎'], ['/market', '应用市场'], ['/clear', '清空多轮记忆'],
-    ['/config', '查看配置'], ['/heartbeat', '心跳自动同步'], ['/health', '健康检查'],
+    ['/config', '查看配置'], ['/heartbeat', '心跳自动同步'], ['/newproject', '新建项目'],
     ['clear', '清屏'],
   ];
   // ---------- 命令补全（流内 Tab 循环；/ 开头才触发，无下拉浮层） ----------
@@ -993,6 +1015,42 @@
     const box = document.getElementById('npw-overlay');
     if (box) box.hidden = true;
   }
+
+  // 命令参数弹窗（prefill 界面化）：面板点卡片 → 弹参 → run() 直接执行，不再预填命令到输入框。
+  // 对非技术用户，这是"点按钮 + 填一个小输入框"的界面操作，不暴露斜杠命令
+  const PREFILL_META = {
+    '/search ':    { t: '检索知识库', d: '输入关键词（可多个，用空格分隔），从你的笔记里找相关内容', p: '例如：劳动仲裁 证据' },
+    '/task plan ': { t: '任务拆解', d: '输入任务目标，AI 会把它拆解成可执行的任务链', p: '例如：整理本月客户回访' },
+    '/fetch ':     { t: '抓取网页', d: '输入网页地址（可附标题），抓取内容并沉淀为笔记', p: '例如：https://example.com 行业报告' },
+    '/page ':      { t: '动态网页读取', d: '输入网页地址，等待页面加载完成后读取内容', p: '例如：https://example.com' },
+    '/suggest ':   { t: '补全缺失文档', d: '输入主题，AI 生成该主题的新笔记（先进入待审）', p: '例如：仲裁管辖' },
+  };
+  let ppPendingCmd = null;
+  function openCmdPrompt(cmd) {
+    const box = document.getElementById('pp-overlay');
+    if (!box) return;
+    const m = PREFILL_META[cmd] || { t: '输入参数', d: cmd || '', p: '' };
+    ppPendingCmd = cmd || '';
+    document.getElementById('pp-title').textContent = m.t || '输入参数';
+    document.getElementById('pp-desc').textContent = m.d || '';
+    const input = document.getElementById('pp-input');
+    input.value = '';
+    input.placeholder = m.p || '';
+    box.hidden = false;
+    setTimeout(() => input.focus(), 50);
+  }
+  function closeCmdPrompt() {
+    const box = document.getElementById('pp-overlay');
+    if (box) box.hidden = true;
+  }
+  function runCmdPrompt() {
+    const input = document.getElementById('pp-input');
+    const arg = (input.value || '').trim();
+    const cmd = ppPendingCmd;
+    closeCmdPrompt();
+    if (!arg || !cmd) return;
+    run(cmd + arg);   // cmd 自带尾空格
+  }
   async function newProjectFlow() {
     closeProjectMenu();
     const name = (document.getElementById('npw-name').value || '').trim();
@@ -1047,6 +1105,15 @@
     if (npwName) npwName.addEventListener('keydown', (e) => { if (e.key === 'Enter') newProjectFlow(); });
     const npwOv = document.getElementById('npw-overlay');
     if (npwOv) npwOv.addEventListener('click', (e) => { if (e.target === npwOv) closeNewProjectWizard(); });
+    // 命令参数弹窗绑定
+    const ppRun = document.getElementById('pp-run');
+    if (ppRun) ppRun.addEventListener('click', runCmdPrompt);
+    const ppCancel = document.getElementById('pp-cancel');
+    if (ppCancel) ppCancel.addEventListener('click', closeCmdPrompt);
+    const ppInput = document.getElementById('pp-input');
+    if (ppInput) ppInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runCmdPrompt(); });
+    const ppOv = document.getElementById('pp-overlay');
+    if (ppOv) ppOv.addEventListener('click', (e) => { if (e.target === ppOv) closeCmdPrompt(); });
     document.addEventListener('click', (e) => {
       const menu = document.getElementById('project-menu');
       if (menu && !menu.hidden && !menu.contains(e.target) && e.target.id !== 'project-chip') closeProjectMenu();
@@ -1315,6 +1382,7 @@
     const [head, ...rest] = cmd.split(/\s+/);
     switch (head) {
       case '/help': help(); break;
+      case '/cmd': case '/help-cmd': cmdList(); break;
       case '/search': await search(rest.join(' ')); break;
       case 'open': await openFile(rest[0]); break;
       case '/l1': await l1(); break;
@@ -1366,11 +1434,27 @@
   }
 
   function help() {
-    term.writeln('命令列表：');
+    // 界面优先：非技术用户不记命令——所有常用功能都有界面入口，自然语言即可完成日常操作
+    term.writeln('md-agent 使用指引：');
+    term.writeln('');
+    term.writeln('  \x1b[1m直接输入问题\x1b[0m  提问、让它整理笔记、记住事情——用大白话就行，例如：');
+    term.writeln('      「帮我梳理这个案件的证据清单」「把这段资料存进笔记」「记住：客户预算 30 万」');
+    term.writeln('');
+    term.writeln('  \x1b[1m界面入口（不用记命令）\x1b[0m：');
+    term.writeln('     左侧菜单     功能首页 / 知识图谱 / 待审 / 审计 / 自动化 / 市场 / 设置');
+    term.writeln('     顶栏项目名   切换项目（每个项目独立空间，互不串用）');
+    term.writeln('     历史对话     侧边栏点击即可切回该对话继续聊');
+    term.writeln('     功能首页     所有功能的卡片入口（含检索/抓取/任务/配置）');
+    term.writeln('     命令速览     Ctrl+K 或左侧「命令速览」');
+    term.writeln('');
+    term.writeln('  \x1b[90m高级命令（一般用不到）：输入 /cmd 查看完整列表\x1b[0m');
+  }
+  // 完整命令列表（高级通道）：帮助文案/命令补全已隐藏，这里保留可查
+  function cmdList() {
+    term.writeln('高级命令列表：');
     term.writeln('  直接输入问题          知识库问答（流式输出 + 多轮记忆 + 自动沉淀）');
     term.writeln('  /search <关键词>       检索双层库（多关键词任一命中，显示所属小节）');
     term.writeln('  open <路径>            查看 KB 内 MD 文件，如 open notes/rag/xxx.md');
-    term.writeln('  /l1                    查看 L1 规范/索引/记忆层');
     term.writeln('  /sync                  重建 INDEX.md（自动索引 L2）');
     term.writeln('  /digest <主题>         检索并把结果整理成新笔记写入 notes/');
     term.writeln('  /remember [路径] 内容  手动沉淀（默认追加到 MEMORY.md）');
@@ -2842,8 +2926,9 @@
       return;
     }
     if (msg.type === 'prefill') {
-      // 面板 → 宿主：预填终端输入行（功能首页命令卡片「打开功能」= 命令打到输入框，补参后回车）
-      if (!tab.appId && !busy && atPrompt) { line = msg.cmd || ''; redrawInput(); term.focus(); }
+      // 面板 → 宿主：命令参数弹窗（界面操作：不再预填命令到输入框，点卡片 → 弹参 → 直接执行）。
+      // 内置面板（!tab.appId）可信；busy 时忽略（命令执行中不接受）
+      if (!tab.appId && !busy) openCmdPrompt(msg.cmd || '', null);
       return;
     }
     if (msg.type === 'flag') {
