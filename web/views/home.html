@@ -118,8 +118,7 @@ function setFlag(key, value) {
 // 面板类：run 经宿主 /view 打开（单视图：已开同面板则激活，否则替换）
 var PANELS = [
   { ic: '🕸', n: '图谱', d: '知识库结构导航（文档/链接/孤立）', run: '/view graph' },
-  { ic: '📋', n: '审核', d: '待审审核 + 知识库健康审计', run: '/view pending', badge: 'review', btype: 'red' },
-  { ic: '📊', n: '自动化运营', d: '自动化控制 + 运营数据（心跳/补链/热度/时间线）', run: '/view ops' },
+  { ic: '🔄', n: '自动化', d: '自动化控制 + 审核 + 运营数据', run: '/view automation', badge: 'review', btype: 'red' },
   { ic: '🗂', n: '看板', d: '任务看板（待办/进行中/完成）', run: '/view board' },
   { ic: '🛒', n: '市场', d: '应用市场（SkillHub 管理端）', run: '/view market' },
 ];

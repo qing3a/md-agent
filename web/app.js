@@ -882,8 +882,7 @@
         '<div class="w-hello">有什么我能帮你的吗？</div>' +
         '<div class="w-line dim">' + (currentProject ? '项目空间：' + currentProjectName + '（与其它项目完全隔离）' : '私人 AI 运营中心 · 你的 AI 做了什么，永远可查') + '</div>' +
         '<div class="w-chips">' +
-          '<button data-cmd="/view pending">📥 审核</button>' +
-          '<button data-cmd="/view ops">📊 自动化运营</button>' +
+          '<button data-cmd="/view automation">🔄 自动化</button>' +
           '<button data-cmd="/side">⌘ 命令速览</button>' +
         '</div>' +
         '<div class="w-status">状态加载中…</div>' +
@@ -2122,7 +2121,7 @@
     if (save) {
       try {
         const savedPath = await applySave(save);
-        term.writeln('\x1b[33m💾 已进入待审: \x1b[0m' + savedPath + '  （/view pending 图形审核 · /approve 确认 · /reject 丢弃）');
+        term.writeln('\x1b[33m💾 已进入待审: \x1b[0m' + savedPath + '  （/view automation 审核 · /approve 确认 · /reject 丢弃）');
       } catch (e) {
         term.writeln('\x1b[31m写回失败: ' + e.message + '\x1b[0m');
       }
@@ -2207,7 +2206,7 @@
     const safe = (titleArg.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '') || '网页摘录').slice(0, 30);
     const content = '# ' + titleArg + '\n\n> 来源: ' + url + '\n\n' + r.text + '\n';
     const saved = await applySave({ path: 'notes/' + safe + '.md', mode: 'new', content });
-    term.writeln('\x1b[33m💾 已进入待审: \x1b[0m' + saved + '  （/view pending 图形审核 · /approve 确认 · /reject 丢弃）');
+    term.writeln('\x1b[33m💾 已进入待审: \x1b[0m' + saved + '  （/view automation 审核 · /approve 确认 · /reject 丢弃）');
   }
 
   // /task —— Phase 3-B 任务引擎：文字看板 + 流转/依赖/日志（HTML 看板: /task board）
@@ -2391,7 +2390,7 @@
     const safe = (titleArg.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '') || '网页摘录').slice(0, 30);
     const content = '# ' + titleArg + '\n\n> 来源: ' + url + '\n\n' + r.text + '\n';
     const saved = await applySave({ path: 'notes/' + safe + '.md', mode: 'new', content });
-    term.writeln('\x1b[33m💾 已进入待审: \x1b[0m' + saved + '  （/view pending 图形审核 · /approve 确认 · /reject 丢弃）');
+    term.writeln('\x1b[33m💾 已进入待审: \x1b[0m' + saved + '  （/view automation 审核 · /approve 确认 · /reject 丢弃）');
   }
 
   // 写回落盘（Phase 3 前置：待审机制）
@@ -2551,7 +2550,7 @@
     term.writeln(renderMdFile(noteText));
     const safe = (topic.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '') || '整理笔记').slice(0, 30);
     const saved = await applySave({ path: 'notes/' + safe + '.md', mode: 'new', content: noteText });
-    term.writeln('\x1b[32m✓ 笔记已进入待审: \x1b[0m' + saved + '  （/view pending 图形审核 · /approve 确认 · /reject 丢弃）');
+    term.writeln('\x1b[32m✓ 笔记已进入待审: \x1b[0m' + saved + '  （/view automation 审核 · /approve 确认 · /reject 丢弃）');
   }
 
   // ---------- 知识图谱命令 ----------
@@ -2917,14 +2916,13 @@
       closeView();
       return;
     }
-    // 合并面板兼容：/view audit → 审核面板；/view automation → 自动化运营面板（旧引用不失效）
-    if (arg === 'audit') arg = 'pending';
-    if (arg === 'automation') arg = 'ops';
-    if (arg === 'graph' || arg === 'board' || arg === 'pending' || arg === 'market' || arg === 'home' || arg === 'sessions' || arg === 'ops' || arg === 'config' || arg === 'onboarding') {
+    // 收敛面板兼容：/view ops、/view pending、/view audit 统一映射到「自动化」面板（旧引用不失效）
+    if (arg === 'ops' || arg === 'pending' || arg === 'audit') arg = 'automation';
+    if (arg === 'graph' || arg === 'board' || arg === 'automation' || arg === 'market' || arg === 'home' || arg === 'sessions' || arg === 'config' || arg === 'onboarding') {
       const path = arg === 'config' ? '/config.html' : arg === 'onboarding' ? '/onboarding.html' : '/views/' + arg + '.html';
       const r = await fetch(path);
       if (!r.ok) throw new Error('内置视图加载失败: HTTP ' + r.status);
-      const titles = { graph: '知识库结构导航', board: '任务看板', pending: '审核（待审 + 健康审计）', market: '应用市场', home: '功能首页', sessions: '历史会话', ops: '自动化运营', config: '设置', onboarding: '开始使用' };
+      const titles = { graph: '知识库结构导航', board: '任务看板', automation: '自动化（控制 / 审核 / 运营数据）', market: '应用市场', home: '功能首页', sessions: '历史会话', config: '设置', onboarding: '开始使用' };
       openView(titles[arg], await r.text(), null, { kind: 'builtin', arg });
       return;
     }
@@ -3112,8 +3110,7 @@
   const VIEW_TARGETS = [
     { k: '首页', d: '功能总览（全部功能一键进入）', run: '/view home' },
     { k: '图谱', d: '知识库结构导航', run: '/view graph' },
-    { k: '审核', d: '待审审核 + 知识库健康审计', run: '/view pending' },
-    { k: '自动化运营', d: '自动化控制 + 运营数据（心跳/补链/热度/时间线）', run: '/view ops' },
+    { k: '自动化', d: '自动化控制 + 审核 + 运营数据', run: '/view automation' },
     { k: '看板', d: '任务看板', run: '/view board' },
     { k: '市场', d: '应用市场（SkillHub 管理端）', run: '/view market' },
   ];
@@ -3233,7 +3230,7 @@
     }
     if (p) {
       const n = (p.pending || []).length;
-      secs.push(sideSec('审核', '/view pending',
+      secs.push(sideSec('审核', '/view automation',
         n + ' 篇待审' + (n ? '（' + (p.pending[0].kind === 'memory' ? '记忆' : '笔记') + (n > 1 ? ' 等' : '') + '）' : ''),
         n ? '点击图形审核' : ''));
     }
@@ -3245,10 +3242,10 @@
     }
     if (a) {
       const w = (a.orphans ? a.orphans.length : 0) + (a.dangling ? a.dangling.length : 0) + (a.duplicates ? a.duplicates.length : 0) + (a.mentions ? a.mentions.length : 0);
-      secs.push(sideSec('审计', '/view pending',
+      secs.push(sideSec('审计', '/view automation',
         w ? '⚠ 孤立 ' + (a.orphans || []).length + ' / 悬空 ' + (a.dangling || []).length + ' / 重复 ' + (a.duplicates || []).length + ' / 建议 ' + (a.mentions || []).length
           : '✓ 知识库健康',
-        w ? '点击健康审计（审核面板内）' : ''));
+        w ? '点击健康审计（自动化面板内）' : ''));
     }
     sideBody.innerHTML = secs.join('');
   }
@@ -3336,7 +3333,7 @@
     if (!r.orphans.length && !r.no_out.length && !r.duplicates.length && !r.dangling.length && !r.mentions.length) {
       term.writeln('\x1b[32m✓ 知识库健康，无盲区无冲突\x1b[0m');
     }
-    term.writeln('\x1b[90m(图形版: /view audit 卡片式分组 · 补链建议一键应用 · 审计按钮/状态行 ⚠ 直达)\x1b[0m');
+    term.writeln('\x1b[90m(图形版: /view automation 审核栏目 · 补链建议一键应用 · 审计按钮/状态行 ⚠ 直达)\x1b[0m');
   }
 
   // /conflicts：重复标题（带路径）+ 悬空链接
@@ -3460,7 +3457,7 @@
       term.writeln('\x1b[1;32m──── 盲区分析（待审）────\x1b[0m');
       term.writeln(renderMdFile(noteText));
       const saved = await applySave({ path: 'notes/知识盲区分析-' + Date.now() + '.md', mode: 'new', content: noteText });
-      term.writeln('\x1b[33m💾 已进入待审: \x1b[0m' + saved + '  （/view pending 图形审核 · /approve 确认 · /reject 丢弃）');
+      term.writeln('\x1b[33m💾 已进入待审: \x1b[0m' + saved + '  （/view automation 审核 · /approve 确认 · /reject 丢弃）');
       return;
     }
     term.writeln('\x1b[90m(补全: LLM 生成「' + topic + '」新文档 → 待审)\x1b[0m');
@@ -3491,7 +3488,7 @@
     term.writeln(renderMdFile(noteText));
     const safe = (topic.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '') || '新文档').slice(0, 30);
     const saved = await applySave({ path: 'notes/' + safe + '.md', mode: 'new', content: noteText });
-    term.writeln('\x1b[33m💾 已进入待审: \x1b[0m' + saved + '  （/view pending 图形审核 · /approve 确认 · /reject 丢弃）');
+    term.writeln('\x1b[33m💾 已进入待审: \x1b[0m' + saved + '  （/view automation 审核 · /approve 确认 · /reject 丢弃）');
   }
 
   // ---------- 管理命令 ----------
