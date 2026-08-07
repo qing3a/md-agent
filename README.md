@@ -160,6 +160,7 @@ open <路径>           查看 KB 内 MD
 /link <源> <目标>      补链接（在源文档追加 [[目标]]，人工确认）
 /link-all              一键应用 /audit 的全部补链接建议
 /suggest [主题]        LLM 补全缺失主题（无参 = 盲区分析模式，均进待审）
+/decide <主题> <结论>  未决决策拍板：从未决清单移除议题 → 结论落 notes/决策/已决.md + L1 MEMORY 决策区（会话收尾自动检测未决议题进待审，批准后进未决清单）
 
 # 网页
 /fetch <url> [标题]    静态抓取网页：阅读视图 / 带标题则沉淀为待审笔记
@@ -224,6 +225,7 @@ cp config.json dist/config.json   # 可选：携带已有 LLM 配置
 | GET | `/api/fetch?url=` | 静态网页抓取（HTTP + HTML 文本提取，零浏览器依赖） |
 | GET | `/api/page?url=` | 动态网页读取（chromiumoxide + 系统 Edge/Chrome headless） |
 | POST | `/api/ingest` | 文档摄入（body: `{name, content_base64, dry_run?}`；anydoc 转 GFM，dry_run 预览 / 落 notes/ 重建 INDEX+图谱） |
+| POST | `/api/decide` | 未决决策拍板（body: `{topic, conclusion}`；未决清单移除 → 已决.md + MEMORY 决策区，幂等） |
 | POST | `/api/page/act` | 动作执行（body: `{url, actions: [{kind: click\|fill\|select\|scroll, selector, value?}]}`；前端人审确认后调用） |
 | GET | `/api/tasks` | 任务列表 + 看板统计（`kb/.tasks.db` 独立库） |
 | POST | `/api/tasks` | 新建任务（body: `{goal, title?}`） |
