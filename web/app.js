@@ -822,8 +822,6 @@
       : '未配置模型服务 · 点击打开配置页';
   }
   if (modelChip) modelChip.addEventListener('click', () => window.open('/config.html', '_blank'));
-  const sbConfigBtn = document.getElementById('sb-config');
-  if (sbConfigBtn) sbConfigBtn.addEventListener('click', () => window.open('/config.html', '_blank'));
 
   // ---------- 输入历史（会话内，空输入时 ArrowUp/Down 翻动） ----------
   function pushHistory(t) {
@@ -884,9 +882,8 @@
         '<div class="w-hello">有什么我能帮你的吗？</div>' +
         '<div class="w-line dim">' + (currentProject ? '项目空间：' + currentProjectName + '（与其它项目完全隔离）' : '私人 AI 运营中心 · 你的 AI 做了什么，永远可查') + '</div>' +
         '<div class="w-chips">' +
-          '<button data-cmd="/view home">🏠 功能首页</button>' +
-          '<button data-cmd="/view pending">📥 待审</button>' +
-          '<button data-cmd="/view ops">📊 运营中心</button>' +
+          '<button data-cmd="/view pending">📥 审核</button>' +
+          '<button data-cmd="/view ops">📊 自动化运营</button>' +
           '<button data-cmd="/side">⌘ 命令速览</button>' +
         '</div>' +
         '<div class="w-status">状态加载中…</div>' +
@@ -1190,7 +1187,7 @@
   refreshStatus();
   setInterval(refreshStatus, 8000);
 
-  // ---- 快捷按钮徽标（data-badge 按钮：pending 红 / audit 黄；与状态行同源，8s 轮询一起更新）----
+  // ---- 快捷按钮徽标（data-badge="review" 审核按钮：待审红优先，无待审时审计告警黄；与状态行同源，8s 轮询一起更新）----
   function setBadge(btn, n, warn) {
     let b = btn.querySelector('.badge');
     if (!n) { if (b) b.remove(); return; }
@@ -1200,9 +1197,11 @@
   }
   function updateBadges(pend, auditCount) {
     for (const btn of quickBtns) {
-      const kind = btn.dataset.badge;
-      if (kind === 'pending') setBadge(btn, pend > 0 ? pend : 0, false);
-      else if (kind === 'audit') setBadge(btn, auditCount > 0 ? auditCount : 0, true);
+      if (btn.dataset.badge === 'review') {
+        // 待审红优先；无待审但审计有告警 → 黄徽标
+        if (pend > 0) setBadge(btn, pend, false);
+        else setBadge(btn, auditCount > 0 ? auditCount : 0, true);
+      }
     }
   }
 
@@ -2701,7 +2700,6 @@
   // ---------- /view 面板渲染层（iframe 沙箱 + postMessage 桥） ----------
 
   const viewOverlay = document.getElementById('view-overlay');
-  const viewTabs = document.getElementById('view-tabs');
   const viewPanes = document.getElementById('view-panes');
 
   // 注入视图的桥脚本：window.hostApi(path, opts) → postMessage 给宿主 → 宿主调 /api/* 后回传；
@@ -2752,51 +2750,33 @@
     '})();' +
     '<\/script>';
 
-  // 视图标签页（多开并存）：每 tab = 标题 + iframe；激活显示，可单个/全部关闭
-  let viewTabsList = []; // [{id, title, iframe, tabEl}]
-  let activeViewId = null;
+  // 视图（单视图：同一时刻只开一个详情页，新开替换旧的）
+  let currentView = null; // {title, iframe, loaded, busy, err, appId, perms, specKind, specArg}
 
-  function activateView(id) {
-    activeViewId = id;
-    for (const t of viewTabsList) {
-      const on = t.id === id;
-      t.iframe.classList.toggle('active', on);
-      t.tabEl.classList.toggle('active', on);
-    }
-    const at = viewTabsList.find((t) => t.id === id);
-    updateMenuActive(at && at.specKind === 'builtin' ? { arg: at.specArg } : null);
+  function activateView() {
+    updateMenuActive(currentView && currentView.specKind === 'builtin' ? { arg: currentView.specArg } : null);
     viewOverlay.classList.remove('hidden');
+    if (currentView) document.getElementById('view-title').textContent = currentView.title;
     // 焦点移出 xterm textarea：聚焦时 xterm 拦截 Esc（stopPropagation），父页监听收不到
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   }
 
-  function closeView(id) {
-    let allClosed = false;
-    if (id) {
-      // 关闭单个 tab；激活相邻 tab（优先右侧，否则左侧），无则整体隐藏
-      const i = viewTabsList.findIndex((t) => t.id === id);
-      if (i === -1) return;
-      viewTabsList[i].iframe.remove();
-      viewTabsList[i].tabEl.remove();
-      viewTabsList.splice(i, 1);
-      if (activeViewId === id) {
-        if (viewTabsList.length) activateView(viewTabsList[Math.min(i, viewTabsList.length - 1)].id);
-        else { activeViewId = null; viewOverlay.classList.add('hidden'); allClosed = true; }
-      }
-    } else {
-      // 关闭全部
-      for (const t of viewTabsList) { t.iframe.remove(); t.tabEl.remove(); }
-      viewTabsList = [];
-      activeViewId = null;
-      viewOverlay.classList.add('hidden');
-      allClosed = true;
-    }
-    saveViewSpecs(); // /view 标签组合记忆（恢复时按 kind/arg 重新拉取）
-    if (allClosed) { updateMenuActive(null); applySplit(false); term.focus(); } // 视图全关：退出分屏（终端恢复全宽）+ 焦点归还终端
+  function closeView() {
+    if (currentView) { currentView.iframe.remove(); currentView = null; }
+    viewOverlay.classList.add('hidden');
+    updateMenuActive(null);
+    applySplit(false); // 视图关闭：退出分屏（终端恢复全宽）+ 焦点归还终端
+    term.focus();
   }
 
   function openView(title, html, app, spec) {
-    const id = 'v' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+    // 单视图：同 (kind, arg) 已开则仅更新标题激活，不重复加载（保留面板内状态）；否则替换旧视图
+    if (currentView && spec && currentView.specKind === spec.kind && currentView.specArg === spec.arg) {
+      currentView.title = title;
+      activateView();
+      return;
+    }
+    if (currentView) currentView.iframe.remove();
     // 应用市场（阶段 1）：app 视图注入 <base href="/apps/<id>/">（相对 vendor/ 等资源正确解析）
     if (app) {
       const baseHref = '<base href="/apps/' + app.id + '/">';
@@ -2807,83 +2787,16 @@
     const iframe = document.createElement('iframe');
     // allow-modals：面板内 confirm/alert 生效（市场卸载/看板删除的人审确认）；仍无 allow-same-origin，桥层权限白名单不变
     iframe.sandbox = 'allow-scripts allow-modals';
-    const tabEl = document.createElement('button');
-    tabEl.className = 'view-tab';
-    const ld = document.createElement('span');   // 加载角标（蓝色脉冲点，load 后移除）
-    ld.className = 'ld';
-    const label = document.createElement('span');
-    label.textContent = title;
-    const x = document.createElement('span');
-    x.textContent = '×';
-    x.className = 'view-tab-x';
-    x.title = '关闭';
-    tabEl.appendChild(ld);
-    tabEl.appendChild(label);
-    tabEl.appendChild(x);
-    tabEl.addEventListener('click', () => activateView(id));
-    x.addEventListener('click', (e) => { e.stopPropagation(); closeView(id); });
-    const tab = { id, title, iframe, tabEl, loaded: false, busy: false, err: null, appId: app ? app.id : null, perms: app ? app.permissions : null, specKind: spec ? spec.kind : null, specArg: spec ? spec.arg : null };
-    // 加载状态跟踪：iframe load 确认加载完成（移除角标）；10s 未加载且无桥请求 → 标黄提示
-    iframe.addEventListener('load', () => { tab.loaded = true; tabEl.classList.remove('warn'); ld.remove(); });
-    setTimeout(() => {
-      if (!tab.loaded && !tab.busy && tabEl.isConnected) tabEl.classList.add('warn');
-    }, 10000);
-    viewTabsList.push(tab);
-    viewTabs.appendChild(tabEl);
+    const view = { title, iframe, loaded: false, busy: false, err: null, appId: app ? app.id : null, perms: app ? app.permissions : null, specKind: spec ? spec.kind : null, specArg: spec ? spec.arg : null };
+    iframe.addEventListener('load', () => { view.loaded = true; });
+    currentView = view;
     viewPanes.appendChild(iframe);
     // 面板主题：注入 theme.css 变量定义（iframe srcdoc 无法引用外部相对路径）+ 初始 data-theme（宿主当前主题）
     iframe.srcdoc = '<style>' + themeCss + '</style>' +
       '<script>document.documentElement.dataset.theme="' + currentTheme + '"<\/script>' +
       (app ? BRIDGE.replace(/__APP_ID__/g, app.id) : BRIDGE) + html;
-    activateView(id);
-    saveViewSpecs(); // /view 标签组合记忆
+    activateView();
   }
-
-  // /view 标签组合记忆：localStorage 存当前打开的视图规格（kind/arg/title + 活动下标），启动时恢复（浏览器式）
-  const VIEW_SPECS_KEY = 'md-agent-view-specs';
-  function saveViewSpecs() {
-    try {
-      const specs = viewTabsList.map((t) => ({ kind: t.specKind, arg: t.specArg, title: t.title }));
-      const active = viewTabsList.findIndex((t) => t.id === activeViewId);
-      localStorage.setItem(VIEW_SPECS_KEY, JSON.stringify({ specs, active }));
-    } catch (e) { /* 存储失败忽略 */ }
-  }
-  async function restoreViews() {
-    let saved = null;
-    try { saved = JSON.parse(localStorage.getItem(VIEW_SPECS_KEY) || 'null'); } catch (e) { /* 忽略 */ }
-    const specs = (saved && Array.isArray(saved.specs)) ? saved.specs : [];
-    if (!specs.length) return;
-    for (const s of specs) {
-      if (!s || !s.arg) continue;
-      try {
-        if (s.kind === 'builtin') {
-          const r = await fetch('/views/' + s.arg + '.html');
-          if (r.ok) openView(s.title || s.arg, await r.text(), null, { kind: 'builtin', arg: s.arg });
-        } else if (s.kind === 'app') {
-          const apps = await getApps();
-          const app = apps.find((a) => a.id === s.arg);
-          if (app) {
-            const rr = await api('/api/file?path=apps/' + app.id + '/' + encodeURIComponent(app.entry));
-            openView(app.name, rr.content, { id: app.id, permissions: app.permissions }, { kind: 'app', arg: app.id });
-          }
-        } else if (s.kind === 'file') {
-          const rr = await api('/api/file?path=' + encodeURIComponent(s.arg));
-          openView(rr.path, rr.content, null, { kind: 'file', arg: s.arg });
-        }
-      } catch (e) { /* 单个视图恢复失败忽略 */ }
-    }
-    if (viewTabsList.length) {
-      const active = (saved && typeof saved.active === 'number' && saved.active >= 0 && saved.active < viewTabsList.length) ? saved.active : viewTabsList.length - 1;
-      activateView(viewTabsList[active].id);
-      term.focus(); // 恢复后焦点还终端（用户 Esc 关或直接操作）
-    }
-  }
-
-  document.getElementById('view-close').addEventListener('click', () => closeView(activeViewId));
-  document.getElementById('view-close-all').addEventListener('click', () => closeView());
-  window.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape' && !viewOverlay.classList.contains('hidden')) closeView(activeViewId);
-  });
 
   // /view 分屏参照：分屏模式终端左 40%（FitAddon 重算列数）+ 视图右 60%，对话流可见可参照
   // 选择实时记忆；关闭全部视图时自动退出分屏（终端恢复全宽）
@@ -2907,13 +2820,18 @@
     updateSplitBtn();
   }
 
-  // postMessage 桥：任一 tab 的 iframe 视图 → 宿主 API（只允许 /api/ 前缀）；escape 关视图；view-error 标红
+  document.getElementById('view-close').addEventListener('click', () => closeView());
+  window.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && !viewOverlay.classList.contains('hidden')) closeView();
+  });
+
+  // postMessage 桥：当前视图 iframe → 宿主 API（只允许 /api/ 前缀）；escape 关视图；view-error 写终端
   window.addEventListener('message', async (ev) => {
-    const tab = viewTabsList.find((t) => t.iframe.contentWindow === ev.source);
-    if (!tab) return;
+    if (!currentView || currentView.iframe.contentWindow !== ev.source) return;
+    const tab = currentView;
     const msg = ev.data;
     if (!msg) return;
-    if (msg.type === 'escape') { closeView(tab.id); return; }
+    if (msg.type === 'escape') { closeView(); return; }
     if (msg.type === 'cmd') {
       // 面板 → 宿主命令（应用市场「运行」/ 功能首页命令卡片等）；仅信任的内置面板（非 app 视图）可发。
       // 走 panelCmd 而非裸 run()：与键盘提交同输入条生命周期，否则 atPrompt 悬空会致状态行乱入输出
@@ -2945,17 +2863,15 @@
       return;
     }
     if (msg.type === 'view-error') {
-      // 视图脚本错误/未处理拒绝：首次写终端 + tab 标红（让沙箱内崩溃可见）
+      // 视图脚本错误/未处理拒绝：写终端（让沙箱内崩溃可见）
       if (!tab.err) {
         tab.err = msg.msg;
         term.writeln('\x1b[31m视图 [' + tab.title + '] 脚本错误: ' + (msg.msg || '') + '\x1b[0m');
       }
-      tab.tabEl.classList.add('err');
       return;
     }
     if (msg.type !== 'api') return;
-    tab.busy = true;               // 收到桥请求 → 视图活跃，清除加载慢标记
-    tab.tabEl.classList.remove('warn');
+    tab.busy = true;               // 收到桥请求 → 视图活跃
     if (!msg.path || !msg.path.startsWith('/api/')) {
       tab.iframe.contentWindow.postMessage({ id: msg.id, ok: false, error: '仅允许 /api/ 接口' }, '*');
       return;
@@ -2993,11 +2909,6 @@
     }
   });
 
-  // /view 去重：同 (kind, arg) 的视图已开则直接激活，不重复开标签（功能首页「打开功能」连点不叠标签）
-  function findView(kind, arg) {
-    return viewTabsList.find((t) => t.specKind === kind && t.specArg === arg);
-  }
-
   // /view graph      内置知识图谱可视化
   // /view <路径>      kb 内本地 HTML 视图
   // /view off        关闭（或 Esc）
@@ -3006,13 +2917,14 @@
       closeView();
       return;
     }
-    if (arg === 'graph' || arg === 'board' || arg === 'pending' || arg === 'audit' || arg === 'market' || arg === 'home' || arg === 'sessions' || arg === 'ops' || arg === 'config' || arg === 'automation' || arg === 'onboarding') {
-      const dup = findView('builtin', arg);
-      if (dup) { activateView(dup.id); return; }
+    // 合并面板兼容：/view audit → 审核面板；/view automation → 自动化运营面板（旧引用不失效）
+    if (arg === 'audit') arg = 'pending';
+    if (arg === 'automation') arg = 'ops';
+    if (arg === 'graph' || arg === 'board' || arg === 'pending' || arg === 'market' || arg === 'home' || arg === 'sessions' || arg === 'ops' || arg === 'config' || arg === 'onboarding') {
       const path = arg === 'config' ? '/config.html' : arg === 'onboarding' ? '/onboarding.html' : '/views/' + arg + '.html';
       const r = await fetch(path);
       if (!r.ok) throw new Error('内置视图加载失败: HTTP ' + r.status);
-      const titles = { graph: '知识库结构导航', board: '任务看板', pending: '待审审核', audit: '知识库健康审计', market: '应用市场', home: '功能首页', sessions: '历史会话', ops: '运营中心', config: '设置', automation: '自动化', onboarding: '开始使用' };
+      const titles = { graph: '知识库结构导航', board: '任务看板', pending: '审核（待审 + 健康审计）', market: '应用市场', home: '功能首页', sessions: '历史会话', ops: '自动化运营', config: '设置', onboarding: '开始使用' };
       openView(titles[arg], await r.text(), null, { kind: 'builtin', arg });
       return;
     }
@@ -3020,25 +2932,19 @@
     const apps = await getApps();
     const app = apps.find((a) => a.id === arg);
     if (app) {
-      const dup = findView('app', arg);
-      if (dup) { activateView(dup.id); return; }
       const r = await api('/api/file?path=apps/' + app.id + '/' + encodeURIComponent(app.entry));
       openView(app.name, r.content, { id: app.id, permissions: app.permissions }, { kind: 'app', arg: app.id });
       return;
     }
-    const dup = findView('file', arg);
-    if (dup) { activateView(dup.id); return; }
     const r = await api('/api/file?path=' + encodeURIComponent(arg));
     openView(r.path, r.content, null, { kind: 'file', arg });
   }
 
-  // 应用市场（阶段 3）：URL ?view=<id> 自动打开面板/应用（托盘「应用市场/已安装应用」入口用）；否则恢复上次 /view 标签组合
-  // 详情页布局下启动不再默认打开 home（避免覆盖聊天区；?view= 与标签记忆仍生效）
+  // 应用市场（阶段 3）：URL ?view=<id> 自动打开面板/应用（托盘「应用市场/已安装应用」入口用）
+  // 详情页布局下启动不默认打开任何面板（避免覆盖聊天区），?view= 参数指定时直开
   (async function autoView() {
     const v = new URLSearchParams(location.search).get('view');
-    if (v) { try { await viewCmd(v); } catch (e) { term.writeln('\x1b[31m自动打开失败: ' + e.message + '\x1b[0m'); } return; }
-    if (localStorage.getItem('md-agent-start-home') !== '0') { /* 兼容旧标志位：默认不打开 */ }
-    try { await restoreViews(); } catch (e) { /* 恢复失败不打扰 */ }
+    if (v) { try { await viewCmd(v); } catch (e) { term.writeln('\x1b[31m自动打开失败: ' + e.message + '\x1b[0m'); } }
   })();
 
   // ---------- 应用市场（阶段 2）：/market list | import <路径> | uninstall <id> | update <id> <路径> ----------
@@ -3206,8 +3112,8 @@
   const VIEW_TARGETS = [
     { k: '首页', d: '功能总览（全部功能一键进入）', run: '/view home' },
     { k: '图谱', d: '知识库结构导航', run: '/view graph' },
-    { k: '待审', d: '待审审核面板（批准/拒绝写回）', run: '/view pending' },
-    { k: '审计', d: '知识库健康审计', run: '/view audit' },
+    { k: '审核', d: '待审审核 + 知识库健康审计', run: '/view pending' },
+    { k: '自动化运营', d: '自动化控制 + 运营数据（心跳/补链/热度/时间线）', run: '/view ops' },
     { k: '看板', d: '任务看板', run: '/view board' },
     { k: '市场', d: '应用市场（SkillHub 管理端）', run: '/view market' },
   ];
@@ -3327,7 +3233,7 @@
     }
     if (p) {
       const n = (p.pending || []).length;
-      secs.push(sideSec('待审', '/view pending',
+      secs.push(sideSec('审核', '/view pending',
         n + ' 篇待审' + (n ? '（' + (p.pending[0].kind === 'memory' ? '记忆' : '笔记') + (n > 1 ? ' 等' : '') + '）' : ''),
         n ? '点击图形审核' : ''));
     }
@@ -3339,10 +3245,10 @@
     }
     if (a) {
       const w = (a.orphans ? a.orphans.length : 0) + (a.dangling ? a.dangling.length : 0) + (a.duplicates ? a.duplicates.length : 0) + (a.mentions ? a.mentions.length : 0);
-      secs.push(sideSec('审计', '/view audit',
+      secs.push(sideSec('审计', '/view pending',
         w ? '⚠ 孤立 ' + (a.orphans || []).length + ' / 悬空 ' + (a.dangling || []).length + ' / 重复 ' + (a.duplicates || []).length + ' / 建议 ' + (a.mentions || []).length
           : '✓ 知识库健康',
-        w ? '点击健康审计面板' : ''));
+        w ? '点击健康审计（审核面板内）' : ''));
     }
     sideBody.innerHTML = secs.join('');
   }

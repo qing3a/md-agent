@@ -115,11 +115,11 @@ function setFlag(key, value) {
 }
 
 // ---------- 卡片数据（面板类 / 命令类） ----------
-// 面板类：run 经宿主 /view 打开（同参去重，已开则激活）
+// 面板类：run 经宿主 /view 打开（单视图：已开同面板则激活，否则替换）
 var PANELS = [
   { ic: '🕸', n: '图谱', d: '知识库结构导航（文档/链接/孤立）', run: '/view graph' },
-  { ic: '📋', n: '待审', d: '审核 LLM 写回：批准 / 拒绝', run: '/view pending', badge: 'pending', btype: 'red' },
-  { ic: '🏥', n: '审计', d: '知识库健康审计（悬空/重复/盲区）', run: '/view audit', badge: 'audit', btype: 'warn' },
+  { ic: '📋', n: '审核', d: '待审审核 + 知识库健康审计', run: '/view pending', badge: 'review', btype: 'red' },
+  { ic: '📊', n: '自动化运营', d: '自动化控制 + 运营数据（心跳/补链/热度/时间线）', run: '/view ops' },
   { ic: '🗂', n: '看板', d: '任务看板（待办/进行中/完成）', run: '/view board' },
   { ic: '🛒', n: '市场', d: '应用市场（SkillHub 管理端）', run: '/view market' },
 ];
@@ -205,13 +205,14 @@ function render(st) {
     hb.last_sync ? '上次 ' + esc(hb.last_sync) : '默认关闭 /heartbeat');
   $('g-status').innerHTML = s;
 
-  // 徽标（待审红 / 审计黄）：按 badge 字段反查卡片下标，避免数组顺序改动后错位
-  var biP = PANELS.findIndex(function (c) { return c.badge === 'pending'; });
-  var biA = PANELS.findIndex(function (c) { return c.badge === 'audit'; });
-  var bp = biP >= 0 ? $('bp' + biP) : null;
-  var ba = biA >= 0 ? $('bp' + biA) : null;
-  if (bp) { bp.textContent = pn; bp.className = 'badge' + (pn ? '' : ' none'); }
-  if (ba) { ba.textContent = aw > 0 ? aw : ''; ba.className = 'badge warn' + (aw > 0 ? '' : ' none'); }
+  // 徽标（审核卡：待审红优先，无待审时审计告警黄）：按 badge 字段反查卡片下标，避免数组顺序改动后错位
+  var biR = PANELS.findIndex(function (c) { return c.badge === 'review'; });
+  var br = biR >= 0 ? $('bp' + biR) : null;
+  if (br) {
+    if (pn > 0) { br.textContent = pn; br.className = 'badge'; }
+    else if (aw > 0) { br.textContent = aw; br.className = 'badge warn'; }
+    else br.className = 'badge none';
+  }
 
   $('stamp').textContent = '刷新于 ' + new Date().toTimeString().slice(0, 8) + ' · ' + apps.length + ' 应用';
 }

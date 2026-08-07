@@ -268,31 +268,19 @@
     overflow: hidden; text-overflow: ellipsis; }
   .comp-item.sel { background: var(--hover); color: var(--accent); }
 
-  /* ---- /view 详情页（内嵌 #main：覆盖聊天区为右侧详情页；分屏时左聊天右面板） ---- */
+  /* ---- /view 详情页（内嵌 #main：覆盖聊天区为右侧详情页；分屏时左聊天右面板；单视图） ---- */
   #view-overlay { position: absolute; inset: 0; z-index: 30; background: var(--bg);
     display: flex; flex-direction: column; }
   #view-overlay.hidden { display: none; }
   #view-overlay header { display: flex; align-items: center; justify-content: space-between;
     padding: 8px 14px; background: var(--bg2); border-bottom: 1px solid var(--border); }
-  #view-overlay header span { color: var(--rose); font-weight: 600; font-size: 13px; }
+  #view-title { color: var(--rose); font-weight: 600; font-size: 13px; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #view-overlay header button { background: var(--chip); color: var(--fg); border: none; border-radius: 6px;
     padding: 4px 12px; font-size: 12px; cursor: pointer; font-family: inherit; }
   #view-overlay header button:hover { background: var(--hover2); }
-  #view-tabs { display: flex; gap: 4px; align-items: center; flex: 1; min-width: 0; overflow-x: auto; }
-  .view-tab { background: var(--chip); color: var(--fg2); border: none; border-radius: 5px;
-    padding: 3px 8px 3px 10px; font-size: 12px; cursor: pointer;
-    display: flex; gap: 5px; align-items: center; white-space: nowrap; }
-  .view-tab.active { background: var(--hover2); color: var(--fg); }
-  .view-tab.warn { color: var(--warn); }
-  .view-tab.err { color: var(--danger); }
-  .view-tab .ld { width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
-    flex: none; animation: ld-pulse 1s ease-in-out infinite; }
-  @keyframes ld-pulse { 0%,100% { opacity: .4; } 50% { opacity: 1; } }
-  .view-tab-x { color: var(--fg2); font-weight: 700; padding: 0 2px; border-radius: 3px; }
-  .view-tab-x:hover { color: var(--danger); background: var(--bg2); }
   #view-panes { flex: 1; position: relative; min-height: 0; }
-  #view-panes iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: none; display: none; }
-  #view-panes iframe.active { display: block; }
+  #view-panes iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: none; }
   body.view-split #view-overlay { left: 60%; }
 
   /* ---- 速览侧边栏（右侧抽屉） ---- */
@@ -336,13 +324,10 @@
     <div id="sb-menu">
       <button id="session-new" class="sb-new" title="归档当前会话并开始新会话"><span class="mi-ico">💬</span><span>新对话</span></button>
       <div class="sb-group">功能</div>
-      <button data-cmd="/view home" data-view="home" title="功能首页（全部功能一键进入）"><span class="mi-ico">🏠</span><span>功能首页</span></button>
       <button data-cmd="/view graph" data-view="graph" title="知识库结构导航（查看图谱）"><span class="mi-ico">🕸️</span><span>知识图谱</span></button>
-      <button data-cmd="/view ops" data-view="ops" title="运营中心（热度/用量/时间线）"><span class="mi-ico">📊</span><span>运营中心</span></button>
+      <button data-cmd="/view ops" data-view="ops" title="自动化控制 + 运营数据（心跳/补链/巩固/热度/用量/时间线）"><span class="mi-ico">📊</span><span>自动化运营</span></button>
       <div class="sb-group">管理</div>
-      <button data-cmd="/view pending" data-view="pending" data-badge="pending" title="待审审核面板"><span class="mi-ico">📥</span><span>待审</span></button>
-      <button data-cmd="/view audit" data-view="audit" data-badge="audit" title="知识库健康审计面板"><span class="mi-ico">🩺</span><span>审计</span></button>
-      <button data-cmd="/view automation" data-view="automation" title="自组织能力集中控制（心跳/补链/巩固/经验/归档）"><span class="mi-ico">🔄</span><span>自动化</span></button>
+      <button data-cmd="/view pending" data-view="pending" data-badge="review" title="待审审核 + 知识库健康审计"><span class="mi-ico">📥</span><span>审核</span></button>
       <div class="sb-group">系统</div>
       <button data-cmd="/view market" data-view="market" title="应用市场"><span class="mi-ico">🧩</span><span>应用市场</span></button>
       <button data-cmd="/view config" data-view="config" title="模型/知识库/心跳配置"><span class="mi-ico">⚙️</span><span>设置</span></button>
@@ -350,7 +335,6 @@
     </div>
     <div id="sb-list"><div class="sb-empty">加载中…</div></div>
     <div id="sb-foot">
-      <button id="sb-config" title="打开配置页">⚙️ 配置</button>
       <span class="sb-ver">v<span id="sb-ver-num">?</span></span>
     </div>
   </aside>
@@ -380,12 +364,12 @@
       <div id="statusline"></div>
     </div>
 
-    <!-- /view 详情页（内嵌 #main，覆盖聊天区） -->
+    <!-- /view 详情页（内嵌 #main，覆盖聊天区；单视图：新开替换旧的） -->
     <div id="view-overlay" class="hidden">
       <header>
-        <div id="view-tabs"></div>
+        <span id="view-title">详情页</span>
+        <div class="sp"></div>
         <button id="view-split" title="切换分屏">分屏</button>
-        <button id="view-close-all" title="关闭全部视图">全部关闭</button>
         <button id="view-close" title="关闭当前视图 (Esc)">× 关闭</button>
       </header>
       <div id="view-panes"></div>

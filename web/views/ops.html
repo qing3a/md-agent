@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>md-agent 运营中心</title>
+<title>md-agent 自动化运营</title>
 <style>
   :root {
     --bg: var(--bg); --panel: var(--chip); --panel2: var(--chip3);
@@ -41,11 +41,72 @@
   .spark-row .lab { width: 72px; font-size: 12.5px; color: var(--dim); flex-shrink: 0; }
   .spark-row .sum { font-size: 12px; color: var(--fg); flex-shrink: 0; }
   .spark-row canvas { flex: 1; min-width: 0; }
+
+  /* 自动化控制区（自组织：心跳/补链/巩固/经验/归档） */
+  .ctrl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
+  .ctrl-card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .ctrl-card h2 { font-size: 13px; color: var(--fg2, #a6adc8); margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+  .ctrl-card .desc { color: var(--dim); font-size: 11.5px; line-height: 1.6; margin-bottom: 10px; }
+  .ctrl-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; flex-wrap: wrap; }
+  .ctrl-row label { font-size: 12.5px; color: var(--fg2, #a6adc8); }
+  .ctrl-card ul { margin: 8px 0 0; padding-left: 18px; color: var(--fg2, #a6adc8); font-size: 12px; line-height: 1.9; }
+  .ctrl-card ul .empty { padding: 0; }
+  .switch { position: relative; display: inline-block; width: 34px; height: 19px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .slider { position: absolute; cursor: pointer; inset: 0; background: var(--border2, #45475a); border-radius: 10px; transition: .2s; }
+  .switch .slider:before { content: ''; position: absolute; width: 13px; height: 13px; left: 3px; bottom: 3px;
+    background: var(--fg2, #a6adc8); border-radius: 50%; transition: .2s; }
+  .switch input:checked + .slider { background: var(--accent-55, rgba(137,180,250,.55)); }
+  .switch input:checked + .slider:before { transform: translateX(15px); background: var(--accent, #89b4fa); }
+  .stat { color: var(--dim); font-size: 12px; margin-top: 6px; }
+  .stat .v { color: var(--green); } .stat .w { color: var(--yellow); }
+  #msg { min-height: 18px; margin: 12px 0; font-size: 12px; color: var(--dim); white-space: pre-wrap; }
+  #msg.ok { color: var(--green); } #msg.err { color: var(--red); }
 </style>
 </head>
 <body>
-<h1>📊 运营中心</h1>
-<div class="sub">记忆热度 · 用量 · 活动时间线 · 通知 — 你的 AI 做了什么，永远可查</div>
+<h1>📊 自动化运营</h1>
+<div class="sub">自动化控制 + 运营数据：你的 AI 做了什么、自动做了什么，永远可查</div>
+
+<div class="ctrl-grid">
+  <!-- 心跳自动同步 -->
+  <div class="ctrl-card">
+    <h2>🔁 心跳自动同步</h2>
+    <p class="desc">周期性检测知识库变化，自动重建 INDEX + 图谱，并提示审计问题（孤立/悬空/重复）。</p>
+    <div class="ctrl-row">
+      <label class="switch" title="开启/关闭心跳"><input type="checkbox" id="hbOn"><span class="slider"></span></label>
+      <label for="hbSecs">周期（秒）</label>
+      <input type="number" id="hbSecs" min="5" step="5" style="width:76px;padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);color:var(--fg);font-size:12.5px;outline:none">
+      <button id="hbSave">保存</button>
+    </div>
+    <div class="stat" id="hbStat">加载中…</div>
+  </div>
+
+  <!-- 自组织：补链 + 巩固 -->
+  <div class="ctrl-card">
+    <h2>🧩 自组织</h2>
+    <p class="desc">补链建议自动应用（读时整理规则层直接写回，人审只守内容变更）；巩固器合并重复记忆。</p>
+    <div class="ctrl-row">
+      <button id="linkBtn">自动补链（应用审计建议）</button>
+      <button id="conBtn">运行巩固器</button>
+    </div>
+  </div>
+
+  <!-- 经验闭环 -->
+  <div class="ctrl-card">
+    <h2>🧠 经验闭环</h2>
+    <p class="desc">纠正/失败信号触发审视 → 经验提案进待审（fire-and-forget，零 token 触发）。</p>
+    <ul id="expList"><li class="empty">加载中…</li></ul>
+  </div>
+
+  <!-- 会话自动归档 -->
+  <div class="ctrl-card">
+    <h2>🗂 会话自动归档</h2>
+    <p class="desc">30 分钟无操作自动收尾：会话标记 archived + 摘要落 <b>notes/会话归档/</b>（进可检索层）+ 未决提案进待审。</p>
+    <div class="stat">触发：30min 空闲 / /clear / 关闭页面 · 摘要为派生产物，自动落盘无人审</div>
+  </div>
+</div>
+<div id="msg"></div>
 
 <div class="sec">记忆热度</div>
 <div class="card" id="heat-card"><canvas id="heat" width="660" height="66"></canvas></div>
@@ -76,6 +137,53 @@ const NOTIFY_KINDS = ['pending', 'task', 'doc'];
 const READ_KEY = 'ops-read-ids';
 
 const $ = (id) => document.getElementById(id);
+const msg = document.getElementById('msg');
+function setMsg(t, cls) { msg.textContent = t; msg.className = cls || ''; }
+function cmd(c) { window.parent.postMessage({ type: 'cmd', cmd: c }, '*'); }
+
+// ---- 自动化控制区 ----
+async function loadHeartbeat() {
+  try {
+    const r = await api('/api/heartbeat');
+    $('hbOn').checked = !!r.enabled;
+    $('hbSecs').value = r.interval_secs || 60;
+    let auditTxt = '';
+    if (r.audit && (r.audit.orphans || r.audit.dangling || r.audit.duplicates)) {
+      const parts = [];
+      if (r.audit.orphans) parts.push('孤立 ' + r.audit.orphans);
+      if (r.audit.dangling) parts.push('悬空 ' + r.audit.dangling);
+      if (r.audit.duplicates) parts.push('重复 ' + r.audit.duplicates);
+      auditTxt = ' · 审计⚠ ' + parts.join(' / ');
+    }
+    $('hbStat').innerHTML = '状态：<span class="' + (r.enabled ? 'v' : 'w') + '">' + (r.enabled ? '开启' : '关闭') + '</span> · 周期 ' + (r.interval_secs || 60) + 's' + (auditTxt || '');
+  } catch (e) { $('hbStat').textContent = '加载失败: ' + e.message; }
+}
+$('hbSave').addEventListener('click', async () => {
+  const secs = parseInt($('hbSecs').value, 10);
+  if (!secs || secs < 5) { setMsg('周期至少 5 秒', 'err'); return; }
+  try {
+    const r = await api('/api/heartbeat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: $('hbOn').checked, interval_secs: secs }),
+    });
+    if (r.error) throw new Error(r.error);
+    setMsg('✓ 心跳设置已保存', 'ok');
+    loadHeartbeat();
+  } catch (e) { setMsg('保存失败: ' + e.message, 'err'); }
+});
+// 自组织：补链 + 巩固（走宿主命令通道，与输入条同一生命周期）
+$('linkBtn').addEventListener('click', () => { cmd('/link-all'); setMsg('已触发自动补链（结果见主界面）', 'ok'); });
+$('conBtn').addEventListener('click', () => { cmd('/consolidate llm'); setMsg('已触发巩固器（LLM 整合版，结果见主界面/待审）', 'ok'); });
+// 经验闭环：待审中的经验提案
+async function loadExp() {
+  try {
+    const r = await api('/api/kb/pending');
+    const items = (r.pending || []).filter((p) => p.kind === 'experience' || p.path.indexOf('EXPERIENCE') !== -1);
+    const el = $('expList');
+    if (!items.length) { el.innerHTML = '<li class="empty">暂无经验提案（纠正/工具失败时会自动生成）</li>'; return; }
+    el.innerHTML = items.slice(0, 5).map((p) => '<li>' + p.title + ' <span class="empty">(' + p.path.replace('pending/', '') + ')</span></li>').join('');
+  } catch (e) { $('expList').innerHTML = '<li class="empty">加载失败</li>'; }
+}
 let items = [];          // 活动条目（id 升序）
 let lastId = 0;          // 轮询增量游标
 let readIds = new Set();
@@ -85,8 +193,8 @@ function saveRead() { try { localStorage.setItem(READ_KEY, JSON.stringify([...re
 function timeStr(ts) { return String(ts || '').slice(11, 19) || '--:--:--'; }
 function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
-async function api(path) {
-  const r = await fetch(path);
+async function api(path, opts) {
+  const r = await fetch(path, opts);
   const j = await r.json();
   if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
   return j;
@@ -247,6 +355,8 @@ async function init() {
     $('timeline').innerHTML = '<div class="empty">加载失败: ' + esc(e.message) + '</div>';
   }
 }
+loadHeartbeat().catch(() => {});
+loadExp().catch(() => {});
 $('mark-all').addEventListener('click', () => {
   items.forEach((it) => readIds.add(it.id));
   saveRead(); renderTimeline(); notifyCount();
