@@ -14,3 +14,4 @@ config.json
 .zcode/
 /.build
 /target-e2e
+/dist-test
