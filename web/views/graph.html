@@ -20,6 +20,17 @@
   #search-clear { position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
     color: var(--muted); cursor: pointer; font-size: 13px; background: none; border: none; display: none; }
   #search-clear:hover { color: var(--danger); }
+  /* 搜索候选下拉（LightRAG GraphSearch 范式：候选行带类型色点） */
+  #search-drop { position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 50;
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.35); max-height: 260px; overflow: auto; display: none; }
+  #search-drop .sd-item { display: flex; align-items: center; gap: 6px; padding: 6px 10px;
+    cursor: pointer; font-size: 12px; white-space: nowrap; }
+  #search-drop .sd-item:hover, #search-drop .sd-item.sd-sel { background: var(--chip2); }
+  #search-drop .sd-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  #search-drop .sd-ico { font-size: 12px; flex: none; }
+  #search-drop .sd-t { overflow: hidden; text-overflow: ellipsis; }
+  #search-drop .sd-p { color: var(--muted); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; }
   .tbtn { background: var(--border); color: var(--fg); border: none; border-radius: 6px;
     padding: 5px 10px; font-size: 12px; cursor: pointer; }
   .tbtn:hover { background: var(--border2); }
@@ -52,6 +63,7 @@
   .file-line .tw { width: 14px; flex: none; }
   .file-line.sel { background: var(--border); }
   .file-line.hit { outline: 2px solid var(--warn); outline-offset: -1px; }
+  .file-line.gp-hov { background: var(--chip2); box-shadow: inset 2px 0 0 var(--accent); }
   .file-line .nm { overflow: hidden; text-overflow: ellipsis; }
   .t-ico { font-size: 12px; flex: none; }
   .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
@@ -121,7 +133,7 @@
   #gp-close:hover { color: var(--danger); }
   #gp-controls { display: flex; align-items: center; gap: 8px; padding: 0 14px 4px; font-size: 11px; color: var(--muted); }
   #gp-controls input[type=range] { width: 110px; accent-color: var(--accent); }
-  #graph-panel canvas { display: block; width: 100%; height: 200px; cursor: grab; }
+  #graph-panel canvas { display: block; width: 100%; height: 240px; cursor: grab; }
   #graph-panel canvas:active { cursor: grabbing; }
   #gp-hint { padding: 0 14px 6px; font-size: 10.5px; color: var(--muted2, #7f849c); }
   #gp-tip { position: fixed; display: none; pointer-events: none; background: var(--bg2);
@@ -139,6 +151,7 @@
       <div id="search-wrap">
         <input id="search" type="text" placeholder="搜索文档…（命中高亮并聚焦局部图）" autocomplete="off" spellcheck="false">
         <span id="search-clear" title="清除">×</span>
+        <div id="search-drop"></div>
       </div>
       <button class="tbtn" id="gfilter-orphans" title="只看孤立文档">🕳 孤立</button>
       <button class="tbtn" id="gfilter-hang" title="只看含悬空链接的文档">⚠ 悬空</button>
@@ -175,11 +188,11 @@
         <button id="gp-close" title="关闭局部图">×</button>
       </div>
       <div id="gp-controls">
-        <label>深度 <input type="range" id="gp-depth" min="1" max="2" step="1" value="1"></label>
-        <span style="margin-left:auto">拖拽画布 · 滚轮缩放 · 双击节点打开文档</span>
+        <label>深度 <input type="range" id="gp-depth" min="1" max="3" step="1" value="1"></label>
+        <span style="margin-left:auto">悬停高亮邻域 · 拖节点固定 · 拖画布/滚轮缩放 · 双击节点展开</span>
       </div>
       <canvas id="gp-canvas"></canvas>
-      <div id="gp-hint">中心 = 聚焦文档；一/二跳邻居按出链入链展开，节点大小 ∝ 连接数；路径链高亮橙色</div>
+      <div id="gp-hint">中心 = 聚焦文档；节点大小 ∝ 连接数，缩放标签渐隐；选中节点带光环，树行悬停/选中与图双向联动；路径链高亮橙色</div>
     </div>
   </div>
 </div>
@@ -258,13 +271,61 @@
     });
   }
 
-  // ================= 局部图（力导向 canvas） =================
-  var gp = { nodes: [], edges: [], center: null, depth: 1, scale: 1, ox: 0, oy: 0, dragging: false, dragStart: null, pathSet: null };
+  // ================= 局部图（canvas 力导向式动画） =================
+  // 交互范式对照主流图谱产品（Obsidian/LightRAG）：hover 邻域高亮+其余淡化、度数定大小、
+  // 缩放文字淡出、拖节点固定、树↔图双向聚焦联动、搜索候选带色点
+  var gp = { nodes: [], edges: [], center: null, depth: 1, scale: 1, ox: 0, oy: 0,
+    dragging: false, dragStart: null, pathSet: null,
+    hover: null,      // canvas 悬停节点（邻域高亮 + 其余淡化）
+    linkHover: null,  // 树行悬停联动（同 hover 语义，来源不同）
+    nodeDrag: null,   // 正在拖拽的节点 {path, moved}
+    fixed: {},        // 拖拽固定的节点（重建局部图时保留屏幕位置）
+    anim: null,       // 相机平滑居中动画 {ox0,oy0,ox1,oy1,t0,dur}
+    intro: null };    // 入场动画 {t0,dur}
   var gpCanvas = document.getElementById('gp-canvas');
   var gpCtx = gpCanvas.getContext('2d');
   var gpPanel = document.getElementById('graph-panel');
-  var gpTimer = null;
+  var gpRaf = null;
   var gpTip = document.getElementById('gp-tip');
+
+  // 统一动画帧循环：有入场/相机动画时持续跑，否则单帧后停
+  function gpFrame(ts) {
+    var dirty = false;
+    if (gp.intro) {
+      var t = Math.min(1, (ts - gp.intro.t0) / gp.intro.dur);
+      var e = 1 - Math.pow(1 - t, 3); // easeOutCubic：中心散开 + 弹性收敛到同心圆
+      gp.nodes.forEach(function (n) {
+        if (gp.fixed[n.path]) return;
+        n.x = n.sx + (n.tx - n.sx) * e;
+        n.y = n.sy + (n.ty - n.sy) * e;
+      });
+      if (t >= 1) gp.intro = null;
+      dirty = true;
+    }
+    if (gp.anim) {
+      var t2 = Math.min(1, (ts - gp.anim.t0) / gp.anim.dur);
+      var e2 = 1 - Math.pow(1 - t2, 3);
+      gp.ox = gp.anim.ox0 + (gp.anim.ox1 - gp.anim.ox0) * e2;
+      gp.oy = gp.anim.oy0 + (gp.anim.oy1 - gp.anim.oy0) * e2;
+      if (t2 >= 1) gp.anim = null;
+      dirty = true;
+    }
+    gpRender();
+    if (dirty) gpRaf = requestAnimationFrame(gpFrame);
+    else gpRaf = null;
+  }
+  function scheduleGpFrame() {
+    if (gpRaf === null) gpRaf = requestAnimationFrame(gpFrame);
+  }
+  // 相机平滑居中到某节点（树行/搜索/节点点击聚焦共用）
+  function gpFocusNode(path) {
+    var n = gp.nodes.find(function (x) { return x.path === path; });
+    if (!n) return;
+    var w = gpCanvas.clientWidth || 600;
+    var h = 240;
+    gp.anim = { ox0: gp.ox, oy0: gp.oy, ox1: w / 2 - n.x * gp.scale, oy1: h / 2 - n.y * gp.scale, t0: performance.now(), dur: 320 };
+    scheduleGpFrame();
+  }
 
   function openLocalGraph(path) {
     var n = state.byPath[path];
@@ -279,6 +340,9 @@
   function closeLocalGraph() {
     gpPanel.classList.add('hidden');
     gp.nodes = []; gp.edges = []; gp.center = null; gp.pathSet = null;
+    gp.hover = null; gp.linkHover = null; gp.fixed = {};
+    var cur = document.querySelector('.file-line.gp-hov');
+    if (cur) cur.classList.remove('gp-hov');
   }
   function buildLocalGraph() {
     var nodes = {}, edges = [];
@@ -318,7 +382,7 @@
   function layoutGp() {
     var center = gp.nodes.find(function (n) { return n.path === gp.center; });
     if (!center) return;
-    center.x = 0; center.y = 0;
+    center.tx = 0; center.ty = 0;
     var hops = {};
     gp.nodes.forEach(function (n) { hops[n.path] = n.path === gp.center ? 0 : 1; });
     var changed = true;
@@ -335,20 +399,39 @@
       var h = hops[n.path] || 0;
       (layers[h] = layers[h] || []).push(n);
     });
-    var R = 62;
+    var R = 66;
     Object.keys(layers).forEach(function (h) {
       var arr = layers[h];
       if (h === '0') return;
       var r = R * parseInt(h, 10);
       arr.forEach(function (n, i) {
         var ang = (i / arr.length) * Math.PI * 2 - Math.PI / 2;
-        n.x = Math.cos(ang) * r;
-        n.y = Math.sin(ang) * r;
+        n.tx = Math.cos(ang) * r;
+        n.ty = Math.sin(ang) * r;
       });
+    });
+    // 固定节点保留用户拖放位置；其余从中心小偏移散开做入场动画
+    var now = performance.now();
+    gp.intro = { t0: now, dur: 650 };
+    gp.nodes.forEach(function (n) {
+      if (gp.fixed[n.path]) { n.tx = gp.fixed[n.path].x; n.ty = gp.fixed[n.path].y; }
+      n.sx = (Math.random() - 0.5) * 40;
+      n.sy = (Math.random() - 0.5) * 40;
+      n.x = n.sx; n.y = n.sy;
     });
     gp.scale = 1; gp.ox = 0; gp.oy = 0;
   }
-  function gpNodeR(n) { return n.path === gp.center ? 10 : 4 + Math.min(8, (n.conn || 0) * 1.5); }
+  function gpNodeR(n) { return n.path === gp.center ? 11 : 5 + Math.min(9, (n.conn || 0) * 1.8); }
+  // 邻域集合：hover/linkHover 节点 + 其一级邻居（Obsidian 式邻域高亮）
+  function gpNeighbors(path) {
+    var set = {};
+    set[path] = true;
+    gp.edges.forEach(function (e) {
+      if (e.s === path) set[e.t] = true;
+      if (e.t === path) set[e.s] = true;
+    });
+    return set;
+  }
   function edgeInPath(e) {
     if (!gp.pathSet) return false;
     for (var i = 0; i < gp.pathSet.length - 1; i++) {
@@ -359,47 +442,89 @@
   }
   function gpRender() {
     var dpr = window.devicePixelRatio || 1;
-    var w = gpCanvas.clientWidth || 600, h = 200;
+    var w = gpCanvas.clientWidth || 600, h = 240;
     gpCanvas.width = w * dpr; gpCanvas.height = h * dpr;
     gpCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
     gpCtx.clearRect(0, 0, w, h);
+    // 背景网格点阵（轻质感，避免大片纯色）
+    gpCtx.fillStyle = 'rgba(127,132,148,0.10)';
+    for (var gx = (gp.ox % 24 + 24) % 24; gx < w; gx += 24) {
+      for (var gy = (gp.oy % 24 + 24) % 24; gy < h; gy += 24) {
+        gpCtx.fillRect(gx, gy, 1.2, 1.2);
+      }
+    }
     var cx = w / 2 + gp.ox, cy = h / 2 + gp.oy;
     gpCtx.save();
     gpCtx.translate(cx, cy);
     gpCtx.scale(gp.scale, gp.scale);
-    // 边：路径链橙色加粗，其余淡色
+    // 邻域高亮：hover 节点（画布）或 linkHover（树行）时，激活集正常、其余淡化
+    var act = gp.hover ? gpNeighbors(gp.hover) : (gp.linkHover ? gpNeighbors(gp.linkHover) : null);
+    var isAct = function (p) { return !act || act[p]; };
+    var labelAlpha = Math.max(0, Math.min(1, (gp.scale - 0.45) / 0.35)); // 文字淡出阈值（Obsidian）
+    // 边：普通边按 源→目标 类型色渐变；邻域相关边提亮；路径链橙色加粗
     gp.edges.forEach(function (e) {
       var a = gp.nodes.find(function (n) { return n.path === e.s; });
       var b = gp.nodes.find(function (n) { return n.path === e.t; });
       if (!a || !b) return;
       var inPath = edgeInPath(e);
-      gpCtx.strokeStyle = inPath ? '#f9e2af' : 'rgba(137,180,250,0.32)';
-      gpCtx.lineWidth = inPath ? 3 : 1;
+      var linked = act && (act[e.s] && act[e.t]);
+      var ma = typeMeta(state.byPath[e.s] && state.byPath[e.s].type);
+      var mb = typeMeta(state.byPath[e.t] && state.byPath[e.t].type);
+      if (inPath) {
+        gpCtx.strokeStyle = '#f9e2af'; gpCtx.lineWidth = 3; gpCtx.globalAlpha = 1;
+      } else if (linked) {
+        gpCtx.strokeStyle = '#cdd6f4'; gpCtx.lineWidth = 1.6; gpCtx.globalAlpha = 0.95;
+      } else {
+        var grad = gpCtx.createLinearGradient(a.x, a.y, b.x, b.y);
+        grad.addColorStop(0, ma.color); grad.addColorStop(1, mb.color);
+        gpCtx.strokeStyle = grad; gpCtx.lineWidth = 1; gpCtx.globalAlpha = act ? 0.10 : 0.32;
+      }
       gpCtx.beginPath(); gpCtx.moveTo(a.x, a.y); gpCtx.lineTo(b.x, b.y); gpCtx.stroke();
     });
+    gpCtx.globalAlpha = 1;
+    // 节点：度数定大小；hover 节点光晕；选中节点光环；邻域淡化
     gp.nodes.forEach(function (n) {
       var isC = n.path === gp.center;
       var inPath = gp.pathSet && gp.pathSet.indexOf(n.path) !== -1;
       var m = typeMeta(state.byPath[n.path] && state.byPath[n.path].type);
+      var r = gpNodeR(n);
+      var active = isAct(n.path);
+      gpCtx.globalAlpha = active ? (inPath ? 1 : 0.92) : 0.16;
+      // hover 目标光晕
+      if (gp.hover === n.path || gp.linkHover === n.path) {
+        gpCtx.beginPath();
+        gpCtx.arc(n.x, n.y, r + 7, 0, Math.PI * 2);
+        gpCtx.fillStyle = m.color; gpCtx.globalAlpha = active ? 0.18 : 0;
+        gpCtx.fill();
+        gpCtx.globalAlpha = active ? 1 : 0.16;
+      }
       gpCtx.beginPath();
-      gpCtx.arc(n.x, n.y, gpNodeR(n), 0, Math.PI * 2);
+      gpCtx.arc(n.x, n.y, r, 0, Math.PI * 2);
       gpCtx.fillStyle = isC ? '#f38ba8' : m.color;
-      gpCtx.globalAlpha = (inPath || isC) ? 1 : 0.7;
       gpCtx.fill();
-      gpCtx.globalAlpha = 1;
+      // 路径链 / 选中 / 固定节点描边
       if (inPath && !isC) { gpCtx.strokeStyle = '#f9e2af'; gpCtx.lineWidth = 2; gpCtx.stroke(); }
-      if (n.path !== gp.center) {
+      if (state.sel === n.path) {
+        gpCtx.strokeStyle = '#ffffff'; gpCtx.lineWidth = 1.6; gpCtx.globalAlpha = active ? 0.9 : 0.3;
+        gpCtx.stroke();
+      }
+      if (gp.fixed[n.path]) {
+        gpCtx.strokeStyle = '#a6adc8'; gpCtx.lineWidth = 1; gpCtx.globalAlpha = active ? 0.7 : 0.2;
+        gpCtx.stroke();
+      }
+      gpCtx.globalAlpha = 1;
+      // 标签：缩放淡出 + 邻域内显示更长
+      if (n.path !== gp.center && labelAlpha > 0.02) {
+        var showLen = (gp.hover === n.path || gp.linkHover === n.path || (act && act[n.path])) ? 16 : 9;
         gpCtx.fillStyle = '#cdd6f4';
-        gpCtx.font = '9px Consolas, monospace';
+        gpCtx.font = (10 * Math.min(1, gp.scale)) + 'px Consolas, monospace';
         gpCtx.textAlign = 'center';
-        gpCtx.fillText((state.byPath[n.path].title || n.path.split('/').pop()).slice(0, 10), n.x, n.y - gpNodeR(n) - 3);
+        gpCtx.globalAlpha = labelAlpha * (active ? 0.95 : 0.3);
+        gpCtx.fillText((state.byPath[n.path].title || n.path.split('/').pop()).slice(0, showLen), n.x, n.y - r - 3);
+        gpCtx.globalAlpha = 1;
       }
     });
     gpCtx.restore();
-  }
-  function scheduleGpFrame() {
-    clearTimeout(gpTimer);
-    gpTimer = setTimeout(gpRender, 30);
   }
   // 画布坐标 → 节点命中
   function gpHit(e) {
@@ -412,15 +537,47 @@
     });
   }
   gpCanvas.addEventListener('mousedown', function (e) {
-    gp.dragging = true;
-    gp.dragStart = { x: e.clientX, y: e.clientY, ox: gp.ox, oy: gp.oy };
+    var hit = gpHit(e);
+    if (hit) {
+      // 命中节点 → 拖拽固定（Obsidian/force-graph 范式）
+      gp.nodeDrag = { path: hit.path, moved: false, sx: e.clientX, sy: e.clientY };
+    } else {
+      gp.dragging = true;
+      gp.dragStart = { x: e.clientX, y: e.clientY, ox: gp.ox, oy: gp.oy };
+    }
     e.preventDefault();
   });
   window.addEventListener('mousemove', function (e) {
+    // 节点拖拽：跟随鼠标 + 固定位置
+    if (gp.nodeDrag) {
+      var nd = gp.nodeDrag;
+      if (Math.abs(e.clientX - nd.sx) + Math.abs(e.clientY - nd.sy) > 3) nd.moved = true;
+      var r = gpCanvas.getBoundingClientRect();
+      var n = gp.nodes.find(function (x) { return x.path === nd.path; });
+      if (n) {
+        n.x = (e.clientX - r.left - r.width / 2 - gp.ox) / gp.scale;
+        n.y = (e.clientY - r.top - r.height / 2 - gp.oy) / gp.scale;
+        gp.fixed[nd.path] = { x: n.x, y: n.y };
+        scheduleGpFrame();
+      }
+      return;
+    }
     if (!gp.dragging || gpPanel.classList.contains('hidden') || !gp.dragStart) {
-      // hover tooltip
+      // hover 邻域高亮 + tooltip（非拖拽时）
       if (!gpPanel.classList.contains('hidden') && e.target === gpCanvas) {
         var hit = gpHit(e);
+        var hoverPath = hit ? hit.path : null;
+        if (hoverPath !== gp.hover) {
+          gp.hover = hoverPath;
+          // 图→树联动：画布 hover 时树行同步高亮（.gp-hov）
+          var cur = document.querySelector('.file-line.gp-hov');
+          if (cur) cur.classList.remove('gp-hov');
+          if (hoverPath) {
+            var tl = document.querySelector('.file-line[data-path="' + hoverPath.replace(/"/g, '\\"') + '"]');
+            if (tl) tl.classList.add('gp-hov');
+          }
+          scheduleGpFrame();
+        }
         if (hit) {
           var n = state.byPath[hit.path];
           var m = typeMeta(n.type);
@@ -428,7 +585,8 @@
           gpTip.style.left = (e.clientX + 12) + 'px';
           gpTip.style.top = (e.clientY + 12) + 'px';
           gpTip.innerHTML = m.ico + ' ' + esc(n.title || hit.path.split('/').pop()) +
-            ' <span style="color:#7f849c">' + m.label + ' · ' + (n.in_degree + n.out_degree) + ' 连接</span>';
+            ' <span style="color:#7f849c">' + m.label + ' · ' + (n.in_degree + n.out_degree) + ' 连接' +
+            (gp.fixed[hit.path] ? ' · 已固定' : '') + '</span>';
         } else {
           gpTip.style.display = 'none';
         }
@@ -439,8 +597,19 @@
     gp.oy = gp.dragStart.oy + (e.clientY - gp.dragStart.y);
     scheduleGpFrame();
   });
-  window.addEventListener('mouseup', function () { gp.dragging = false; gp.dragStart = null; });
-  gpCanvas.addEventListener('mouseleave', function () { gpTip.style.display = 'none'; });
+  window.addEventListener('mouseup', function () {
+    gp.dragging = false; gp.dragStart = null;
+    if (gp.nodeDrag) gp.nodeDrag = null; // click 处理器用 moved 标志区分拖拽与点击
+  });
+  gpCanvas.addEventListener('mouseleave', function () {
+    gpTip.style.display = 'none';
+    if (gp.hover) {
+      gp.hover = null;
+      var cur = document.querySelector('.file-line.gp-hov');
+      if (cur) cur.classList.remove('gp-hov');
+      scheduleGpFrame();
+    }
+  });
   gpCanvas.addEventListener('wheel', function (e) {
     e.preventDefault();
     gp.scale = Math.max(0.4, Math.min(3, gp.scale * (e.deltaY < 0 ? 1.1 : 0.9)));
@@ -452,7 +621,7 @@
   });
   gpCanvas.addEventListener('click', function (e) {
     var hit = gpHit(e);
-    if (hit) selectDoc(hit.path);
+    if (hit) selectDoc(hit.path); // selectDoc 内会相机聚焦该节点
   });
   document.getElementById('gp-close').addEventListener('click', closeLocalGraph);
   document.getElementById('gp-depth').addEventListener('input', function () {
@@ -608,6 +777,12 @@
       lines[i].classList.toggle('sel', lines[i].getAttribute('data-path') === path);
     }
     showDetail(path);
+    // 树↔图联动：图中含该节点 → 相机平滑聚焦居中 + 树行滚动到可视
+    if (!gpPanel.classList.contains('hidden') && gp.nodes.some(function (n) { return n.path === path; })) {
+      gpFocusNode(path);
+    }
+    var line = document.querySelector('.file-line[data-path="' + path.replace(/"/g, '\\"') + '"]');
+    if (line && line.scrollIntoView) line.scrollIntoView({ block: 'nearest' });
   }
   function renderTree() {
     var root = {};
@@ -676,6 +851,13 @@
             row.appendChild(h);
           }
           row.addEventListener('click', function () { selectDoc(n.path); });
+          // 树行悬停 → 图内对应节点邻域高亮（双向联动）
+          row.addEventListener('mouseenter', function () {
+            if (gp.linkHover !== n.path) { gp.linkHover = n.path; scheduleGpFrame(); }
+          });
+          row.addEventListener('mouseleave', function () {
+            if (gp.linkHover === n.path) { gp.linkHover = null; scheduleGpFrame(); }
+          });
           container.appendChild(row);
         });
       }
@@ -754,34 +936,75 @@
     });
   }
 
-  // ================= 搜索（面板内检索 → 高亮 + 聚焦） =================
+  // ================= 搜索（面板内检索 → 候选带色点下拉 + 高亮 + 聚焦） =================
   var searchTimer = null;
+  var searchDrop = document.getElementById('search-drop');
+  function renderSearchDrop(hits) {
+    if (!hits || !hits.length) { searchDrop.style.display = 'none'; return; }
+    searchDrop.innerHTML = '';
+    hits.slice(0, 8).forEach(function (p) {
+      var n = state.byPath[p];
+      if (!n) return;
+      var m = typeMeta(n.type);
+      var it = document.createElement('div');
+      it.className = 'sd-item';
+      it.innerHTML = '<span class="sd-dot" style="background:' + m.color + '"></span>' +
+        '<span class="sd-ico">' + m.ico + '</span>' +
+        '<span class="sd-t">' + esc(n.title || p.split('/').pop()) + '</span>' +
+        '<span class="sd-p">' + esc(p) + '</span>';
+      it.title = '聚焦: ' + p;
+      it.addEventListener('click', function () { pickSearchHit(p); });
+      searchDrop.appendChild(it);
+    });
+    searchDrop.style.display = 'block';
+  }
+  function pickSearchHit(path) {
+    searchDrop.style.display = 'none';
+    expandToPath(path);
+    openLocalGraph(path);
+    selectDoc(path);
+  }
   document.getElementById('search').addEventListener('input', function () {
     var q = this.value.trim();
     document.getElementById('search-clear').style.display = q ? 'block' : 'none';
+    if (!q) { searchDrop.style.display = 'none'; searchHits = []; renderTree(); return; }
     clearTimeout(searchTimer);
     searchTimer = setTimeout(function () { doSearch(q); }, 250);
+  });
+  document.getElementById('search').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      var first = searchDrop.querySelector('.sd-item');
+      if (first) first.click();
+    }
+  });
+  document.addEventListener('click', function (e) {
+    if (!searchDrop.contains(e.target) && e.target.id !== 'search') searchDrop.style.display = 'none';
   });
   document.getElementById('search-clear').addEventListener('click', function () {
     document.getElementById('search').value = '';
     document.getElementById('search-clear').style.display = 'none';
+    searchDrop.style.display = 'none';
     searchHits = [];
     renderTree();
   });
   async function doSearch(q) {
     searchHits = [];
+    var hits = [];
     if (q) {
       try {
         var r = await hostApi('/api/search?q=' + encodeURIComponent(q) + '&layer=notes');
-        searchHits = (r.hits || []).map(function (h) { return h.file; });
+        hits = (r.hits || []).map(function (h) { return h.file; });
       } catch (e) { /* 搜索失败静默 */ }
     }
+    searchHits = hits;
     renderTree();
-    if (searchHits.length) {
-      // 展开命中文件所在目录 + 聚焦第一个命中的局部图
-      expandToPath(searchHits[0]);
-      openLocalGraph(searchHits[0]);
-      selectDoc(searchHits[0]);
+    renderSearchDrop(hits);
+    if (hits.length) {
+      // 保留自动聚焦：首个命中打开局部图 + 树行展开高亮
+      expandToPath(hits[0]);
+      openLocalGraph(hits[0]);
+      selectDoc(hits[0]);
     }
   }
   function expandToPath(path) {
