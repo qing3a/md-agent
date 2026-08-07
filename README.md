@@ -28,6 +28,7 @@
 
 - **全文检索**：内嵌 ripgrep 内核（grep + ignore crate），多关键词任一命中、智能大小写、小节上下文（`section`/`context`）
 - **知识图谱**：SQLite `documents`/`links` 两表：`[[双向链接]]` 解析、反向链接、孤立文档检测、标签/项目维度统计；首次调用自动建库，`/sync`、`/rescan` 或心跳自动重建
+- **图谱可视化（/view graph）**：打开即**全库大图**（Obsidian 式，默认全屏，可切「双栏」树+图）；度数最高文档为 hub 中心展开全部连通节点、孤立文档补最外环；hover 邻域高亮+其余淡化（画布↔树行双向）、节点大小∝连接数、缩放文字淡出、入场动画、节点拖拽固定、选中光环+相机平滑聚焦、搜索候选下拉带类型色点（命中即聚焦）、边按类型渐变着色、深度滑块 1-3
 
 ### 终端交互
 
@@ -36,7 +37,7 @@
 
 ### 面板视图
 
-- **/view 面板渲染层**：iframe 沙箱 + postMessage 桥（视图经宿主调 `/api/*`，仅允许 api 前缀，真机验证通过）：`/view graph` 知识库结构导航（目录层级缩进树 + 项目色点 + 孤立/悬空标记，点击文档右侧显示出链/入链并可跳转——全图环形布局发散已弃用）、`/view board` 任务看板、`/view automation` 自动化面板（控制/审核/运营数据三栏目）、`/view <html>` 渲染 kb 内本地 HTML、`/view off` 或 Esc 关闭；**单视图**（同一时刻只开一个详情页，新开替换旧的，`/view ops`/`/view pending`/`/view audit` 兼容映射到自动化面板）；分屏参照（header「分屏/全屏」切换：终端占左 40% 保持可见可参照 + 视图右 60%，选择记忆、关闭视图自动回全屏）；沙箱脚本错误上报宿主写终端提示、桥请求 20s 超时兜底；面板写操作（批准待审/改任务/补链/卸载）经桥回传后主界面状态栏即时刷新；关闭视图后焦点自动归还终端输入框（面板往返无需点终端）
+- **/view 面板渲染层**：iframe 沙箱 + postMessage 桥（视图经宿主调 `/api/*`，仅允许 api 前缀，真机验证通过）：`/view graph` 知识图谱可视化（**打开即全库大图**：hover 邻域高亮/度数定大小/文字淡出/树图双向联动/搜索聚焦/全屏切换，详见「检索与图谱」）、`/view board` 任务看板、`/view automation` 自动化面板（控制/审核/运营数据三栏目）、`/view <html>` 渲染 kb 内本地 HTML、`/view off` 或 Esc 关闭；**单视图**（同一时刻只开一个详情页，新开替换旧的，`/view ops`/`/view pending`/`/view audit` 兼容映射到自动化面板）；分屏参照（header「分屏/全屏」切换：终端占左 40% 保持可见可参照 + 视图右 60%，选择记忆、关闭视图自动回全屏）；沙箱脚本错误上报宿主写终端提示、桥请求 20s 超时兜底；面板写操作（批准待审/改任务/补链/卸载）经桥回传后主界面状态栏即时刷新；关闭视图后焦点自动归还终端输入框（面板往返无需点终端）
 - **自动化面板**：`/view automation`（兼容 `/view ops`/`/view pending`/`/view audit`），手风琴三栏目——① 自动化控制（心跳开关/周期/自动补链/巩固器/经验闭环/会话归档说明）② 审核（待审三栏：清单批量勾选/目标上下文+绿色 diff/可编辑内容，支持编辑后批准与批量批准/拒绝；下叠健康审计折叠区：补链建议一键 [应用]、悬空/孤立/重复分组展示，`/audit` 终端版保留）③ 运营数据（记忆热度 / token 用量与缓存命中 / 近 7 日检索·工具·待审趋势 / 活动时间线与未读通知，3s 轮询）
 - **待审行级预览**：`/preview <待审路径>` 只读展示批准后将写入的内容（记忆条目按当日小节合并规则计算，不落盘）
 - **可视化配置页**：`/config.html`：endpoint / model / api_key（掩码显示）+ 测试连接
@@ -50,7 +51,7 @@
 ### 工具链
 
 - **网页读取与操作**：`/fetch <url> [标题]` 静态抓取；`/page <url> [标题]` 动态读取（headless 等 JS 渲染）；`/page act <url> <json 动作数组>` 写侧（click/fill/select/scroll，动作清单**人工确认后执行**，返回页面结果）
-- **文档摄入**：附件按钮「＋」选 PDF/DOCX/PPT/XLS/CSV/EPUB 等 → anydoc 本地转 Markdown（dry-run 预览 → y/N 人审确认）→ 落 `notes/` 自动重建 INDEX+图谱；扫描件/加密文档明确报错
+- **文档摄入**：附件按钮「＋」选 PDF/DOCX/PPT/XLS/CSV/EPUB 等 → anydoc 本地转 Markdown（dry-run 预览 → 软弹窗确认）→ 落 `notes/` 自动重建 INDEX+图谱；扫描件/加密文档明确报错
 - **任务引擎（Phase 3-B）**：`kb/.tasks.db` 独立 SQLite：目标/状态机（待办·进行中·完成·放弃）/依赖/推进日志；`/task` 终端文字看板 + `/task board` HTML 看板；**依赖就绪校验**（进入进行中/完成时依赖必须已完成）；`/task plan <目标>` LLM 拆解串行子任务链
 
 ### Agent 与 LLM
@@ -166,7 +167,7 @@ open <路径>           查看 KB 内 MD
 /fetch <url> [标题]    静态抓取网页：阅读视图 / 带标题则沉淀为待审笔记
 /page <url> [标题]     动态网页读取（headless Edge/Chrome，等 JS 渲染）
 # 文档摄入
-＋ 附件按钮             摄入 PDF/DOCX/PPT/XLS/CSV/EPUB → 预览 → y/N 确认进 notes/
+＋ 附件按钮             摄入 PDF/DOCX/PPT/XLS/CSV/EPUB → 预览 → 软弹窗确认进 notes/
 
 # 任务
 /task                  任务看板：new/start/done/drop/note/dep/rm/plan/board
@@ -177,7 +178,9 @@ open <路径>           查看 KB 内 MD
 /heartbeat [on|off|interval <秒>|status]  心跳自动同步开关/周期/状态（变化自动重建+审计提示）
 /health               服务健康检查
 ```
-`/page act <url> <json 动作数组>`：动态页**写侧**——click/fill/select/scroll，动作清单打印后 `y/N` 人工确认才执行（例：`/page act https://example.com [{"kind":"fill","selector":"#q","value":"hello"},{"kind":"click","selector":"#btn"}]`）。
+`/page act <url> <json 动作数组>`：动态页**写侧**——click/fill/select/scroll，动作清单打印后软弹窗确认才执行（例：`/page act https://example.com [{"kind":"fill","selector":"#q","value":"hello"},{"kind":"click","selector":"#btn"}]`）。
+
+确认交互约定：**可逆操作免确认**（新对话/归档会话/断开 hub 直接执行），**不可逆或安全敏感操作走页面内软弹窗**（删除会话/文档摄入/动作执行/安装/卸载/更新等，危险操作红色按钮，Esc/遮罩/取消均可退出）——不再有终端 y/N 按键等待。
 
 ### 打包发布
 
@@ -274,7 +277,7 @@ Phase 3-C Harness 深化（✅ P1/P3/P4 + SkillHub 接入已完成；P2 巩固�
          ├─ ✅ P2 巩固/遗忘：consolidate 两阶段（先规则后 LLM）+ 记忆提案四型待审通道；任务感知上下文组装（CE 组装器 + memory_summary 注入；C 半步：LLM 配置时 L1 全文移出前缀、read_l1/search 按需取用——同口径评测 input/total -47%、cache 率 74%）
          ├─ ✅ P3 Skills / 程序性自组织：/suggest、/audit 产出升级为程序性技能（技能格式 + 注册表 /api/skills + trigger 命中自动注入）
          ├─ ✅ P4 App 系统（原 Phase 4 提前）：manifest + 权限白名单 + 生命周期（/api/market/*）+ 面板/托盘动态菜单 + 沙箱 iframe 渲染（/view）
-         └─ ✅ SkillHub 接入：应用市场 = hub 管理端 + 客户端——/market connect 连接第三方 SkillHub（skillhub.md 索引协议），安装走命令行（面板降级：第三方无稳定 API，面板只管理运行/关闭/卸载）；本地导入兜底；market.connect 工具 + 技能触发（LLM 一句话连商店）；面板双 Tab（目录/已安装）+ 来源 hub 记录 + 条目统一（应用与技能同目录，按包内容识别落点：app.json→kb/apps/，SKILL.md/裸 md→kb/skills/）
+         └─ ✅ SkillHub 接入：应用市场 = hub 管理端 + 客户端——/market connect 连接第三方 SkillHub（skillhub.md 索引协议），安装走命令行（面板降级：第三方无稳定 API，面板只管理运行/关闭/卸载）；本地导入兜底；market.connect 工具 + 技能触发（LLM 一句话连商店）；面板双 Tab（目录/已安装，**打开默认「已安装」**，目录 Tab 已装应用排最前并标注徽标）+ 来源 hub 记录 + 条目统一（应用与技能同目录，按包内容识别落点：app.json→kb/apps/，SKILL.md/裸 md→kb/skills/）
 Phase 4  生态化（可选，与"轻量"定位有张力，个人场景可长期搁置）
          ├─ MCP 客户端（Stdio/SSE）；兼容标准 MCP App 渲染（复用统一 iframe 渲染层）
          └─ WASM 计算后端（仅当出现"本地运行不可信计算"的真实需求）
@@ -324,7 +327,7 @@ Phase 4  生态化（可选，与"轻量"定位有张力，个人场景可长期
 bash scripts/test.sh          # 一键回归：Rust 单测 + 前端逻辑测试 + E2E 四型审批链路
 cargo test                    # Rust 单测（kb/graph/task/search/heartbeat/consolidate/config/…）
 node scripts/frontend-test.js # 前端纯逻辑测试（core.js，66 断言，零 DOM）
-node --test tests/web/        # 前端 node:test 套件（core.test.js，15 组）
+node --test tests/web/        # 前端 node:test 套件（core 15 组 + market 2 组）
 python scripts/e2e.py         # E2E：隔离 kb 起服务，跑待审四型审批链路
 ```
 
@@ -351,8 +354,8 @@ src/task.rs       任务引擎（kb/.tasks.db 独立库：状态机/依赖/日�
 src/kb.rs         双层记忆布局 / frontmatter 解析 / INDEX 自动生成 / 路径安全 / 待审机制
 src/config.rs     本地配置
 web/              xterm.js 终端前端（Agent 回路 + 管理命令）+ config.html 配置页
-web/views/        内置面板视图（graph.html 结构导航 / board.html 任务看板）
-tests/web/        前端 node:test 纯逻辑测试（core.test.js）
+web/views/        内置面板视图（graph.html 全库大图可视化 / automation.html 自动化三栏目 / market.html 应用市场 / board.html 任务看板）
+tests/web/        前端 node:test 纯逻辑测试（core.test.js / market.test.js）
 kb/               L1 规范层 + L2 内容层（首次运行自动补齐模板）
 scripts/          mock_llm.py / frontend-test.js / e2e.py / test.sh
 dist/             release 打包产物（双击即用）
