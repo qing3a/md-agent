@@ -45,13 +45,16 @@ const html = fs.readFileSync(path.join(__dirname, '../../web/views/market.html')
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 eval(script);
 
-test('首次加载默认落在「已安装」Tab（有已装应用时）', async () => {
-  await load();
+test('市场视图首次加载默认落在「已安装」Tab（有已装应用时）', async () => {
+  await load();       // 工作台数据（apps 就位）
+  await loadMarket(); // 进入市场视图（触发已安装优先逻辑）
   assert.ok(getEl('tab-installed')._cls.has('sel'), '已安装 Tab 应选中');
   assert.ok(!getEl('tab-catalog')._cls.has('sel'), '目录 Tab 不应选中');
 });
 
-test('目录 Tab：已安装排最前 + [已安装] 徽标', async () => {
+test('市场视图目录 Tab：已安装排最前 + [已安装] 徽标', async () => {
+  await load();
+  await loadMarket();
   tab = 'catalog'; sel = null; render();
   const out = getEl('items')._html;
   const posMatch = out.indexOf('match');
@@ -61,4 +64,13 @@ test('目录 Tab：已安装排最前 + [已安装] 徽标', async () => {
   assert.ok(posOw !== -1 && posZzz !== -1 && posOw < posZzz, '已装 ow-recruit 应排在未装 zzz 前');
   assert.strictEqual((out.match(/\[已安装\]/g) || []).length, 2, '徽标应恰好 2 个');
   assert.ok(getEl('count')._text.includes('3 个可用'), '计数应为 3 个可用');
+});
+
+test('工作台：应用卡片网格渲染 + 状态条', async () => {
+  await load();
+  const out = getEl('wb-apps')._html;
+  assert.ok(out.includes('match') && out.includes('ow-recruit'), '应用卡片应包含已安装应用');
+  assert.ok(out.includes('data-run='), '卡片应带运行按钮');
+  assert.ok(getEl('wb-funcs')._html.includes('知识图谱'), '常用功能应含知识图谱入口');
+  assert.ok(getEl('wb-status')._html.includes('文档'), '状态条应显示');
 });

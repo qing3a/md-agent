@@ -273,7 +273,7 @@ fn run_tray(url: &str, kb_root: &Path) {
         tray: None,
     };
 
-    // 托盘动态菜单（应用市场阶段 3）：30s 定时重建——应用安装/卸载后自动反映
+    // 托盘动态菜单（工作台/应用市场阶段 3）：30s 定时重建——应用安装/卸载后自动反映
     {
         let proxy = event_loop.create_proxy();
         std::thread::spawn(move || loop {
@@ -287,12 +287,12 @@ fn run_tray(url: &str, kb_root: &Path) {
     }
 }
 
-/// 构建动态托盘菜单：导航组（打开终端 / 应用市场）+ 已安装应用子菜单（动态）+ 面板导航子菜单
+/// 构建动态托盘菜单：导航组（打开终端 / 工作台）+ 已安装应用子菜单（动态）+ 面板导航子菜单
 /// + 设置组（心跳同步勾选 / Key 设置）+ 退出；分隔线分组便于扫读
 fn build_menu(kb_root: &Path) -> (Menu, TrayIds) {
     let menu = Menu::new();
     let open_item = MenuItem::new("打开终端", true, None);
-    let market_item = MenuItem::new("应用市场", true, None);
+    let market_item = MenuItem::new("工作台", true, None);
     let sync_item = MenuItem::new("同步", true, None);
     // 复选框 + 文字态双信号：对勾在部分主题下不明显，文字「开/关」保证反馈可见。
     // 注意 with_id 参数顺序：(id, text, enabled, checked, accelerator) —— enabled 恒为 true，

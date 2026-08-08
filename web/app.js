@@ -850,7 +850,7 @@
     ['/reject', '拒绝待审'], ['/view', '面板渲染层'], ['/audit', '知识库健康审计'], ['/risk', '风控预警（时效/证据/信息）'],
     ['/conflicts', '冲突检查'], ['/link', '补链接'],
     ['/link-all', '批量补链接'], ['/suggest', '补全缺失文档'], ['/fetch', '抓取网页'],
-    ['/page', '动态网页读取'], ['/task', '任务引擎'], ['/market', '应用市场'], ['/clear', '清空多轮记忆'],
+    ['/page', '动态网页读取'], ['/task', '任务引擎'], ['/market', '工作台/应用市场'], ['/clear', '清空多轮记忆'],
     ['/config', '查看配置'], ['/heartbeat', '心跳自动同步'], ['/newproject', '新建项目'],
     ['clear', '清屏'],
   ];
@@ -3048,7 +3048,7 @@
       const path = arg === 'config' ? '/config.html' : arg === 'onboarding' ? '/onboarding.html' : '/views/' + arg + '.html';
       const r = await fetch(path);
       if (!r.ok) throw new Error('内置视图加载失败: HTTP ' + r.status);
-      const titles = { graph: '知识图谱', board: '任务看板', automation: '自动化（控制 / 审核 / 运营数据）', market: '应用市场', home: '功能首页', sessions: '历史会话', config: '设置', onboarding: '开始使用' };
+      const titles = { graph: '知识图谱', board: '任务看板', automation: '自动化（控制 / 审核 / 运营数据）', market: '工作台', home: '功能首页', sessions: '历史会话', config: '设置', onboarding: '开始使用' };
       openView(titles[arg], await r.text(), null, { kind: 'builtin', arg });
       return;
     }
@@ -3237,7 +3237,7 @@
     { k: '图谱', d: '知识图谱（类型化/局部图/关系探索）', run: '/view graph' },
     { k: '自动化', d: '自动化控制 + 审核 + 运营数据', run: '/view automation' },
     { k: '看板', d: '任务看板', run: '/view board' },
-    { k: '市场', d: '应用市场（SkillHub 管理端）', run: '/view market' },
+    { k: '工作台', d: '我的应用 + 常用功能 + 应用市场', run: '/view market' },
   ];
   let sideTimer = null;   // 状态中心 8s 轮询（与状态行同源数据）
   let sideSel = -1;       // 候选选中下标
