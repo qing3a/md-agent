@@ -153,12 +153,23 @@
       term.writeln('\x1b[33m用法: /resume <会话 id 或标题关键词>\x1b[0m（先 /sessions 查看列表）');
       return;
     }
-    const r = await api('/api/sessions').catch(() => null);
-    const list = (r && r.sessions) || [];
-    const hit = list.find((s) => s.id === arg) || list.find((s) => s.title && s.title.includes(arg));
+    // 跨项目查找：会话归属项目，恢复时自动驱动项目上下文（使用哪个项目的对话就操作哪个项目）
+    const r = await api('/api/sessions?all=1').catch(() => null);
+    const groups = (r && r.projects) || [];
+    let hit = null, projId = null;
+    for (const g of groups) {
+      const s = (g.sessions || []).find((x) => x.id === arg) ||
+        (g.sessions || []).find((x) => x.title && x.title.includes(arg));
+      if (s) { hit = s; projId = g.id; break; }
+    }
     if (!hit) {
       term.writeln('\x1b[33m未找到会话: ' + arg + '\x1b[0m（/sessions 查看列表）');
       return;
+    }
+    // 跨项目会话：先切到所属项目（switchProject 自带重置）；同项目幂等跳过
+    if ((projId || null) !== currentProject) {
+      const g = groups.find((x) => (x.id || null) === (projId || null));
+      await switchProject(projId, g ? g.name : '个人空间');
     }
     const f = await api('/api/file?path=sessions/' + encodeURIComponent(hit.id + '.md'));
     const parsed = Core.parseSessionFile((f && f.content) || '');
@@ -667,29 +678,31 @@
   let sbSearchTimer = null;
   let sbCache = null;        // /api/sessions lite 列表缓存（8s 轮询指纹对比，变化才重绘——R6）
   let sbFingerprint = '';
-  // 单会话归档（侧边栏 ×）：只翻 status 字段（不覆盖完整归档版）
-  async function archiveSessionStatus(id) {
-    const f = await api('/api/file?path=sessions/' + encodeURIComponent(id + '.md')).catch(() => null);
+  // 单会话归档（侧边栏 ×）：只翻 status 字段（不覆盖完整归档版）；projId 非空时跨项目操作
+  async function archiveSessionStatus(id, projId) {
+    const hdrs = projId ? { 'X-Project': projId } : {};
+    const f = await api('/api/file?path=sessions/' + encodeURIComponent(id + '.md'), { headers: hdrs }).catch(() => null);
     if (!f || !f.content) return;
     const next = f.content.replace(/^(status:\s*)active$/m, '$1archived');
     if (next === f.content) return;
     await api('/api/file', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...hdrs },
       body: JSON.stringify({ path: 'sessions/' + id + '.md', content: next }),
     }).catch(() => {});
   }
-  // 会话重命名（豆包式 ⋯ 菜单）：改 frontmatter title（纯前端，POST /api/file）
-  async function renameSession(id, oldTitle) {
+  // 会话重命名（豆包式 ⋯ 菜单）：改 frontmatter title（纯前端，POST /api/file）；projId 非空时跨项目操作
+  async function renameSession(id, oldTitle, projId) {
     const t = prompt('重命名会话（' + id + '）：', String(oldTitle || ''));
     if (t === null || !t.trim() || t.trim() === String(oldTitle || '')) return;
-    const f = await api('/api/file?path=sessions/' + encodeURIComponent(id + '.md')).catch(() => null);
+    const hdrs = projId ? { 'X-Project': projId } : {};
+    const f = await api('/api/file?path=sessions/' + encodeURIComponent(id + '.md'), { headers: hdrs }).catch(() => null);
     if (!f || !f.content) return;
     const next = f.content.replace(/^(title:\s*).*$/m, '$1' + t.trim().slice(0, 30));
     if (next === f.content) return;
     await api('/api/file', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...hdrs },
       body: JSON.stringify({ path: 'sessions/' + id + '.md', content: next }),
     }).catch(() => {});
     sbFingerprint = '';
@@ -699,108 +712,143 @@
   function renderSidebar(r) {
     const all = (r && r.sessions) || [];
     const kw = sbSearchTxt.trim().toLowerCase();
-    const list = kw
-      ? all.filter((s) => String(s.title || '').toLowerCase().includes(kw) || s.id.includes(kw))
-      : all;
-    const active = list.filter((s) => s.status === 'active');
-    const archived = list.filter((s) => s.status !== 'active');
+    // 会话归属项目：数据 = 全项目分组（个人空间 = 默认项目）；兼容旧单项目响应
+    const groups = (r && r.projects && r.projects.length)
+      ? r.projects
+      : [{ id: null, name: '个人空间', is_default: true, sessions: all }];
     const curId = (sessionFile || '').replace('sessions/', '').replace(/\.md$/, '');
     sbList.innerHTML = '';
-    // 项目空间行（会话列表顶部）：显示当前项目，点击弹切换菜单
-    const proj = document.createElement('div');
-    proj.className = 'sb-item sb-project';
-    proj.title = '点击切换项目（每个项目独立知识空间）';
-    const pt = document.createElement('span');
-    pt.className = 'sb-item-title';
-    pt.textContent = '🗂️ ' + (currentProjectName || '个人空间');
-    const pm = document.createElement('span');
-    pm.className = 'sb-item-meta';
-    pm.textContent = '项目空间';
-    proj.appendChild(pt);
-    proj.appendChild(pm);
-    proj.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      toggleProjectMenu(undefined, proj);
-    });
-    sbList.appendChild(proj);
-    const group = (items, label) => {
-      if (!items.length) return;
-      const h = document.createElement('div');
-      h.className = 'sb-group';
-      h.textContent = label;
-      sbList.appendChild(h);
-      for (const s of items.slice(0, 60)) {
-        const it = document.createElement('div');
-        it.className = 'sb-item' + (s.id === curId ? ' current' : '');
-        const t = document.createElement('span');
-        t.className = 'sb-item-title';
-        t.textContent = String(s.title || s.id).slice(0, 24);
-        t.title = s.id;
-        const d = document.createElement('span');
-        d.className = 'sb-item-meta';
-        d.textContent = (s.count || 0) + ' 轮 · ' + (s.date || (s.mtime ? new Date(s.mtime * 1000).toISOString().slice(0, 10) : ''));
-        const x = document.createElement('span');
-        x.className = 'sb-item-x';
-        x.textContent = '×';
-        x.title = '归档会话';
-        x.addEventListener('click', (ev) => {
-          ev.stopPropagation();
-          // 归档可逆（进历史对话随时可恢复），免确认直接归档——与新对话行为一致
-          archiveSessionStatus(s.id).then(() => { sbFingerprint = ''; paintSidebar(); });
-        });
-        const more = document.createElement('span');
-        more.className = 'sb-item-more';
-        more.textContent = '⋯';
-        more.title = '重命名会话';
-        more.addEventListener('click', (ev) => {
-          ev.stopPropagation();
-          renameSession(s.id, s.title);
-        });
-        const del = document.createElement('span');
-        del.className = 'sb-item-del';
-        del.textContent = '🗑';
-        del.title = '删除会话（不可恢复）';
-        del.addEventListener('click', async (ev) => {
-          ev.stopPropagation();
-          // 删除不可恢复 → 软弹窗确认（danger 红色）
-          if (!await uiConfirm('删除会话 ' + s.id + '？（不可恢复）', { danger: true })) return;
-          await api('/api/file?path=sessions/' + encodeURIComponent(s.id + '.md'), { method: 'DELETE' }).catch(() => {});
-          sbFingerprint = '';
-          paintSidebar();
-        });
-        it.appendChild(t);
-        it.appendChild(d);
-        it.appendChild(more);
-        it.appendChild(del);
-        it.appendChild(x);
-        it.addEventListener('click', () => {
-          resumeCmd(s.id).then(() => { sbFingerprint = ''; paintSidebar(); });
-        });
-        sbList.appendChild(it);
+    const isCur = (g) => (g.id || null) === currentProject;
+    let anySession = false;
+    for (const g of groups) {
+      let list = g.sessions || [];
+      if (kw) {
+        list = list.filter((s) => String(s.title || '').toLowerCase().includes(kw) || s.id.includes(kw));
       }
-    };
-    group(active, '进行中');
-    group(archived, '会话列表');
-    if (!list.length) {
+      const active = list.filter((s) => s.status === 'active');
+      const archived = list.filter((s) => s.status !== 'active');
+      if (!list.length && !kw && !isCur(g)) continue; // 空项目折叠（当前项目始终显示）
+      if (list.length) anySession = true;
+      // 项目组头：点击 = 在该项目开新会话（会话驱动项目，无「切换」概念）
+      const head = document.createElement('div');
+      head.className = 'sb-group sb-proj-head' + (isCur(g) ? ' cur' : '');
+      head.title = '在该项目新建对话（点击切换）';
+      head.textContent = (isCur(g) ? '▶ ' : '') + (g.name || '个人空间') + ' · ' + list.length;
+      head.addEventListener('click', () => startNewInProject(g.id));
+      sbList.appendChild(head);
+      const group = (items, label) => {
+        if (!items.length) return;
+        const h = document.createElement('div');
+        h.className = 'sb-group';
+        h.textContent = label;
+        sbList.appendChild(h);
+        for (const s of items.slice(0, 60)) {
+          const it = document.createElement('div');
+          it.className = 'sb-item' + (s.id === curId ? ' current' : '');
+          const t = document.createElement('span');
+          t.className = 'sb-item-title';
+          t.textContent = String(s.title || s.id).slice(0, 24);
+          t.title = s.id;
+          const d = document.createElement('span');
+          d.className = 'sb-item-meta';
+          d.textContent = (s.count || 0) + ' 轮 · ' + (s.date || (s.mtime ? new Date(s.mtime * 1000).toISOString().slice(0, 10) : ''));
+          const x = document.createElement('span');
+          x.className = 'sb-item-x';
+          x.textContent = '×';
+          x.title = '归档会话';
+          x.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            // 归档可逆（进会话列表随时可恢复），免确认直接归档；跨项目操作带目标项目头
+            archiveSessionStatus(s.id, g.id).then(() => { sbFingerprint = ''; paintSidebar(); });
+          });
+          const more = document.createElement('span');
+          more.className = 'sb-item-more';
+          more.textContent = '⋯';
+          more.title = '重命名会话';
+          more.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            renameSession(s.id, s.title, g.id);
+          });
+          const del = document.createElement('span');
+          del.className = 'sb-item-del';
+          del.textContent = '🗑';
+          del.title = '删除会话（不可恢复）';
+          del.addEventListener('click', async (ev) => {
+            ev.stopPropagation();
+            // 删除不可恢复 → 软弹窗确认（danger 红色）
+            if (!await uiConfirm('删除会话 ' + s.id + '？（不可恢复）', { danger: true })) return;
+            await api('/api/file?path=sessions/' + encodeURIComponent(s.id + '.md'),
+              { method: 'DELETE', headers: g.id ? { 'X-Project': g.id } : {} }).catch(() => {});
+            sbFingerprint = '';
+            paintSidebar();
+          });
+          it.appendChild(t);
+          it.appendChild(d);
+          it.appendChild(more);
+          it.appendChild(del);
+          it.appendChild(x);
+          it.addEventListener('click', () => {
+            // 会话驱动项目：恢复该会话（跨项目自动切换上下文）
+            resumeSession(g.id, s.id).then(() => { sbFingerprint = ''; paintSidebar(); });
+          });
+          sbList.appendChild(it);
+        }
+      };
+      group(active, '进行中');
+      group(archived, '会话列表');
+    }
+    if (!anySession && !kw) {
       const e = document.createElement('div');
       e.className = 'sb-empty';
-      e.textContent = kw ? '无匹配会话' : '暂无会话 · 提问后自动创建';
+      e.textContent = '暂无会话 · 提问后自动创建';
+      sbList.appendChild(e);
+    } else if (kw && !anySession) {
+      const e = document.createElement('div');
+      e.className = 'sb-empty';
+      e.textContent = '无匹配会话';
       sbList.appendChild(e);
     }
+    // 底部：新建项目入口
+    const np = document.createElement('div');
+    np.className = 'sb-item sb-project-new';
+    np.title = '新建项目（独立知识空间）';
+    np.textContent = '＋ 新建项目';
+    np.addEventListener('click', () => openNewProjectWizard());
+    sbList.appendChild(np);
   }
   function paintSidebar() {
     if (!sbCache) {
-      api('/api/sessions').catch(() => null).then((r) => { sbCache = r || { sessions: [] }; renderSidebar(sbCache); });
+      api('/api/sessions?all=1').catch(() => null).then((r) => { sbCache = r || { projects: [] }; renderSidebar(sbCache); });
       return;
     }
     renderSidebar(sbCache);
   }
-  // 8s 轮询：会话列表变化（新建/归档/计数）才重绘，避免打断 hover（R6）
+  // 8s 轮询：全项目会话指纹变化（新建/归档/计数）才重绘，避免打断 hover（R6）
   async function paintSidebarIfChanged() {
-    const r = await api('/api/sessions').catch(() => null);
+    const r = await api('/api/sessions?all=1').catch(() => null);
     if (!r) return;
-    const fp = (r.sessions || []).map((s) => s.id + ':' + s.status + ':' + s.count).join('|');
+    const fp = (r.projects || []).map((g) =>
+      (g.id || '') + ':' + (g.sessions || []).map((s) => s.id + ':' + s.status + ':' + s.count).join(',')
+    ).join('|');
     if (fp !== sbFingerprint) { sbFingerprint = fp; sbCache = r; renderSidebar(sbCache); }
+  }
+  // 恢复会话（跨项目）：先切到会话所属项目（switchProject 自带重置），再载入历史
+  async function resumeSession(projId, sid) {
+    if ((projId || null) !== currentProject) {
+      const g = ((sbCache && sbCache.projects) || []).find((x) => (x.id || null) === (projId || null));
+      await switchProject(projId, g ? g.name : '个人空间');
+    }
+    await resumeCmd(sid);
+  }
+  // 在某项目开新会话（组头/新对话选择/顶栏 chip 共用）：同项目 = 清空；跨项目 = 切项目（自带重置）
+  function startNewInProject(id) {
+    const g = ((sbCache && sbCache.projects) || []).find((x) => (x.id || null) === (id || null));
+    const name = g ? g.name : '个人空间';
+    closeProjectMenu();
+    closeView(); // 先回聊天区（新对话 = 回到对话主界面）
+    if ((id || null) === currentProject) submitCmd('/clear');
+    else switchProject(id, name);
+    setTimeout(() => { sbFingerprint = ''; paintSidebar(); }, 800);
   }
   if (sbSearchEl) {
     sbSearchEl.addEventListener('input', (e) => {
@@ -809,11 +857,10 @@
       sbSearchTimer = setTimeout(paintSidebar, 150);
     });
   }
-  document.getElementById('session-new').addEventListener('click', () => {
-    // 新对话免确认：直接归档当前对话并清空（归档动作本身会落盘 sessions/，随时可恢复，不丢数据）
-    closeView(); // 先回聊天区（新对话 = 回到对话主界面）
-    submitCmd('/clear');
-    setTimeout(() => { sbFingerprint = ''; paintSidebar(); }, 800);
+  document.getElementById('session-new').addEventListener('click', (ev) => {
+    // 新建对话 → 选择归属项目（弹项目菜单锚定按钮下方；选中即在该项目开新会话）
+    ev.stopPropagation(); // 防止冒泡到 document 监听被立即关闭
+    toggleProjectMenu(undefined, document.getElementById('session-new'));
   });
   paintSidebar();
 
@@ -944,7 +991,7 @@
       b.querySelector('.pm-ico').textContent = icon;
       b.querySelector('.pm-name').textContent = name;
       if (tag) b.querySelector('.pm-tag').textContent = tag;
-      b.addEventListener('click', () => switchProject(id, name));
+      b.addEventListener('click', () => startNewInProject(id));
       list.appendChild(b);
     };
     mk(null, '个人空间', '🗂️', !currentProject, '默认');
@@ -1418,11 +1465,12 @@
 
   async function api(path, opts) {
     // 项目制：统一附加 X-Project 头（无当前项目 → 后端回退全局「个人空间」根）；
+    // 显式传入的 X-Project 优先（跨项目操作：归档/删除/读取其他项目的会话文件）
     // 有 body 但未显式 Content-Type → 默认 JSON（部分调用方未传 headers 曾致 415）
     const o = opts || {};
     const hdrs = Object.assign({}, o.headers || {});
     if (o.body !== undefined && !hdrs['Content-Type']) hdrs['Content-Type'] = 'application/json';
-    if (currentProject) hdrs['X-Project'] = currentProject;
+    if (currentProject && !hdrs['X-Project']) hdrs['X-Project'] = currentProject;
     o.headers = hdrs;
     const res = await fetch(path, o);
     const body = await res.json().catch(() => ({}));

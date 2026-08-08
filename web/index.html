@@ -62,8 +62,13 @@
   .sb-item:hover { background: var(--hover); }
   .sb-item.current { background: var(--accent-10); }
   .sb-item.current .sb-item-title { color: var(--accent); }
-  .sb-item.sb-project { border: 1px dashed var(--border2); margin-bottom: 4px; font-weight: 600; }
-  .sb-item.sb-project:hover { border-color: var(--accent); }
+  .sb-item.sb-project-new { color: var(--muted2); font-size: 12px; justify-content: center;
+    border: 1px dashed var(--border2); margin-top: 6px; }
+  .sb-item.sb-project-new:hover { border-color: var(--accent); color: var(--accent); }
+  /* 项目组头（会话归属项目）：点击 = 在该项目开新会话 */
+  .sb-proj-head { cursor: pointer; border-radius: 6px; padding: 4px 6px; color: var(--muted); }
+  .sb-proj-head:hover { background: var(--chip2); color: var(--fg); }
+  .sb-proj-head.cur { color: var(--accent); font-weight: 700; }
   .sb-item-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--fg2); }
   .sb-item-meta { flex: none; font-size: 10.5px; color: var(--muted2); }
   .sb-item-x { flex: none; color: var(--muted); font-weight: 700; padding: 0 3px; border-radius: 4px; visibility: hidden; }
@@ -403,10 +408,10 @@
 
 <!-- 项目切换菜单（项目制：个人空间 = 默认库；项目 = 独立隔离知识空间） -->
 <div id="project-menu" hidden>
-  <div id="pm-head">项目空间</div>
+  <div id="pm-head">新建对话 · 选择项目</div>
   <div id="pm-list"></div>
   <button id="pm-new">＋ 新建项目</button>
-  <div id="pm-msg">项目之间完全隔离：笔记、对话、记忆互不串用</div>
+  <div id="pm-msg">会话归属于项目；使用哪个项目的对话就自动操作哪个项目</div>
 </div>
 
 <!-- 新建项目向导（模板三卡 + 命名） -->

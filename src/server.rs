@@ -7,6 +7,7 @@ use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -515,14 +516,43 @@ async fn file_delete(State(st): State<AppState>, headers: HeaderMap, Query(p): Q
 
 // ---------- 会话管理（A2）：lite 枚举 kb/sessions/（frontmatter 元数据，不读全文） ----------
 // 列表/恢复是"实体层"操作；sessions 流水本身仍三排除（不入图谱/检索/指纹）
-async fn sessions_list(State(st): State<AppState>, headers: HeaderMap) -> Response {
+async fn sessions_list(State(st): State<AppState>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
+    // ?all=1：全项目会话分组（会话归属项目；个人空间 = 默认项目）——侧边栏按项目分组渲染用
+    if q.get("all").map(|v| v == "1").unwrap_or(false) {
+        return sessions_all(&st).into_response();
+    }
     let root = match proj_root(&st, &headers) {
         Ok(r) => r,
         Err(r) => return r,
     };
-    let dir = root.join("sessions");
+    let items = list_sessions_in(&root.join("sessions"));
+    Json(json!({ "sessions": items, "total": items.len() })).into_response()
+}
+
+/// 全项目会话分组：个人空间（默认项目）+ 各项目（按创建时间倒序）
+fn sessions_all(st: &AppState) -> Json<serde_json::Value> {
+    let root = &st.kb_root;
+    let mut projects: Vec<Value> = vec![json!({
+        "id": Value::Null,
+        "name": "个人空间",
+        "is_default": true,
+        "sessions": list_sessions_in(&root.join("sessions")),
+    })];
+    for m in crate::projects::list_projects(root) {
+        projects.push(json!({
+            "id": m.id,
+            "name": m.name,
+            "is_default": false,
+            "sessions": list_sessions_in(&root.join("projects").join(&m.id).join("sessions")),
+        }));
+    }
+    Json(json!({ "projects": projects }))
+}
+
+/// 列一个会话目录下的全部会话（只读 frontmatter 头 2KB，按 mtime 倒序）
+fn list_sessions_in(dir: &Path) -> Vec<Value> {
     let mut items: Vec<Value> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(&dir) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let path = e.path();
             if path.extension().and_then(|x| x.to_str()) != Some("md") {
@@ -561,7 +591,7 @@ async fn sessions_list(State(st): State<AppState>, headers: HeaderMap) -> Respon
         }
     }
     items.sort_by(|a, b| b["mtime"].as_u64().unwrap_or(0).cmp(&a["mtime"].as_u64().unwrap_or(0)));
-    Json(json!({ "sessions": items, "total": items.len() })).into_response()
+    items
 }
 
 /// 解析会话文件头 frontmatter（title/status/count/date/task）；旧文件缺字段容错。
