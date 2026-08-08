@@ -197,8 +197,11 @@
       </div>
       <div id="gp-controls">
         <label>深度 <input type="range" id="gp-depth" min="1" max="3" step="1" value="1"></label>
+        <button id="gp-fit" title="适配全图">⤢ 适配</button>
+        <button id="gp-zoom-in" title="放大">＋</button>
+        <button id="gp-zoom-out" title="缩小">－</button>
         <button id="gp-full" title="全屏大图 / 恢复双栏">⛶ 全屏</button>
-        <span style="margin-left:auto">悬停高亮邻域 · 拖节点固定 · 拖画布/滚轮缩放 · 双击节点展开</span>
+        <span style="margin-left:auto">悬停高亮邻域 · 拖节点固定 · 滚轮缩放 · 双击节点展开</span>
       </div>
       <canvas id="gp-canvas"></canvas>
       <div id="gp-hint">中心 = 聚焦文档；节点大小 ∝ 连接数，缩放标签渐隐；选中节点带光环，树行悬停/选中与图双向联动；路径链高亮橙色</div>
@@ -282,7 +285,8 @@
 
   // ================= 局部图（canvas 力导向式动画） =================
   // 交互范式对照主流图谱产品（Obsidian/LightRAG）：hover 邻域高亮+其余淡化、度数定大小、
-  // 缩放文字淡出、拖节点固定、树↔图双向聚焦联动、搜索候选带色点
+  // 缩放文字淡出、拖节点固定、树↔图双向聚焦联动、搜索候选带色点；
+  // 布局 = 自写轻量力导向（velocity Verlet：弹簧+斥力+向心力+阻尼+冷却，零依赖）替代静态同心圆
   var gp = { nodes: [], edges: [], center: null, depth: 1, scale: 1, ox: 0, oy: 0,
     dragging: false, dragStart: null, pathSet: null,
     hover: null,      // canvas 悬停节点（邻域高亮 + 其余淡化）
@@ -291,27 +295,80 @@
     fixed: {},        // 拖拽固定的节点（重建局部图时保留屏幕位置）
     fullMode: false,  // 全图模式（打开即全库大图；双击节点切局部聚焦）
     anim: null,       // 相机平滑居中动画 {ox0,oy0,ox1,oy1,t0,dur}
-    intro: null };    // 入场动画 {t0,dur}
+    vel: {},          // 力导向速度场 {path: {vx, vy}}
+    alpha: 0 };       // 力导向冷却系数（>0.03 持续模拟，收敛自动停）
+  var FORCE = { linkDist: 78, spring: 0.05, repel: 1100, center: 0.05, damping: 0.82 };
   var gpCanvas = document.getElementById('gp-canvas');
   var gpCtx = gpCanvas.getContext('2d');
   var gpPanel = document.getElementById('graph-panel');
   var gpRaf = null;
   var gpTip = document.getElementById('gp-tip');
 
-  // 统一动画帧循环：有入场/相机动画时持续跑，否则单帧后停
+  // 力导向：初始化速度场 + 激活模拟
+  function initForces() {
+    gp.vel = {};
+    gp.nodes.forEach(function (n) { gp.vel[n.path] = { vx: 0, vy: 0 }; });
+    gp.alpha = 1;
+  }
+  // 单步物理：弹簧（边）→ 斥力（节点对，O(n²)，>150 节点随机采样）→ 向心力 → 积分+阻尼
+  function forceTick() {
+    if (gp.alpha < 0.03) { gp.alpha = 0; return false; }
+    var k = gp.alpha;
+    var get = function (p) { return gp.vel[p] || (gp.vel[p] = { vx: 0, vy: 0 }); };
+    // 弹簧：边拉向 linkDist
+    gp.edges.forEach(function (e) {
+      var a = gp.nodes.find(function (n) { return n.path === e.s; });
+      var b = gp.nodes.find(function (n) { return n.path === e.t; });
+      if (!a || !b) return;
+      var dx = b.x - a.x, dy = b.y - a.y;
+      var dist = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+      var f = (dist - FORCE.linkDist) * FORCE.spring * k;
+      dx /= dist; dy /= dist;
+      get(e.s).vx += dx * f; get(e.s).vy += dy * f;
+      get(e.t).vx -= dx * f; get(e.t).vy -= dy * f;
+    });
+    // 斥力：全部节点对（>150 节点时随机采样 400 对，控制每帧成本）
+    var ns = gp.nodes;
+    var pairs = [];
+    if (ns.length > 150) {
+      for (var i = 0; i < 400; i++) {
+        pairs.push([ns[(Math.random() * ns.length) | 0], ns[(Math.random() * ns.length) | 0]]);
+      }
+    } else {
+      for (var i = 0; i < ns.length; i++) for (var j = i + 1; j < ns.length; j++) pairs.push([ns[i], ns[j]]);
+    }
+    pairs.forEach(function (pr) {
+      var a = pr[0], b = pr[1];
+      if (a === b) return;
+      var dx = a.x - b.x, dy = a.y - b.y;
+      var d2 = dx * dx + dy * dy + 1;
+      var f = FORCE.repel * k / d2;
+      var d = Math.sqrt(d2);
+      dx /= d; dy /= d;
+      get(a.path).vx += dx * f; get(a.path).vy += dy * f;
+      get(b.path).vx -= dx * f; get(b.path).vy -= dy * f;
+    });
+    // 向心力（防飞散）+ 中心节点钉住
+    ns.forEach(function (n) {
+      if (n.path === gp.center) { get(n.path).vx = 0; get(n.path).vy = 0; return; }
+      get(n.path).vx -= n.x * FORCE.center * k;
+      get(n.path).vy -= n.y * FORCE.center * k;
+    });
+    // 积分 + 阻尼（固定节点/中心不移动）
+    ns.forEach(function (n) {
+      if (gp.fixed[n.path] || n.path === gp.center) return;
+      var v = get(n.path);
+      n.x += v.vx; n.y += v.vy;
+      v.vx *= FORCE.damping; v.vy *= FORCE.damping;
+    });
+    gp.alpha *= 0.994;
+    return true;
+  }
+
+  // 统一动画帧循环：力导向模拟（冷却中）+ 相机动画持续跑，收敛后单帧停
   function gpFrame(ts) {
     var dirty = false;
-    if (gp.intro) {
-      var t = Math.min(1, (ts - gp.intro.t0) / gp.intro.dur);
-      var e = 1 - Math.pow(1 - t, 3); // easeOutCubic：中心散开 + 弹性收敛到同心圆
-      gp.nodes.forEach(function (n) {
-        if (gp.fixed[n.path]) return;
-        n.x = n.sx + (n.tx - n.sx) * e;
-        n.y = n.sy + (n.ty - n.sy) * e;
-      });
-      if (t >= 1) gp.intro = null;
-      dirty = true;
-    }
+    if (gp.alpha > 0.03) { if (forceTick()) dirty = true; }
     if (gp.anim) {
       var t2 = Math.min(1, (ts - gp.anim.t0) / gp.anim.dur);
       var e2 = 1 - Math.pow(1 - t2, 3);
@@ -488,16 +545,13 @@
         n.ty = Math.sin(ang) * r;
       });
     });
-    // 固定节点保留用户拖放位置；其余从中心小偏移散开做入场动画
-    var now = performance.now();
-    gp.intro = { t0: now, dur: 650 };
+    // 固定节点保留用户拖放位置；其余以同心圆为初始位置，力导向随后自然收敛（节点自然聚簇）
     gp.nodes.forEach(function (n) {
       if (gp.fixed[n.path]) { n.tx = gp.fixed[n.path].x; n.ty = gp.fixed[n.path].y; }
-      n.sx = (Math.random() - 0.5) * 40;
-      n.sy = (Math.random() - 0.5) * 40;
-      n.x = n.sx; n.y = n.sy;
+      n.x = n.tx; n.y = n.ty;
     });
     gp.scale = 1; gp.ox = 0; gp.oy = 0;
+    initForces(); // 激活力导向模拟（冷却收敛）
   }
   function gpNodeR(n) { return n.path === gp.center ? 11 : 5 + Math.min(9, (n.conn || 0) * 1.8); }
   // 邻域集合：hover/linkHover 节点 + 其一级邻居（Obsidian 式邻域高亮）
@@ -628,7 +682,7 @@
   window.addEventListener('mousemove', function (e) {
     // 保险：鼠标不在 canvas 上时收起 tooltip（防残留卡在页面上）
     if (e.target !== gpCanvas) gpTip.style.display = 'none';
-    // 节点拖拽：跟随鼠标 + 固定位置
+    // 节点拖拽：跟随鼠标 + 固定位置（力导向轻微复活 → 周围节点弹性响应）
     if (gp.nodeDrag) {
       var nd = gp.nodeDrag;
       if (Math.abs(e.clientX - nd.sx) + Math.abs(e.clientY - nd.sy) > 3) nd.moved = true;
@@ -638,6 +692,7 @@
         n.x = (e.clientX - r.left - r.width / 2 - gp.ox) / gp.scale;
         n.y = (e.clientY - r.top - r.height / 2 - gp.oy) / gp.scale;
         gp.fixed[nd.path] = { x: n.x, y: n.y };
+        gp.alpha = Math.max(gp.alpha, 0.35); // 复活物理
         scheduleGpFrame();
       }
       return;
@@ -704,13 +759,41 @@
     if (hit) selectDoc(hit.path); // selectDoc 内会相机聚焦该节点
   });
   document.getElementById('gp-close').addEventListener('click', closeLocalGraph);
+  // 适配全图：计算全部节点包围盒 → 相机动画缩放到刚好放下（带 padding）
+  function gpFit() {
+    if (!gp.nodes.length) return;
+    var w = gpCanvas.clientWidth || 600, h = gpCanvas.clientHeight || 280;
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    gp.nodes.forEach(function (n) {
+      if (n.x < minX) minX = n.x; if (n.x > maxX) maxX = n.x;
+      if (n.y < minY) minY = n.y; if (n.y > maxY) maxY = n.y;
+    });
+    var bw = Math.max(60, maxX - minX), bh = Math.max(60, maxY - minY);
+    var s = Math.max(0.4, Math.min(2.4, Math.min((w - 60) / bw, (h - 60) / bh)));
+    gp.anim = {
+      ox0: gp.ox, oy0: gp.oy,
+      ox1: w / 2 - (minX + maxX) / 2 * s, oy1: h / 2 - (minY + maxY) / 2 * s,
+      t0: performance.now(), dur: 320,
+    };
+    gp.scale = s;
+    scheduleGpFrame();
+  }
+  document.getElementById('gp-fit').addEventListener('click', gpFit);
+  document.getElementById('gp-zoom-in').addEventListener('click', function () {
+    gp.scale = Math.max(0.4, Math.min(3, gp.scale * 1.25));
+    scheduleGpFrame();
+  });
+  document.getElementById('gp-zoom-out').addEventListener('click', function () {
+    gp.scale = Math.max(0.4, Math.min(3, gp.scale / 1.25));
+    scheduleGpFrame();
+  });
   // 全屏大图模式：树/侧栏隐藏，画布占满主区（再次点击恢复双栏）
   var gpFullBtn = document.getElementById('gp-full');
   gpFullBtn.addEventListener('click', function () {
     var on = document.body.classList.toggle('gp-full');
     gpFullBtn.classList.toggle('on', on);
     gpFullBtn.textContent = on ? '⛶ 双栏' : '⛶ 全屏';
-    if (gp.center) { buildLocalGraph(); gpFocusNode(gp.center); } // 尺寸/半径已变 → 重建布局并聚焦
+    if (gp.center) { buildLocalGraph(); gpFit(); } // 尺寸/半径已变 → 重建布局并适配全图
     scheduleGpFrame();
   });
   document.getElementById('gp-depth').addEventListener('input', function () {
