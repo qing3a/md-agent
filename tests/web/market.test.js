@@ -66,11 +66,11 @@ test('市场视图目录 Tab：已安装排最前 + [已安装] 徽标', async (
   assert.ok(getEl('count')._text.includes('3 个可用'), '计数应为 3 个可用');
 });
 
-test('工作台：应用卡片网格渲染 + 状态条', async () => {
+test('工作台：应用卡片网格渲染 + 状态条（常用功能区已移除）', async () => {
   await load();
   const out = getEl('wb-apps')._html;
   assert.ok(out.includes('match') && out.includes('ow-recruit'), '应用卡片应包含已安装应用');
   assert.ok(out.includes('data-run='), '卡片应带运行按钮');
-  assert.ok(getEl('wb-funcs')._html.includes('知识图谱'), '常用功能应含知识图谱入口');
+  assert.ok(!getEl('wb-funcs') || !getEl('wb-funcs')._html.includes('知识图谱'), '常用功能区应移除');
   assert.ok(getEl('wb-status')._html.includes('文档'), '状态条应显示');
 });

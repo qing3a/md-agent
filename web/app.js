@@ -706,6 +706,23 @@
     const archived = list.filter((s) => s.status !== 'active');
     const curId = (sessionFile || '').replace('sessions/', '').replace(/\.md$/, '');
     sbList.innerHTML = '';
+    // 项目空间行（会话列表顶部）：显示当前项目，点击弹切换菜单
+    const proj = document.createElement('div');
+    proj.className = 'sb-item sb-project';
+    proj.title = '点击切换项目（每个项目独立知识空间）';
+    const pt = document.createElement('span');
+    pt.className = 'sb-item-title';
+    pt.textContent = '🗂️ ' + (currentProjectName || '个人空间');
+    const pm = document.createElement('span');
+    pm.className = 'sb-item-meta';
+    pm.textContent = '项目空间';
+    proj.appendChild(pt);
+    proj.appendChild(pm);
+    proj.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      toggleProjectMenu(undefined, proj);
+    });
+    sbList.appendChild(proj);
     const group = (items, label) => {
       if (!items.length) return;
       const h = document.createElement('div');
@@ -763,7 +780,7 @@
       }
     };
     group(active, '进行中');
-    group(archived, '历史对话');
+    group(archived, '会话列表');
     if (!list.length) {
       const e = document.createElement('div');
       e.className = 'sb-empty';
@@ -933,16 +950,26 @@
     mk(null, '个人空间', '🗂️', !currentProject, '默认');
     for (const p of projectList) mk(p.id, p.name, templateIcon(p.template), currentProject === p.id, '');
   }
-  function toggleProjectMenu(force) {
+  function toggleProjectMenu(force, anchorEl) {
     const menu = document.getElementById('project-menu');
     if (!menu) return;
     const show = force !== undefined ? force : menu.hidden;
     if (show) {
       renderProjectMenu();
-      const chip = document.getElementById('project-chip');
-      const r = chip ? chip.getBoundingClientRect() : null;
-      menu.style.top = ((r ? r.bottom : 48) + 6) + 'px';
-      menu.style.right = '16px';
+      if (anchorEl && anchorEl.getBoundingClientRect) {
+        // 从左侧栏「项目空间」行打开：菜单锚定该行下方（左下）
+        const r = anchorEl.getBoundingClientRect();
+        menu.style.top = (r.bottom + 4) + 'px';
+        menu.style.left = (r.left) + 'px';
+        menu.style.right = 'auto';
+      } else {
+        // 从顶栏 chip 打开：菜单锚定右上角
+        const chip = document.getElementById('project-chip');
+        const r = chip ? chip.getBoundingClientRect() : null;
+        menu.style.top = ((r ? r.bottom : 48) + 6) + 'px';
+        menu.style.right = '16px';
+        menu.style.left = 'auto';
+      }
       menu.hidden = false;
     } else {
       menu.hidden = true;
@@ -1469,7 +1496,7 @@
     term.writeln('  \x1b[1m界面入口（不用记命令）\x1b[0m：');
     term.writeln('     左侧菜单     功能首页 / 知识图谱 / 待审 / 审计 / 自动化 / 市场 / 设置');
     term.writeln('     顶栏项目名   切换项目（每个项目独立空间，互不串用）');
-    term.writeln('     历史对话     侧边栏点击即可切回该对话继续聊');
+    term.writeln('     会话列表     侧边栏点击即可切回该对话继续聊');
     term.writeln('     功能首页     所有功能的卡片入口（含检索/抓取/任务/配置）');
     term.writeln('     命令速览     Ctrl+K 或左侧「命令速览」');
     term.writeln('');

@@ -277,7 +277,7 @@ Phase 3-C Harness 深化（✅ P1/P3/P4 + SkillHub 接入已完成；P2 巩固�
          ├─ ✅ P2 巩固/遗忘：consolidate 两阶段（先规则后 LLM）+ 记忆提案四型待审通道；任务感知上下文组装（CE 组装器 + memory_summary 注入；C 半步：LLM 配置时 L1 全文移出前缀、read_l1/search 按需取用——同口径评测 input/total -47%、cache 率 74%）
          ├─ ✅ P3 Skills / 程序性自组织：/suggest、/audit 产出升级为程序性技能（技能格式 + 注册表 /api/skills + trigger 命中自动注入）
          ├─ ✅ P4 App 系统（原 Phase 4 提前）：manifest + 权限白名单 + 生命周期（/api/market/*）+ 面板/托盘动态菜单 + 沙箱 iframe 渲染（/view）
-         └─ ✅ SkillHub 接入：应用市场 = hub 管理端 + 客户端——**侧边栏入口已升级为「工作台」**（/view market：我的应用卡片网格 + 常用功能入口 + 状态速览；应用市场收进右上角「🛒 应用市场」二级入口，目录/已安装双 Tab、打开默认「已安装」、目录已装应用排最前标注徽标）；/market connect 连接第三方 SkillHub（skillhub.md 索引协议），安装走命令行（人审确认）；本地导入兜底；market.connect 工具 + 技能触发（LLM 一句话连商店）；条目统一（应用与技能同目录，按包内容识别落点：app.json→kb/apps/，SKILL.md/裸 md→kb/skills/）
+         └─ ✅ SkillHub 接入：应用市场 = hub 管理端 + 客户端——**侧边栏入口已升级为「工作台」**（/view market：我的应用卡片网格 + 状态速览，纯应用启动器；应用市场收进右上角「🛒 应用市场」二级入口；项目空间/会话列表在左侧栏下方——顶部「🗂 项目空间」行点击切换 + 「进行中/会话列表」分组，目录/已安装双 Tab、打开默认「已安装」、目录已装应用排最前标注徽标）；/market connect 连接第三方 SkillHub（skillhub.md 索引协议），安装走命令行（人审确认）；本地导入兜底；market.connect 工具 + 技能触发（LLM 一句话连商店）；条目统一（应用与技能同目录，按包内容识别落点：app.json→kb/apps/，SKILL.md/裸 md→kb/skills/）
 Phase 4  生态化（可选，与"轻量"定位有张力，个人场景可长期搁置）
          ├─ MCP 客户端（Stdio/SSE）；兼容标准 MCP App 渲染（复用统一 iframe 渲染层）
          └─ WASM 计算后端（仅当出现"本地运行不可信计算"的真实需求）
