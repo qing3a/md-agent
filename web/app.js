@@ -108,6 +108,21 @@
     clearTimeout(l0Timer);
     l0Timer = setTimeout(writeL0Snapshot, 20000); // 20s 无新问答 → 落盘
   }
+  // 后台执行完成（切走会话）：问答对直接追加到 exe 所属会话文件（归属写入，不动当前全局状态）
+  async function appendSessionQA(sessionPath, q, a) {
+    try {
+      const f = await api('/api/file?path=' + encodeURIComponent(sessionPath)).catch(() => null);
+      const head = (f && f.content) || '';
+      const qa = '\n\n## Q: ' + String(q || '').slice(0, 300) + '\nA: ' + String(a || '(无回答/中断)').slice(0, 3000);
+      const next = head.replace(/^(count:\s*)\d+$/m, (m) => 'count: ' + ((parseInt(m.replace(/^count:\s*/, ''), 10) || 0) + 1)) + qa;
+      await api('/api/file', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: sessionPath, content: next }),
+      });
+      sbFingerprint = '';
+      paintSidebar();
+    } catch (e) { /* 后台写入失败静默（回答仍在缓冲/历史界面可见） */ }
+  }
   // 会话关闭前尽力写一次（best-effort，不 await；标记 archived，摘要/未决检测走 idle 或 /clear 路径）
   window.addEventListener('beforeunload', () => { writeSessionFile(true).catch(() => {}); });
   window.addEventListener('pagehide', () => { writeSessionFile(true).catch(() => {}); });
@@ -198,6 +213,12 @@
     term.writeln('\x1b[32m✓ 已切换至历史对话：' + (hit.title || hit.id) + '（' + parsed.length + ' 轮）\x1b[0m' + (sessionTaskId ? ' · 任务 #' + sessionTaskId : ''));
     term.writeln('\x1b[90m继续提问即续写此对话；/clear 开始新对话\x1b[0m');
     if (topbarTitle) topbarTitle.textContent = String(hit.title || hit.id).slice(0, 30);
+    // 会话后台执行挂接：切到的会话若有未完成执行 → 重放缓冲继续渲染；原会话执行转后台
+    suspendExe();
+    const exe = exes[sessionFile];
+    if (exe && !exe.done) activateExe(exe);
+    busy = currentExeBusy();
+    setBusyUI();
   }
 
   // ---------- 会话收尾归档（A4 自动归档 + B3 未决决策，合并落地） ----------
@@ -426,7 +447,6 @@
     }
     busy = true;
     setBusyUI();
-    if (!t.startsWith('/')) aiRunningOn(); // 非命令提问 = AI 问答 → 会话行运行图标
     try {
       await run(t);
     } catch (e) {
@@ -434,7 +454,6 @@
     } finally {
       busy = false;
       setBusyUI();
-      if (!t.startsWith('/')) aiRunningOff();
       showPrompt();   // 回答结束后重画输入框（上边框/输入行/下边框/状态行）
       updateTopTitle();
       refreshStatus();
@@ -680,20 +699,6 @@
   let sbSearchTimer = null;
   let sbCache = null;        // /api/sessions lite 列表缓存（8s 轮询指纹对比，变化才重绘——R6）
   let sbFingerprint = '';
-  let aiRunning = false;     // 当前是否有 AI 处理中（问答/App 请求）——侧边栏会话行显示运行图标
-  // AI 处理生命周期：开始/结束 → 重绘侧边栏（当前会话行 ⏳ / 首问顶部指示条）
-  function aiRunningOn() {
-    if (aiRunning) return;
-    aiRunning = true;
-    sbFingerprint = '';
-    paintSidebar();
-  }
-  function aiRunningOff() {
-    if (!aiRunning) return;
-    aiRunning = false;
-    sbFingerprint = '';
-    paintSidebar();
-  }
   // 单会话归档（侧边栏 ×）：只翻 status 字段（不覆盖完整归档版）；projId 非空时跨项目操作
   async function archiveSessionStatus(id, projId) {
     const hdrs = projId ? { 'X-Project': projId } : {};
@@ -734,8 +739,8 @@
       : [{ id: null, name: '个人空间', is_default: true, sessions: all }];
     const curId = (sessionFile || '').replace('sessions/', '').replace(/\.md$/, '');
     sbList.innerHTML = '';
-    // AI 处理中且首问会话文件未落盘（列表无对应行）→ 顶部指示条
-    if (aiRunning && !sessionFile) {
+    // 首问会话文件未落盘（列表无对应行）且有执行 → 顶部指示条
+    if (exes[null] && !exes[null].done) {
       const runBar = document.createElement('div');
       runBar.className = 'sb-running';
       runBar.innerHTML = '<span class="run-dot"></span> AI 处理中…';
@@ -767,7 +772,8 @@
         sbList.appendChild(h);
         for (const s of items.slice(0, 60)) {
           const it = document.createElement('div');
-          it.className = 'sb-item' + (s.id === curId ? ' current' : '') + (aiRunning && s.id === curId ? ' running' : '');
+          const exeRun = exes['sessions/' + s.id + '.md'] && !exes['sessions/' + s.id + '.md'].done;
+          it.className = 'sb-item' + (s.id === curId ? ' current' : '') + (exeRun ? ' running' : '');
           const t = document.createElement('span');
           t.className = 'sb-item-title';
           t.textContent = String(s.title || s.id).slice(0, 24);
@@ -775,8 +781,8 @@
           const d = document.createElement('span');
           d.className = 'sb-item-meta';
           d.textContent = (s.count || 0) + ' 轮 · ' + (s.date || (s.mtime ? new Date(s.mtime * 1000).toISOString().slice(0, 10) : ''));
-          if (aiRunning && s.id === curId) {
-            // AI 处理中：当前会话行加运行点（思考/工具/回答全过程）
+          if (exeRun) {
+            // 该会话有未完成执行：运行点（思考/工具/回答全过程；后台执行也标）
             const run = document.createElement('span');
             run.className = 'run-dot';
             run.title = 'AI 处理中';
@@ -1060,6 +1066,10 @@
     try {
       if (sessionLog.length && !sessionArchived) await archiveSession(); // 旧会话归档进旧项目（await 确保落盘完成）
     } catch (e) { /* 归档失败不阻断切换 */ }
+    // 切项目 = 换世界：打断所有会话的后台执行（含首问）
+    if (currentAbort) { try { currentAbort.abort(); } catch (e) { /* 忽略 */ } currentAbort = null; }
+    for (const k in exes) exes[k].done = true;
+    activeExe = null;
     currentProject = target;
     try { localStorage.setItem(PROJECT_KEY, target || 'default'); } catch (e) {}
     const cur = projectList.find((p) => p.id === target);
@@ -1074,6 +1084,8 @@
     printBanner();
     paintSidebar();
     refreshStatus();
+    busy = currentExeBusy();
+    setBusyUI();
     logActivity('project', '切换项目 → ' + currentProjectName, { id: target });
   }
   // 新建项目向导：模板三卡（空白/律师/猎头）+ 命名 → 创建并进入
@@ -1521,7 +1533,7 @@
       case '/config': await cfg(); break;
       case '/remember': await remember(rest); break;
       case '/digest': await digest(rest.join(' ')); break;
-      case '/clear': if (sessionLog.length && !sessionArchived) archiveSession(); history = []; saveHistory(); Core.resetSectionCache(); sessionFile = null; sessionLog = []; sessionArchived = false; sessionTaskId = null; term.writeln('多轮记忆已清空（系统提示词分节缓存已重置）'); break;
+      case '/clear': if (sessionLog.length && !sessionArchived) archiveSession(); if (currentAbort) { try { currentAbort.abort(); } catch (e) { /* 忽略 */ } currentAbort = null; } for (const k in exes) exes[k].done = true; activeExe = null; history = []; saveHistory(); Core.resetSectionCache(); sessionFile = null; sessionLog = []; sessionArchived = false; sessionTaskId = null; term.writeln('多轮记忆已清空（系统提示词分节缓存已重置）'); break;
       case '/link-all': await linkAll(); break;
       case '/fetch': await fetchCmd(rest); break;
       case '/page': await pageCmd(rest); break;
@@ -1749,25 +1761,37 @@
     }).catch(() => {});
   }
 
-  function createToolRow(name, paramsTxt) {
+  function createToolRow(t, name, paramsTxt) {
+    t = t || term;
     const t0 = Date.now();
     let timer = null;
     // 工具调用折叠卡（.msg.tool 容器：整宽灰色卡片，三态 + 点击展开 + 失败自动展开）
-    term.beginMsg('tool');
-    const rowEl = term.appendCard(
+    t.beginMsg('tool');
+    const rowEl = t.appendCard(
       '<div class="toolrow queued"><span class="tr-name"><span class="tr-ico">🔧</span>' + escHtml(name) + '</span>' +
       '<span class="tr-state">排队中</span>' +
       '<div class="tr-body"><div class="kv">参数: ' + escHtml(paramsTxt || '{}') + '</div><div class="res"></div></div>' +
       '</div>'
     );
-    term.endMsg();
+    t.endMsg();
+    if (!rowEl) {
+      // 后台缓冲（切走会话的执行）：只记录工具事件，切回时重放终态卡
+      const exe = t.exe;
+      const ev = { name, paramsTxt, state: 'running', result: null };
+      if (exe) exe.tools.push(ev);
+      return {
+        running() {},
+        done(r) { if (exe) { ev.state = 'done'; ev.result = String(r).slice(0, 300); } },
+        fail(m) { if (exe) { ev.state = 'fail'; ev.result = m; } },
+      };
+    }
     const card = rowEl.querySelector('.toolrow');
     const stateEl = card.querySelector('.tr-state');
     const bodyEl = card.querySelector('.tr-body');
     const resEl = card.querySelector('.res');
     let open = false;
     function toggleOpen(force) {
-      open = force === undefined ? !open : !!force;
+      open = force === undefined ? !open : !!open;
       card.classList.toggle('open', open);
     }
     card.addEventListener('click', () => toggleOpen());
@@ -1862,8 +1886,101 @@
   // 单次 LLM 流式调用（Agent Loop 一轮）：正常回答流式渲染；首个 content 以 { 开头 → 工具模式只收集不渲染
   // 返回 { full, reasoning, reasoningStartAt, firstContentAt, lastUsage, toolJson }；中断/失败返回 null
   // web=true → 联网通道（Responses API + 服务端 web_search，非流式；返回已归一化为 chat 结构）
-  // llmStreamOnce(messages, web, onChunk?)：onChunk 可选——每完成一行回答文本回调（App→Agent 通道用，推流式给 App）
-  async function llmStreamOnce(messages, web, onChunk) {
+  // ================= 会话后台执行（第二步）：AI 回答按会话缓冲，切走不打断 =================
+  // exes: sessionKey → exe（sessionKey = sessionFile，首问未落盘 = null）；activeExe = 当前渲染目标。
+  // 活跃会话的执行写 term DOM；后台会话的执行把行操作入缓冲（LLM 流继续跑），切回时重放缓冲 + 工具卡终态。
+  const exes = {};
+  let activeExe = null;
+  const exeKey = () => sessionFile || null;
+  function makeExeTerm(exe) {
+    const rec = (op, args) => exe.lines.push({ op, args });
+    return {
+      exe,
+      writeln: (x) => { if (exe.active) term.writeln(x); else rec('writeln', [x]); },
+      write: (x) => { if (exe.active) term.write(x); else rec('write', [x]); },
+      beginMsg: (k) => { if (exe.active) return term.beginMsg(k); rec('beginMsg', [k]); return null; },
+      endMsg: (f) => { if (exe.active) return term.endMsg(f); rec('endMsg', [f]); },
+      currentMsg: () => (exe.active ? term.currentMsg() : null),
+      appendRow: (txt, cls) => { if (exe.active) return term.appendRow(txt, cls); rec('appendRow', [txt, cls]); return null; },
+      appendCard: (html, cls) => { if (exe.active) return term.appendCard(html, cls); rec('appendCard', [html, cls]); return null; },
+      removeRow: (el) => { if (exe.active) term.removeRow(el); else rec('removeRow', [el]); },
+      replaceRow: (el, html, cls) => { if (exe.active) return term.replaceRow(el, html, cls); rec('replaceRow', [el, html, cls]); return null; },
+      clear: () => { if (exe.active) term.clear(); else rec('clear', []); },
+    };
+  }
+  // 切回会话：重放缓冲（含工具卡终态）+ 引用增强，恢复流式渲染目标。
+  // done 的执行也重放（后台完成的回答需在切回时完整显示）；lines 重放后清空保证不重复
+  function activateExe(exe) {
+    if (!exe || exe.active) return;
+    exe.active = true;
+    for (const l of exe.lines) {
+      if (l.op === 'writeln') term.writeln(l.args[0]);
+      else if (l.op === 'write') term.write(l.args[0]);
+      else if (l.op === 'beginMsg') term.beginMsg(l.args[0]);
+      else if (l.op === 'endMsg') term.endMsg(l.args[0]);
+      else if (l.op === 'appendRow') term.appendRow(l.args[0], l.args[1]);
+      else if (l.op === 'appendCard') term.appendCard(l.args[0], l.args[1]);
+      else if (l.op === 'clear') term.clear();
+    }
+    exe.lines = [];
+    for (const ev of exe.tools) {
+      const row = createToolRow(exe.t, ev.name, ev.paramsTxt);
+      if (ev.state === 'fail') row.fail(ev.result || '失败');
+      else if (ev.state === 'done') row.done(ev.result);
+      else row.running();
+    }
+    exe.tools = [];
+    enhanceRefs();
+    activeExe = exe;
+    refreshRunningUI();
+  }
+  // 挂起当前活跃执行（切走会话 → 转后台继续跑）
+  function suspendExe() {
+    if (activeExe && !activeExe.done) activeExe.active = false;
+    activeExe = null;
+  }
+  // 开始一次 AI 执行：挂起旧执行（转后台），创建/复用当前会话的执行，返回渲染 term
+  function beginExe() {
+    suspendExe();
+    const key = exeKey();
+    let exe = exes[key];
+    if (!exe) {
+      exe = { key, active: true, done: false, lines: [], tools: [], t: null };
+      exe.t = makeExeTerm(exe);
+      exes[key] = exe;
+    }
+    exe.active = true;
+    exe.done = false;
+    activeExe = exe;
+    refreshRunningUI(); // 开始执行 → 立即重绘侧边栏（运行图标出现）
+    return exe.t;
+  }
+  // 结束执行：标记完成；首问落盘后迁移 key 归属（仅活跃完成时——后台首问无归属文件，保持 null）
+  function finishExe(t) {
+    const exe = t && t.exe;
+    if (!exe) return;
+    exe.done = true;
+    if (activeExe === exe) activeExe = null;
+    if (exe.active && exe.key === null && sessionFile && exes[null] === exe) {
+      delete exes[null];
+      exe.key = sessionFile;
+      exes[sessionFile] = exe;
+    }
+    refreshRunningUI();
+  }
+  // 运行图标：重绘侧边栏（有未完成执行的会话行标运行点）
+  function refreshRunningUI() {
+    sbFingerprint = '';
+    paintSidebar();
+  }
+  // 当前会话是否有未完成执行（busy 按会话判定）
+  function currentExeBusy() {
+    const e = exes[exeKey()];
+    return !!(e && !e.done);
+  }
+
+  // llmStreamOnce(messages, web, onChunk?, t?)：t = 渲染目标（默认 term；会话后台执行传 exeTerm）
+  async function llmStreamOnce(messages, web, onChunk, t) {
     const reasoningStartAt = Date.now();
     let full = '';
     let saveSeen = false;
@@ -1904,9 +2021,9 @@
         }
         if (!toolJson) {
           // 非流式回答：气泡 + 深度思考块 + 正文
-          term.beginMsg('assistant');
-          if (reasoning) wireThink(term.appendCard(renderThinkBlock(reasoning, null), 'think-card'));
-          term.writeln(renderMdFile(full));
+          t.beginMsg('assistant');
+          if (reasoning) wireThink(t.appendCard(renderThinkBlock(reasoning, null), 'think-card'));
+          t.writeln(renderMdFile(full));
           if (onChunk && full) onChunk(full);
         }
         return { full, reasoning, reasoningStartAt, firstContentAt, lastUsage, toolJson };
@@ -1919,7 +2036,7 @@
       let lineBuf = '';
       let held = []; // 含 <!-- 的行可能是写回块前奏，暂缓显示（避免露出一小段标记）
       // 气泡容器：本轮回答的容器（reasoning 或首个 content 时创建），后续写入自动进入
-      const ensureBubble = () => { if (!term.currentMsg()) term.beginMsg('assistant'); };
+      const ensureBubble = () => { if (!t.currentMsg()) t.beginMsg('assistant'); };
       const feedDelta = (d) => {
         lineBuf += d;
         let nl;
@@ -1929,7 +2046,7 @@
           if (line.includes('<!--')) held.push(line);
           else {
             if (onChunk) onChunk(line); // App 通道：推原始行文本
-            for (const l of md.feed(line)) term.writeln(l);
+            for (const l of md.feed(line)) t.writeln(l);
           }
         }
       };
@@ -1953,7 +2070,7 @@
               if (!thoughtShown) {
                 thoughtShown = true;
                 ensureBubble();
-                thoughtEl = term.appendRow('🧠 思考中…', 'think');
+                thoughtEl = t.appendRow('🧠 思考中…', 'think');
               }
             }
             const delta = d && d.content;
@@ -1964,16 +2081,16 @@
               toolMode = delta.trimStart().startsWith('{');
               if (toolMode) {
                 // 工具轮：移除思考指示与空气泡（E4：不再用 \x1b[1A\x1b[2K 清除，DOM 行直接删）
-                if (thoughtEl) { term.removeRow(thoughtEl); thoughtEl = null; }
-                term.endMsg(true);
+                if (thoughtEl) { t.removeRow(thoughtEl); thoughtEl = null; }
+                t.endMsg(true);
               } else {
                 ensureBubble();
                 if (thoughtEl) {
                   // 「思考中…」→ 深度思考折叠块（含完整 reasoning，默认折叠）
-                  wireThink(term.replaceRow(thoughtEl, renderThinkBlock(reasoning, Math.max(1, Math.round((Date.now() - reasoningStartAt) / 1000))), 'think-card'));
+                  wireThink(t.replaceRow(thoughtEl, renderThinkBlock(reasoning, Math.max(1, Math.round((Date.now() - reasoningStartAt) / 1000))), 'think-card'));
                   thoughtEl = null;
                 } else if (reasoning) {
-                  wireThink(term.appendCard(renderThinkBlock(reasoning, Math.max(1, Math.round((Date.now() - reasoningStartAt) / 1000))), 'think-card'));
+                  wireThink(t.appendCard(renderThinkBlock(reasoning, Math.max(1, Math.round((Date.now() - reasoningStartAt) / 1000))), 'think-card'));
                 }
               }
             }
@@ -1999,21 +2116,21 @@
       consume(buf + dec.decode());
       // 冲刷末尾未换行的行（写回块已触发时丢弃残留的标记前缀）
       if (!toolMode && lineBuf.length && !saveSeen) {
-        for (const l of md.feed(lineBuf)) term.writeln(l);
+        for (const l of md.feed(lineBuf)) t.writeln(l);
       }
       if (!toolMode) {
-        for (const l of md.flush()) term.writeln(l);
+        for (const l of md.flush()) t.writeln(l);
         // 写回块未触发（如正文含普通 HTML 注释）→ 补显暂缓行
         if (!saveSeen && held.length) {
           for (const line of held) {
-            for (const l of md.feed(line)) term.writeln(l);
+            for (const l of md.feed(line)) t.writeln(l);
           }
-          for (const l of md.flush()) term.writeln(l);
+          for (const l of md.flush()) t.writeln(l);
         }
       }
     } catch (e) {
       if (e && e.name === 'AbortError') {
-        term.writeln('\x1b[33m(回答已中断)\x1b[0m');
+        t.writeln('\x1b[33m(回答已中断)\x1b[0m');
       } else {
         const msg = (e && e.message) || '';
         // CE 双模式：上下文超限检测（不打印失败，返回标记由上层 llmOnceWithFresh 降级重试）
@@ -2042,9 +2159,10 @@
   }
 
   async function ask(question) {
+    const t = beginExe(); // 会话后台执行：本回答绑定当前会话（切走转后台，切回重放）
     // 上下文组装 v2：有 LLM 配置 → 去掉启发式预检索，知识/记忆取用走 LLM 显式调工具（read_l1/search/memory_search）；
     // 无 LLM 配置 → 降级保留「启发式关键词提取 + 预检索注入」路径（Ollama 本地等场景兜底）
-    term.writeln(llmConfigured
+    t.writeln(llmConfigured
       ? '\x1b[90m(Agent: 知识取用工具化——LLM 显式调 read_l1/search 取规范/记忆/知识)\x1b[0m'
       : '\x1b[90m(Agent: 提取关键词 → 检索 L2 → 调用 LLM)\x1b[0m');
     const kws = Core.extractKeywords(question);
@@ -2064,7 +2182,7 @@
           for (const w of Core.extractKeywords(name)) kws.push(w);
         }
       } catch (e) {
-        term.writeln('\x1b[33m@ 文件未找到: ' + p + '\x1b[0m');
+        t.writeln('\x1b[33m@ 文件未找到: ' + p + '\x1b[0m');
       }
     }
 
@@ -2072,22 +2190,23 @@
     let top = [];
     if (!llmConfigured) {
       const query = kws.length ? [...new Set(kws)].join(' ') : question;
-      term.writeln('\x1b[90m关键词: ' + (kws.length ? query : '(无，用原文)') + '\x1b[0m');
+      t.writeln('\x1b[90m关键词: ' + (kws.length ? query : '(无，用原文)') + '\x1b[0m');
       let sr;
       try {
         sr = await api('/api/search?q=' + encodeURIComponent(query) + '&layer=notes&ctx=1');
       } catch (e) {
-        term.writeln('\x1b[31m检索失败: ' + e.message + '\x1b[0m');
+        t.writeln('\x1b[31m检索失败: ' + e.message + '\x1b[0m');
+        finishExe(t);
         return;
       }
       top = sr.hits.slice(0, 8);
       if (atFrag.length) {
-        term.writeln('\x1b[90m@ 指定文档 ' + atFrag.length + ' 篇已注入（' + atRefs.join(' ') + '）\x1b[0m');
+        t.writeln('\x1b[90m@ 指定文档 ' + atFrag.length + ' 篇已注入（' + atRefs.join(' ') + '）\x1b[0m');
       }
       if (!top.length && !atFrag.length) {
-        term.writeln('\x1b[33m知识库无相关片段（仅靠 L1 规范与模型自身知识回答）\x1b[0m');
+        t.writeln('\x1b[33m知识库无相关片段（仅靠 L1 规范与模型自身知识回答）\x1b[0m');
       } else if (top.length) {
-        term.writeln('\x1b[90m命中 ' + sr.file_count + ' 文件 / ' + sr.hit_count + ' 处，注入前 ' + top.length + ' 条（按相关度排序）\x1b[0m');
+        t.writeln('\x1b[90m命中 ' + sr.file_count + ' 文件 / ' + sr.hit_count + ' 处，注入前 ' + top.length + ' 条（按相关度排序）\x1b[0m');
       }
     }
 
@@ -2154,27 +2273,27 @@
     let web = webToggle || Core.webTrigger(question);
     // CE 双模式（fresh-window 默认）：上下文超限 → 降级最小上下文重试（只保留引导前缀 + 当前问题）
     const llmOnceWithFresh = async (msgs) => {
-      const r = await llmStreamOnce(msgs, web);
+      const r = await llmStreamOnce(msgs, web, undefined, t);
       if (!r || !r.overflow) return r;
-      term.writeln('\x1b[33m(上下文超限 → 降级最小上下文重试)\x1b[0m');
+      t.writeln('\x1b[33m(上下文超限 → 降级最小上下文重试)\x1b[0m');
       const fresh = [
         { role: 'system', content: Core.buildGuidePrefix({ guideText: llmConfigured ? '' : (GUIDE_TEXT || L1_TEXT), memoryText: '', toolsTxt, today: localToday() }, { fresh: true }) },
         { role: 'user', content: '问题：' + question },
       ];
-      const r2 = await llmStreamOnce(fresh, web);
+      const r2 = await llmStreamOnce(fresh, web, undefined, t);
       if (r2 && r2.overflow) return null;
-      if (r2 && !r2.toolJson) term.writeln('\x1b[90m(已丢失历史与检索片段，基于最小上下文回答)\x1b[0m');
+      if (r2 && !r2.toolJson) t.writeln('\x1b[90m(已丢失历史与检索片段，基于最小上下文回答)\x1b[0m');
       return r2;
     };
     for (;;) {
-      term.writeln('\x1b[90m(' + (toolCount ? '继续' : '回答中') + (web ? '·联网' : '') + '...)\x1b[0m');
+      t.writeln('\x1b[90m(' + (toolCount ? '继续' : '回答中') + (web ? '·联网' : '') + '...)\x1b[0m');
       const r = await llmOnceWithFresh(messages);
-      if (!r) { term.endMsg(); return; } // 中断/失败（内部已提示）；关闭残留气泡
+      if (!r) { t.endMsg(); finishExe(t); return; } // 中断/失败（内部已提示）；关闭残留气泡
       if (r.retry) {
         // 联网轮无文本返回（web_search_call 事件轮）→ 重试一轮；计入上限防死循环
-        term.writeln('\x1b[90m(联网检索无文本返回，继续等待模型作答…)\x1b[0m');
+        t.writeln('\x1b[90m(联网检索无文本返回，继续等待模型作答…)\x1b[0m');
         toolCount++;
-        if (toolCount >= MAX_TOOL) { term.endMsg(); return; }
+        if (toolCount >= MAX_TOOL) { t.endMsg(); finishExe(t); return; }
         continue;
       }
       if (!r.toolJson) {
@@ -2188,7 +2307,7 @@
       }
       // 工具调用轮：终端审计行 + 执行 + 结果回填
       const tj = r.toolJson;
-      const toolRow = createToolRow(tj.tool, JSON.stringify(tj.args || {}));
+      const toolRow = createToolRow(t, tj.tool, JSON.stringify(tj.args || {}));
       toolRow.running();
       let result;
       let toolFail = null;
@@ -2199,7 +2318,7 @@
       // 知识检索 0 命中 → 下一轮开启联网通道（服务端 web_search），让模型在知识库不足时能搜到外部信息
       if (!web && /无命中|未命中|未定位|无片段|未找到/.test(String(result))) {
         web = true;
-        term.writeln('\x1b[33m(知识库检索不足 → 已开启联网检索)\x1b[0m');
+        t.writeln('\x1b[33m(知识库检索不足 → 已开启联网检索)\x1b[0m');
       }
       messages.push({ role: 'assistant', content: r.full });
       messages.push({ role: 'user', content: '工具 ' + tj.tool + ' 返回（基于它直接回答；仍缺关键信息才可再调用工具，引用标注 [工具:' + tj.tool + ']）：\n' + String(result).slice(0, 3000) }); // 方向 4：4000→3000 摘要注入
@@ -2207,7 +2326,7 @@
       toolCount++;
       if (toolCount >= MAX_TOOL) {
         // 达上限：强制回答轮（去掉工具调用指令，避免 LLM 无限探索不收敛）
-        term.writeln('\x1b[33m(工具调用已达 ' + MAX_TOOL + ' 次上限，基于已获取信息回答)\x1b[0m');
+        t.writeln('\x1b[33m(工具调用已达 ' + MAX_TOOL + ' 次上限，基于已获取信息回答)\x1b[0m');
         messages.push({ role: 'user', content: '请基于上述工具返回直接给出最终回答，不要调用任何工具。' });
         const r2 = await llmOnceWithFresh(messages);
         if (r2 && !r2.toolJson) {
@@ -2222,7 +2341,7 @@
     }
     // 本次回答 token 用量（深度思考块已在 llmStreamOnce 内展示；无则静默跳过）
     if (lastUsage && lastUsage.total_tokens) {
-      term.writeln('\x1b[90m本次输出 ' + lastUsage.total_tokens + ' tokens\x1b[0m');
+      t.writeln('\x1b[90m本次输出 ' + lastUsage.total_tokens + ' tokens\x1b[0m');
     }
 
     // CE 记账（Phase 3-C 第 1 步：记账先行，零侵入）——上报用量与缓存命中，供 /api/context/stats
@@ -2267,35 +2386,43 @@
     if (save) {
       try {
         const savedPath = await applySave(save);
-        term.writeln('\x1b[33m💾 已进入待审: \x1b[0m' + savedPath + '  （/view automation 审核 · /approve 确认 · /reject 丢弃）');
+        t.writeln('\x1b[33m💾 已进入待审: \x1b[0m' + savedPath + '  （/view automation 审核 · /approve 确认 · /reject 丢弃）');
       } catch (e) {
-        term.writeln('\x1b[31m写回失败: ' + e.message + '\x1b[0m');
+        t.writeln('\x1b[31m写回失败: ' + e.message + '\x1b[0m');
       }
     }
 
-    // 5. 多轮记忆（存问答正文，不含检索片段；localStorage 持久化）
-    history.push({ role: 'user', content: question });
-    if (cleanFull) history.push({ role: 'assistant', content: cleanFull });
-    if (history.length > MAX_HISTORY) history = history.slice(-MAX_HISTORY);
-    saveHistory();
-
-    // L0 会话快照（步骤①）：累积问题+回答对，空闲防抖落盘 kb/sessions/
-    sessionLog.push({ q: question, a: cleanFull || '(无回答/中断)', ts: Date.now() });
-    if (sessionLog.length > MAX_SESSION_LOG) sessionLog = sessionLog.slice(-MAX_SESSION_LOG);
-    scheduleL0Snapshot();
+    // 5. 多轮记忆 + L0 会话快照：按执行归属写入——
+    // 活跃执行写当前会话（全局状态）；后台执行（切走完成）写 exe 所属会话文件（不动当前全局状态）
+    if (t.exe.active) {
+      history.push({ role: 'user', content: question });
+      if (cleanFull) history.push({ role: 'assistant', content: cleanFull });
+      if (history.length > MAX_HISTORY) history = history.slice(-MAX_HISTORY);
+      saveHistory();
+      sessionLog.push({ q: question, a: cleanFull || '(无回答/中断)', ts: Date.now() });
+      if (sessionLog.length > MAX_SESSION_LOG) sessionLog = sessionLog.slice(-MAX_SESSION_LOG);
+      scheduleL0Snapshot();
+    } else if (t.exe.key) {
+      // 后台完成：追加问答对到 exe 所属会话文件（缓冲已渲染过/待重放，记录必须归属正确）
+      appendSessionQA(t.exe.key, question, cleanFull || '(无回答/中断)');
+    } else {
+      // 后台首问完成：无归属文件 → 生成新会话文件落盘（回答不丢，恢复时可见）
+      appendSessionQA('sessions/' + sessionStamp() + '.md', question, cleanFull || '(无回答/中断)');
+    }
 
     if (top.length) {
-      term.writeln('\x1b[1;32m──── 引用来源 ────\x1b[0m');
+      t.writeln('\x1b[1;32m──── 引用来源 ────\x1b[0m');
       const seen = new Set();
       for (const h of top) {
         const k = h.file + ':' + h.line;
         if (seen.has(k)) continue;
         seen.add(k);
-        term.writeln('\x1b[90m' + k + '  ' + (h.section || '') + '\x1b[0m');
+        t.writeln('\x1b[90m' + k + '  ' + (h.section || '') + '\x1b[0m');
       }
     }
     enhanceRefs(); // 回答渲染完成后：把 [文件:行号] 引用增强为可点击（点击 → 图谱高亮）
-    term.endMsg(); // 关闭本轮回答气泡（工具轮无气泡，无操作）
+    t.endMsg(); // 关闭本轮回答气泡（工具轮无气泡，无操作）
+    finishExe(t); // 回答完成：标记执行结束（运行图标清除；首问迁移归属）
   }
 
   // ---------- App → Agent（agent:ask 执行体）：App 提问走 Agent 回路 ----------
@@ -2303,14 +2430,15 @@
   // 回答流式渲染到终端（可审计）+ 按行推回 App；工具调用事件同步推送
   async function runAsApp(text, tab) {
     const post = (m) => { try { tab.iframe.contentWindow.postMessage(m, '*'); } catch (e) { /* 视图已关 */ } };
+    const t = beginExe(); // App 请求同样绑定当前会话（后台执行语义）
     // 终端显示 App 提问（用户气泡样式，可审计）
-    term.beginMsg('user');
-    term.writeln(renderInline ? renderInline('[App: ' + tab.title + '] ' + text) : '[App: ' + tab.title + '] ' + text);
-    term.endMsg(true);
+    t.beginMsg('user');
+    t.writeln(renderInline ? renderInline('[App: ' + tab.title + '] ' + text) : '[App: ' + tab.title + '] ' + text);
+    t.endMsg(true);
     const tools = await getTools();
-    const toolsTxt = tools.map((t) =>
-      '  - ' + t.name + '(' + t.params.map((p) => p.name + (p.required ? '' : '?')).join(', ') + '): ' + t.desc +
-      (t.example ? ' | 例: ' + t.example : '')
+    const toolsTxt = tools.map((tool) =>
+      '  - ' + tool.name + '(' + tool.params.map((p) => p.name + (p.required ? '' : '?')).join(', ') + '): ' + tool.desc +
+      (tool.example ? ' | 例: ' + tool.example : '')
     ).join('\n');
     const system = Core.buildGuidePrefix({
       guideText: llmConfigured ? '' : (GUIDE_TEXT || L1_TEXT),
@@ -2326,13 +2454,13 @@
     let toolCount = 0;
     const MAX_TOOL = 3;
     for (;;) {
-      term.writeln('\x1b[90m(App 请求' + (toolCount ? ' · 继续' : '') + '...)\x1b[0m');
-      const r = await llmStreamOnce(messages, false, (line) => post({ type: 'agent:chunk', text: line, done: false }));
-      if (!r) { post({ type: 'agent:error', message: '回答中断' }); return; }
+      t.writeln('\x1b[90m(App 请求' + (toolCount ? ' · 继续' : '') + '...)\x1b[0m');
+      const r = await llmStreamOnce(messages, false, (line) => post({ type: 'agent:chunk', text: line, done: false }), t);
+      if (!r) { post({ type: 'agent:error', message: '回答中断' }); finishExe(t); return; }
       if (!r.toolJson) { full = r.full; break; }
       // 工具轮：终端审计卡 + App 事件
       const tj = r.toolJson;
-      const toolRow = createToolRow(tj.tool, JSON.stringify(tj.args || {}));
+      const toolRow = createToolRow(t, tj.tool, JSON.stringify(tj.args || {}));
       toolRow.running();
       post({ type: 'agent:tool', name: tj.tool, status: 'running' });
       let result;
@@ -2344,14 +2472,15 @@
       messages.push({ role: 'user', content: '工具 ' + tj.tool + ' 返回（基于它直接回答；仍缺关键信息才可再调用工具，引用标注 [工具:' + tj.tool + ']）：\n' + String(result).slice(0, 3000) });
       toolCount++;
       if (toolCount >= MAX_TOOL) {
-        term.writeln('\x1b[33m(工具调用已达 ' + MAX_TOOL + ' 次上限，基于已获取信息回答)\x1b[0m');
+        t.writeln('\x1b[33m(工具调用已达 ' + MAX_TOOL + ' 次上限，基于已获取信息回答)\x1b[0m');
         messages.push({ role: 'user', content: '请基于上述工具返回直接给出最终回答，不要调用任何工具。' });
-        const r2 = await llmStreamOnce(messages, false, (line) => post({ type: 'agent:chunk', text: line, done: false }));
+        const r2 = await llmStreamOnce(messages, false, (line) => post({ type: 'agent:chunk', text: line, done: false }), t);
         if (r2 && !r2.toolJson) full = r2.full;
         break;
       }
     }
     post({ type: 'agent:chunk', text: '', done: true }); // 完成信号（App 关闭加载态）
+    finishExe(t);
   }
 
   // ---------- 引用增强：回答/工具结果中的 [文件:行号] → 可点击（点击打开图谱并高亮该文档局部图） ----------
@@ -3172,7 +3301,6 @@
       if (!text) { tab.iframe.contentWindow.postMessage({ type: 'agent:error', message: '空提问' }, '*'); return; }
       busy = true;
       setBusyUI();
-      aiRunningOn(); // App 请求同样标运行图标
       try {
         await runAsApp(text, tab);
       } catch (e) {
@@ -3180,7 +3308,6 @@
       } finally {
         busy = false;
         setBusyUI();
-        aiRunningOff();
         refreshStatus();
       }
       return;
