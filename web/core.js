@@ -268,6 +268,18 @@
     return (perms || []).includes(perm);
   };
 
+  // ---------- 应用结构化结果提取（Phase A：agent:ask 结果回推） ----------
+  // 约定标记：回答末尾 `<!-- md-agent-app-data -->{json}<!-- / -->`（与 md-agent-save 块同模式）；
+  // 应用侧提示模型输出结构化 JSON，宿主提取后随完成信号回推（app 直接渲染卡片，不必解析文本）
+  Core.extractAppData = function (text) {
+    const s = String(text || '');
+    const m = s.match(/<!--\s*md-agent-app-data\s*-->([\s\S]*?)<!--\s*\/\s*-->/);
+    if (!m) return { text: s, data: null };
+    let data = null;
+    try { data = JSON.parse(m[1].trim()); } catch (e) { data = null; }
+    return { text: s.replace(m[0], '').trim(), data };
+  };
+
   root.Core = Core;
   if (typeof module !== 'undefined' && module.exports) module.exports = Core;
 })(typeof window !== 'undefined' ? window : globalThis);

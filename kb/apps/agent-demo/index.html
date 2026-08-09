@@ -680,6 +680,7 @@ const APP = {
                             <span class="text-gray-300 font-normal">${this.esc(msg.time)}</span>
                         </div>
                         <p class="text-xs">${this.esc(msg.content)}</p>
+                        ${msg.data ? this.renderScoreCard(msg.data, msg) : ''}
                     </div>
                 </div>
             `;
@@ -690,6 +691,52 @@ const APP = {
                 PM ${this.esc(session.pm)} 与猎头协作中 · 共 ${msgs.length} 条消息
             </div>
         `;
+    },
+
+    // ---- Phase A：结构化匹配评估卡（agent:ask 结果 data 渲染）+ 提提案进待审 ----
+    renderScoreCard(data, msg) {
+        const d = data || {};
+        const score = Math.max(0, Math.min(100, parseInt(d.score, 10) || 0));
+        const color = score >= 90 ? '#10b981' : score >= 80 ? '#6366f1' : '#f59e0b';
+        const list = (arr) => (Array.isArray(arr) && arr.length
+            ? arr.map((x) => `<li>${this.esc(String(x))}</li>`).join('')
+            : '<li style="color:#9ca3af">—</li>');
+        const payload = encodeURIComponent(JSON.stringify({ data: d, text: String(msg.content || '') }));
+        return `
+            <div class="mt-2 rounded-lg border border-indigo-100 p-2.5 score-card" style="background:#f8fafc">
+                <div class="flex items-center gap-2 mb-1.5">
+                    <span class="text-[11px] font-semibold" style="color:${color}">匹配度 ${score}</span>
+                    <span class="text-[10px] text-gray-400">（AI 评估）</span>
+                    <button class="ml-auto text-[10px] px-2 py-0.5 rounded border" style="border-color:#c7d2fe;color:#6366f1"
+                        data-propose="${payload}" title="写入知识库待审队列，人工确认后入库">📝 存入知识库（待审）</button>
+                </div>
+                <div class="text-[10px] text-gray-500 font-medium">💡 亮点</div>
+                <ul class="text-[10px] text-gray-600 pl-3 mb-1" style="list-style:disc">${list(d.strengths)}</ul>
+                <div class="text-[10px] text-gray-500 font-medium">⚠ 风险</div>
+                <ul class="text-[10px] text-gray-600 pl-3 mb-1" style="list-style:disc">${list(d.risks)}</ul>
+                <div class="text-[10px] text-gray-500 font-medium">📌 建议</div>
+                <ul class="text-[10px] text-gray-600 pl-3" style="list-style:disc">${list(d.suggestions)}</ul>
+            </div>
+        `;
+    },
+    // 提提案：write 权限 POST /api/file 写 kb/pending/（人审队列；自动化面板可审）
+    async proposeToKB(payload) {
+        let p = {};
+        try { p = JSON.parse(decodeURIComponent(payload)); } catch (e) { this.showToast('数据解析失败', 'error'); return; }
+        const d = p.data || {};
+        const stamp = new Date().toISOString().slice(0, 10);
+        const content = '---\ntype: note\ntitle: 猎头匹配分析 ' + stamp + '\ntags: [猎头, 分析]\nupdated: ' + stamp + '\n---\n\n# 猎头匹配分析\n\n' +
+            String(p.text || '') + '\n\n## 结构化评估\n\n```json\n' + JSON.stringify(d, null, 2) + '\n```\n';
+        this.showToast('写入待审…', 'warn');
+        try {
+            await window.hostApi('/api/file', {
+                method: 'POST',
+                body: { path: 'pending/猎头分析-' + Date.now() + '.md', content: content },
+            });
+            this.showToast('✓ 已进入待审队列（自动化面板审核后可入库）', 'success');
+        } catch (e) {
+            this.showToast('写入失败: ' + ((e && e.message) || e), 'error');
+        }
     },
 
     // ---- 切换视图 ----
@@ -835,6 +882,7 @@ const APP = {
         }, 800);
 
         // 走 Agent 回路生成匹配分析（agent:ask 通道：检索知识库 + 工具，替代裸 /api/llm）
+        // Phase A：context 结构化入参（岗位/候选人不必拼进提问文本）+ 结果 JSON 约定标记回推
         try {
             const pos = APP_DATA.positions.find(p => p.id === this.activePositionId);
             const session = APP_DATA.sessions.find(s => s.position_id === this.activePositionId);
@@ -848,11 +896,13 @@ const APP = {
             setDot('busy');
             window.__agentCb = {
                 onChunk: (chunk) => { analysis += chunk; },
-                onDone: () => {
+                onDone: (msg) => {
                     setDot('ready');
-                    if (analysis.trim() && session && APP_DATA.messages[session.id]) {
+                    const content = (msg && msg.textFull) ? msg.textFull : analysis.trim();
+                    const data = (msg && msg.data) || null;
+                    if (content && session && APP_DATA.messages[session.id]) {
                         APP_DATA.messages[session.id].push({
-                            role: 'agent', content: '分析：' + analysis.trim(),
+                            role: 'agent', content: '分析：' + content, data: data,
                             time: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
                         });
                         saveAppData().then(() => this.renderActivity());
@@ -861,8 +911,13 @@ const APP = {
             };
             window.parent.postMessage({
                 type: 'agent:ask',
-                text: '我是猎头。请对岗位「' + (pos ? pos.title : '') + '」的候选人推荐给出简短分析评价（100 字内）：候选人 ' + c.name +
-                      '（' + c.current_title + '，' + c.years + '年经验，技能: ' + c.tags.join(',') + '）。可先检索知识库确认候选人信息，基于知识库回答。'
+                text: '我是猎头。请对候选人推荐给出分析评价（120 字内）：候选人 ' + c.name +
+                      '（' + c.current_title + '，' + c.years + '年经验）。可先检索知识库确认候选人信息，基于知识库回答。' +
+                      '回答末尾请用 <!-- md-agent-app-data -->{"score":0,"strengths":[],"risks":[],"suggestions":[]}<!-- / --> 输出结构化匹配评估（score=匹配度 0-100，strengths/risks/suggestions 各 2-3 条简短中文）。',
+                context: [
+                    { title: '岗位需求', content: (pos ? ('岗位：' + pos.title + '\n' + (pos.requirements || '') + '\n' + (pos.desc || '')) : '') },
+                    { title: '候选人', content: '姓名：' + c.name + '\n当前职位：' + c.current_title + '\n公司：' + c.current_company + '\n经验：' + c.years + ' 年\n技能：' + c.tags.join(', ') + '\n备注：' + (c.notes || '') }
+                ]
             }, '*');
         } catch (e) {}
     },
@@ -937,6 +992,11 @@ APP.init().catch(function(e) {
 });
 
 // ---- Agent 通道事件（agent:ask 的流式/工具/错误回推） ----
+// 活动流委托：结构化评估卡「存入知识库（待审）」按钮
+document.addEventListener('click', function (ev) {
+    var btn = ev.target.closest('[data-propose]');
+    if (btn) { APP.proposeToKB(btn.getAttribute('data-propose')); }
+});
 window.addEventListener('message', function (ev) {
     var msg = ev.data;
     if (!msg) return;
@@ -944,14 +1004,14 @@ window.addEventListener('message', function (ev) {
         if (msg.done) {
             var cb = window.__agentCb;
             window.__agentCb = null;
-            if (cb && cb.onDone) cb.onDone();
+            if (cb && cb.onDone) cb.onDone(msg);
         } else if (window.__agentCb) {
             window.__agentCb.onChunk(msg.text);
         }
     } else if (msg.type === 'agent:error') {
         var cb2 = window.__agentCb;
         window.__agentCb = null;
-        if (cb2 && cb2.onDone) cb2.onDone();
+        if (cb2 && cb2.onDone) cb2.onDone(null);
         var dot = document.getElementById('agent-status-dot');
         if (dot) dot.className = 'status-dot error';
         var tx = document.getElementById('agent-status-text');

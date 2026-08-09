@@ -2702,15 +2702,26 @@
   }
 
   // ---------- App → Agent（agent:ask 执行体）：App 提问走 Agent 回路 ----------
-  // 上下文 = 引导前缀 + 工具清单 + 问题（不带主对话历史——App 操作是派生产物，不污染会话）；
-  // 回答流式渲染到终端（可审计）+ 按行推回 App；工具调用事件同步推送
-  async function runAsApp(text, tab) {
+  // 上下文 = 引导前缀 + 工具清单 + 问题 + 应用上下文（context，MCP Apps 式结构化片段，不拼进提问文本）；
+  // 回答流式渲染到终端（可审计）+ 按行推回 App；工具调用事件同步推送；完成信号携带结构化 data（约定标记提取）
+  async function runAsApp(text, tab, context) {
     const post = (m) => { try { tab.iframe.contentWindow.postMessage(m, '*'); } catch (e) { /* 视图已关 */ } };
     const t = beginExe(); // App 请求同样绑定当前会话（后台执行语义）
     // 终端显示 App 提问（用户气泡样式，可审计）
     t.beginMsg('user');
     t.writeln(renderInline ? renderInline('[App: ' + tab.title + '] ' + text) : '[App: ' + tab.title + '] ' + text);
     t.endMsg(true);
+    // context 结构化入参：数组/单对象统一规范化；单片段 4000 字、总长 8000 字截断
+    let ctxFrag = '';
+    const ctxList = Array.isArray(context) ? context : (context ? [context] : []);
+    const ctxParts = [];
+    for (const c of ctxList) {
+      if (!c) continue;
+      const title = String(c.title || '上下文片段').slice(0, 80);
+      const content = String(c.content || c.text || '').slice(0, 4000);
+      if (content) ctxParts.push('[' + title + ']\n' + content);
+    }
+    if (ctxParts.length) ctxFrag = '\n\n[应用上下文]\n' + ctxParts.join('\n\n').slice(0, 8000);
     const tools = await getTools();
     const toolsTxt = tools.map((tool) =>
       '  - ' + tool.name + '(' + tool.params.map((p) => p.name + (p.required ? '' : '?')).join(', ') + '): ' + tool.desc +
@@ -2724,7 +2735,7 @@
     });
     const messages = [
       { role: 'system', content: system },
-      { role: 'user', content: '问题：' + text },
+      { role: 'user', content: '问题：' + text + ctxFrag },
     ];
     let full = '';
     let toolCount = 0;
@@ -2758,7 +2769,9 @@
         break;
       }
     }
-    post({ type: 'agent:chunk', text: '', done: true }); // 完成信号（App 关闭加载态）
+    // 完成信号：剥离约定标记 + 提取结构化 data 回推（App 直接渲染；旧应用忽略 data 字段零破坏）
+    const clean = Core.extractAppData(full);
+    post({ type: 'agent:chunk', text: '', done: true, data: clean.data, textFull: clean.text });
     finishExe(t);
   }
 
@@ -3582,7 +3595,7 @@
       busy = true;
       setBusyUI();
       try {
-        await runAsApp(text, tab);
+        await runAsApp(text, tab, msg.context);
       } catch (e) {
         tab.iframe.contentWindow.postMessage({ type: 'agent:error', message: (e && e.message) || String(e) }, '*');
       } finally {

@@ -137,3 +137,19 @@ test('权限映射：llm/search/graph/file/storage + 管理端点拒绝', () => 
   assert.ok(Core.appCan('/api/apps/match/data', 'GET', ['storage']));
   assert.ok(!Core.appCan('/api/config', 'GET', ['llm', 'search', 'graph']));
 });
+
+test('extractAppData：约定标记提取/剥离/非法 JSON 兜底', () => {
+  // 正常：文本 + 标记块 → data 解析、展示文本剥离标记
+  const r1 = Core.extractAppData('分析结论\n\n<!-- md-agent-app-data -->{"score":85,"strengths":["a"]}<!-- / -->');
+  assert.strictEqual(r1.text, '分析结论');
+  assert.strictEqual(r1.data.score, 85);
+  assert.deepStrictEqual(r1.data.strengths, ['a']);
+  // 无标记 → data null、文本原样
+  const r2 = Core.extractAppData('普通回答');
+  assert.strictEqual(r2.text, '普通回答');
+  assert.strictEqual(r2.data, null);
+  // 标记但非法 JSON → data null、文本剥离
+  const r3 = Core.extractAppData('前文<!-- md-agent-app-data -->not-json<!-- / -->后文');
+  assert.strictEqual(r3.data, null);
+  assert.ok(!r3.text.includes('md-agent-app-data'));
+});
