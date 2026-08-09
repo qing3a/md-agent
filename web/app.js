@@ -1832,7 +1832,8 @@
   // 单次 LLM 流式调用（Agent Loop 一轮）：正常回答流式渲染；首个 content 以 { 开头 → 工具模式只收集不渲染
   // 返回 { full, reasoning, reasoningStartAt, firstContentAt, lastUsage, toolJson }；中断/失败返回 null
   // web=true → 联网通道（Responses API + 服务端 web_search，非流式；返回已归一化为 chat 结构）
-  async function llmStreamOnce(messages, web) {
+  // llmStreamOnce(messages, web, onChunk?)：onChunk 可选——每完成一行回答文本回调（App→Agent 通道用，推流式给 App）
+  async function llmStreamOnce(messages, web, onChunk) {
     const reasoningStartAt = Date.now();
     let full = '';
     let saveSeen = false;
@@ -1876,6 +1877,7 @@
           term.beginMsg('assistant');
           if (reasoning) wireThink(term.appendCard(renderThinkBlock(reasoning, null), 'think-card'));
           term.writeln(renderMdFile(full));
+          if (onChunk && full) onChunk(full);
         }
         return { full, reasoning, reasoningStartAt, firstContentAt, lastUsage, toolJson };
       }
@@ -1895,7 +1897,10 @@
           const line = lineBuf.slice(0, nl);
           lineBuf = lineBuf.slice(nl + 1);
           if (line.includes('<!--')) held.push(line);
-          else for (const l of md.feed(line)) term.writeln(l);
+          else {
+            if (onChunk) onChunk(line); // App 通道：推原始行文本
+            for (const l of md.feed(line)) term.writeln(l);
+          }
         }
       };
       // 解析 SSE：按 \n\n 切块，取 data: 行
@@ -2261,6 +2266,62 @@
     }
     enhanceRefs(); // 回答渲染完成后：把 [文件:行号] 引用增强为可点击（点击 → 图谱高亮）
     term.endMsg(); // 关闭本轮回答气泡（工具轮无气泡，无操作）
+  }
+
+  // ---------- App → Agent（agent:ask 执行体）：App 提问走 Agent 回路 ----------
+  // 上下文 = 引导前缀 + 工具清单 + 问题（不带主对话历史——App 操作是派生产物，不污染会话）；
+  // 回答流式渲染到终端（可审计）+ 按行推回 App；工具调用事件同步推送
+  async function runAsApp(text, tab) {
+    const post = (m) => { try { tab.iframe.contentWindow.postMessage(m, '*'); } catch (e) { /* 视图已关 */ } };
+    // 终端显示 App 提问（用户气泡样式，可审计）
+    term.beginMsg('user');
+    term.writeln(renderInline ? renderInline('[App: ' + tab.title + '] ' + text) : '[App: ' + tab.title + '] ' + text);
+    term.endMsg(true);
+    const tools = await getTools();
+    const toolsTxt = tools.map((t) =>
+      '  - ' + t.name + '(' + t.params.map((p) => p.name + (p.required ? '' : '?')).join(', ') + '): ' + t.desc +
+      (t.example ? ' | 例: ' + t.example : '')
+    ).join('\n');
+    const system = Core.buildGuidePrefix({
+      guideText: llmConfigured ? '' : (GUIDE_TEXT || L1_TEXT),
+      memoryText: llmConfigured ? '' : ((await getMemorySummary()) || MEMORY_TEXT),
+      toolsTxt,
+      today: localToday(),
+    });
+    const messages = [
+      { role: 'system', content: system },
+      { role: 'user', content: '问题：' + text },
+    ];
+    let full = '';
+    let toolCount = 0;
+    const MAX_TOOL = 3;
+    for (;;) {
+      term.writeln('\x1b[90m(App 请求' + (toolCount ? ' · 继续' : '') + '...)\x1b[0m');
+      const r = await llmStreamOnce(messages, false, (line) => post({ type: 'agent:chunk', text: line, done: false }));
+      if (!r) { post({ type: 'agent:error', message: '回答中断' }); return; }
+      if (!r.toolJson) { full = r.full; break; }
+      // 工具轮：终端审计卡 + App 事件
+      const tj = r.toolJson;
+      const toolRow = createToolRow(tj.tool, JSON.stringify(tj.args || {}));
+      toolRow.running();
+      post({ type: 'agent:tool', name: tj.tool, status: 'running' });
+      let result;
+      try { result = await runTool(tj.tool, tj.args); }
+      catch (e) { result = '工具调用失败: ' + ((e && e.message) || e); toolRow.fail((e && e.message) || e); }
+      if (!/调用失败/.test(result)) toolRow.done(result);
+      post({ type: 'agent:tool', name: tj.tool, status: 'done', result: String(result).slice(0, 500) });
+      messages.push({ role: 'assistant', content: r.full });
+      messages.push({ role: 'user', content: '工具 ' + tj.tool + ' 返回（基于它直接回答；仍缺关键信息才可再调用工具，引用标注 [工具:' + tj.tool + ']）：\n' + String(result).slice(0, 3000) });
+      toolCount++;
+      if (toolCount >= MAX_TOOL) {
+        term.writeln('\x1b[33m(工具调用已达 ' + MAX_TOOL + ' 次上限，基于已获取信息回答)\x1b[0m');
+        messages.push({ role: 'user', content: '请基于上述工具返回直接给出最终回答，不要调用任何工具。' });
+        const r2 = await llmStreamOnce(messages, false, (line) => post({ type: 'agent:chunk', text: line, done: false }));
+        if (r2 && !r2.toolJson) full = r2.full;
+        break;
+      }
+    }
+    post({ type: 'agent:chunk', text: '', done: true }); // 完成信号（App 关闭加载态）
   }
 
   // ---------- 引用增强：回答/工具结果中的 [文件:行号] → 可点击（点击打开图谱并高亮该文档局部图） ----------
@@ -3066,6 +3127,32 @@
       }
       return;
     }
+    // App → Agent 通道（agent:ask）：App 提问走 Agent 回路（项目知识库+工具+记忆），
+    // 终端显示可审计（不进会话历史），流式/工具事件推回 App；需 manifest 声明「agent」权限
+    if (msg.type === 'agent:ask') {
+      if (!tab.appId || !(tab.perms || []).includes('agent')) {
+        tab.iframe.contentWindow.postMessage({ type: 'agent:error', message: '权限不足：应用未声明「agent」权限' }, '*');
+        return;
+      }
+      if (busy) {
+        tab.iframe.contentWindow.postMessage({ type: 'agent:error', message: 'Agent 正忙，请稍后再试' }, '*');
+        return;
+      }
+      const text = String(msg.text || '').slice(0, 2000);
+      if (!text) { tab.iframe.contentWindow.postMessage({ type: 'agent:error', message: '空提问' }, '*'); return; }
+      busy = true;
+      setBusyUI();
+      try {
+        await runAsApp(text, tab);
+      } catch (e) {
+        tab.iframe.contentWindow.postMessage({ type: 'agent:error', message: (e && e.message) || String(e) }, '*');
+      } finally {
+        busy = false;
+        setBusyUI();
+        refreshStatus();
+      }
+      return;
+    }
     if (msg.type !== 'api') return;
     tab.busy = true;               // 收到桥请求 → 视图活跃
     if (!msg.path || !msg.path.startsWith('/api/')) {
@@ -3131,7 +3218,8 @@
     const apps = await getApps();
     const app = apps.find((a) => a.id === arg);
     if (app) {
-      const r = await api('/api/file?path=apps/' + app.id + '/' + encodeURIComponent(app.entry));
+      // App 是全局资源（kb/apps/），entry 读取不受当前项目影响 → 显式空 X-Project 回退主根
+      const r = await api('/api/file?path=apps/' + app.id + '/' + encodeURIComponent(app.entry), { headers: { 'X-Project': '' } });
       openView(app.name, r.content, { id: app.id, permissions: app.permissions }, { kind: 'app', arg: app.id });
       return;
     }

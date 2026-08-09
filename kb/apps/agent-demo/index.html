@@ -1,0 +1,963 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <base href="/apps/agent-demo/">
+    <title>AI猎头助手 · MCP 视图</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#2563eb',
+                        'primary-dark': '#1d4ed8',
+                        neutral: '#f7f8fa',
+                        terminal: '#111827',
+                        card: '#ffffff',
+                        line: '#e5e7eb',
+                        'pm-accent': '#6366f1',
+                        'hunter-accent': '#059669',
+                        'cand-accent': '#d97706',
+                    },
+                    fontFamily: {
+                        mono: ['Consolas', 'Monaco', 'monospace'],
+                        sans: ['Inter', 'system-ui']
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background: #f5f6fa; color: #1f2937; }
+        .scroll-hide::-webkit-scrollbar { display: none; }
+        .scroll-hide { -ms-overflow-style: none; scrollbar-width: none; }
+
+        .header-glass { background: rgba(255,255,255,0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid rgba(229,231,235,0.5); }
+        .card-glass { background: rgba(255,255,255,0.9); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); border: 1px solid rgba(229,231,235,0.4); }
+        .liquid-glass { position: relative; overflow: hidden; }
+        .liquid-glass::before { content: ''; position: absolute; inset: 0; background: linear-gradient(105deg, transparent 30%, rgba(255,255,255,0.6) 50%, transparent 70%); background-size: 200% 100%; animation: sheen 4s ease-in-out infinite; pointer-events: none; z-index: 1; }
+        @keyframes sheen { 0% { background-position: 200% 0; } 50% { background-position: -50% 0; } 100% { background-position: 200% 0; } }
+        .gradient-text { background: linear-gradient(135deg, #6366f1, #8b5cf6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+        .card-gradient-border { position: relative; border: 1px solid transparent; background-clip: padding-box; transition: all 0.2s; }
+        .card-gradient-border::before { content: ''; position: absolute; inset: -1px; border-radius: 10px; background: linear-gradient(135deg, #e5e7eb, #e5e7eb); z-index: -1; transition: opacity 0.3s; opacity: 0; }
+        .card-gradient-border:hover::before { opacity: 1; background: linear-gradient(135deg, #6366f1, #8b5cf6, #ec4899); }
+        .card-gradient-border:hover { box-shadow: 0 4px 20px rgba(99,102,241,0.12); transform: translateY(-1px); }
+        .ring-score { display: inline-flex; align-items: center; justify-content: center; position: relative; }
+        .ring-score svg { transform: rotate(-90deg); }
+        .ring-score .score-text { position: absolute; font-size: 10px; font-weight: 700; }
+        .score-high { color: #10b981; }
+        .score-mid { color: #6366f1; }
+        .score-low { color: #f59e0b; }
+        .tag { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
+        .status-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+        .status-dot.ready { background: #10b981; box-shadow: 0 0 6px rgba(16,185,129,0.4); }
+        .status-dot.busy { background: #f59e0b; animation: pulse 1s ease-in-out infinite; }
+        .status-dot.error { background: #ef4444; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+        .ripple-btn { position: relative; overflow: hidden; cursor: pointer; }
+        .ripple-btn .ripple { position: absolute; border-radius: 50%; background: rgba(255,255,255,0.3); transform: scale(0); animation: rippleAnim 0.6s ease-out; pointer-events: none; }
+        @keyframes rippleAnim { to { transform: scale(4); opacity: 0; } }
+        .bubble-arrow { position: relative; }
+        .bubble-arrow.sent::after { content: ''; position: absolute; top: 10px; right: -6px; width: 10px; height: 10px; background: #eef2ff; border-right: 1px solid #e5e7eb; border-top: 1px solid #e5e7eb; transform: rotate(45deg); }
+        .bubble-arrow.received::after { content: ''; position: absolute; top: 10px; left: -6px; width: 10px; height: 10px; background: #f9fafb; border-left: 1px solid #e5e7eb; border-bottom: 1px solid #e5e7eb; transform: rotate(45deg); }
+        .count-up { display: inline-block; }
+        .count-up.animate { animation: countPop 0.4s cubic-bezier(0.4, 0, 0.2, 1); }
+        @keyframes countPop { 0% { transform: scale(1); } 50% { transform: scale(1.3); } 100% { transform: scale(1); } }
+        .tooltip-modern { position: relative; }
+        .tooltip-modern .tooltip-content { position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%) translateY(4px); background: #1f2937; color: white; padding: 4px 10px; border-radius: 6px; font-size: 10px; white-space: nowrap; opacity: 0; pointer-events: none; transition: all 0.15s; }
+        .tooltip-modern .tooltip-content::after { content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); border: 4px solid transparent; border-top-color: #1f2937; }
+        .tooltip-modern:hover .tooltip-content { opacity: 1; transform: translateX(-50%) translateY(0); }
+        #toast-container { position: fixed; top: 16px; right: 16px; z-index: 9999; display: flex; flex-direction: column; gap: 6px; }
+        .toast-item { padding: 8px 16px; border-radius: 8px; color: white; font-size: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); animation: toastIn 0.3s ease-out; display: flex; align-items: center; gap: 6px; }
+        .toast-item.success { background: #10b981; }
+        .toast-item.warn { background: #f59e0b; }
+        .toast-item.error { background: #ef4444; }
+        @keyframes toastIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+        .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center; z-index: 500; backdrop-filter: blur(2px); animation: fadeIn 0.15s ease-out; }
+        .modal-content { background: white; border-radius: 12px; max-width: 520px; max-height: 80vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.15); animation: slideUp 0.2s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .modal-content::-webkit-scrollbar { width: 4px; }
+        .modal-content::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 2px; }
+        .page-transition { animation: pageIn 0.25s ease-out; }
+        @keyframes pageIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        .impression-tag { display: inline-flex; align-items: center; gap: 3px; padding: 1px 8px; border-radius: 999px; font-size: 10px; background: #f0f4ff; color: #4338ca; border: 1px solid #e0e7ff; }
+        .impression-tag .dot { width: 4px; height: 4px; border-radius: 50%; background: #6366f1; }
+        .cand-row { transition: all 0.15s; }
+        .cand-row:hover { background: #f9fafb; }
+        .pipeline-stage { transition: all 0.2s; }
+        .pipeline-stage:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+        .pipeline-conversion { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; font-size: 9px; color: #9ca3af; }
+        .pipeline-conversion .arrow { font-size: 16px; color: #d1d5db; }
+        .pipeline-conversion .rate { font-weight: 600; }
+        .pipeline-conversion .rate.high { color: #10b981; }
+        .pipeline-conversion .rate.medium { color: #f59e0b; }
+        .pipeline-conversion .rate.low { color: #ef4444; }
+        .fluid-bg { background: linear-gradient(-45deg, #6366f1, #8b5cf6, #6366f1, #4f46e5); background-size: 400% 400%; animation: fluidGradient 8s ease infinite; }
+        @keyframes fluidGradient { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+        .freshness-dot { width: 5px; height: 5px; border-radius: 50%; background: #10b981; }
+        .freshness-dot.stale { background: #f59e0b; }
+        .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 32px; color: #9ca3af; }
+        .empty-state .icon { font-size: 32px; margin-bottom: 8px; }
+        .empty-state .title { font-size: 13px; font-weight: 500; color: #6b7280; }
+        .empty-state .desc { font-size: 11px; margin-top: 4px; }
+        .sys-msg { display: flex; justify-content: center; margin: 8px 0; }
+        .sys-msg .bubble { background: #f3f4f6; border-radius: 999px; padding: 4px 14px; font-size: 11px; color: #6b7280; }
+        @media (max-width: 768px) {
+            .pipeline-grid { grid-template-columns: repeat(3, 1fr) !important; }
+            .cand-grid { grid-template-columns: 1fr !important; }
+        }
+        /* 加载状态 */
+        .loading-shimmer { background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%); background-size: 200% 100%; animation: shimmer 1.5s ease-in-out infinite; border-radius: 4px; }
+        @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+    </style>
+</head>
+<body>
+
+<!-- ==================== HEADER ==================== -->
+<header class="header-glass liquid-glass px-4 py-2 flex items-center justify-between shrink-0">
+    <div class="flex items-center gap-3">
+        <div class="flex items-center gap-2">
+            <span class="w-6 h-6 rounded-lg fluid-bg flex items-center justify-center text-white text-xs font-bold">AI</span>
+            <span class="text-sm font-semibold gradient-text">AI猎头助手</span>
+            <span class="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded font-mono">App</span>
+        </div>
+        <div class="flex items-center gap-1.5 text-xs text-gray-500">
+            <span class="status-dot ready" id="agent-status-dot"></span>
+            <span id="agent-status-text">就绪</span>
+            <span class="text-gray-300 mx-1">|</span>
+            <span id="current-context" class="text-gray-700 font-medium">加载中...</span>
+        </div>
+    </div>
+    <div class="flex items-center gap-2">
+        <span class="flex items-center gap-1 text-[10px] text-gray-400">
+            <span class="freshness-dot" id="freshness-dot"></span>
+            <span id="freshness-text">刚刚</span>
+        </span>
+        <span class="text-[10px] bg-emerald-50 text-emerald-600 px-1.5 py-0.5 rounded-full border border-emerald-200 flex items-center gap-1">
+            <span class="w-1.5 h-1.5 rounded-full bg-emerald-500" style="animation:pulse 2s ease-in-out infinite"></span>
+            Live
+        </span>
+        <button class="text-xs text-gray-400 hover:text-gray-600 transition px-1 py-0.5 ripple-btn" onclick="APP.showHelp()" title="帮助">
+            <i class="fa fa-question-circle"></i>
+        </button>
+    </div>
+</header>
+
+<!-- ==================== MAIN CONTENT ==================== -->
+<main class="max-w-4xl mx-auto p-4 space-y-4" id="app-root">
+
+    <!-- ====== 1. AI 上下文卡片 ====== -->
+    <div class="card-glass rounded-xl p-3 flex items-center justify-between page-transition" id="context-card">
+        <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-lg bg-indigo-100 flex items-center justify-center text-indigo-600">
+                <i class="fa fa-briefcase text-lg"></i>
+            </div>
+            <div>
+                <div class="text-sm font-semibold" id="position-title">加载中...</div>
+                <div class="text-xs text-gray-500 mt-0.5">
+                    <span id="position-company">-</span>
+                    <span class="mx-1.5">·</span>
+                    <span id="position-salary">-</span>
+                    <span class="mx-1.5">·</span>
+                    <span id="position-tags">-</span>
+                </div>
+            </div>
+        </div>
+        <div class="text-right text-xs text-gray-400">
+            <div class="flex items-center gap-2">
+                <span class="tag bg-green-100 text-green-700" id="position-status">-</span>
+                <span class="tag bg-indigo-100 text-indigo-700">高优先级</span>
+            </div>
+            <div class="mt-1">招聘 <strong id="position-hc">-</strong> 人 · AI匹配 <strong id="position-matched">-</strong> 人</div>
+        </div>
+    </div>
+
+    <!-- ====== 2. Pipeline 进度条 ====== -->
+    <div class="card-glass rounded-xl p-3 page-transition" id="pipeline-section">
+        <div class="flex items-center justify-between mb-2">
+            <div class="text-xs font-medium text-gray-600 flex items-center gap-2">
+                <i class="fa fa-tasks text-indigo-500"></i>招聘 Pipeline
+            </div>
+            <span class="text-[10px] text-gray-400">各阶段候选人分布</span>
+        </div>
+        <div class="flex items-center gap-1" id="pipeline-bar">
+            <!-- Rendered by JS -->
+        </div>
+    </div>
+
+    <!-- ====== 3. AI 匹配候选人 ====== -->
+    <div class="card-glass rounded-xl p-3 page-transition" id="candidates-section">
+        <div class="flex items-center justify-between mb-3">
+            <div class="text-xs font-medium text-gray-600 flex items-center gap-2">
+                <i class="fa fa-users text-emerald-500"></i>AI 匹配候选人
+                <span class="text-[10px] text-gray-400 font-normal" id="match-summary">按匹配分排序</span>
+            </div>
+            <div class="flex gap-1">
+                <button class="text-xs px-2 py-1 rounded bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition ripple-btn" onclick="APP.switchView('matched')" id="view-matched-btn">已匹配</button>
+                <button class="text-xs px-2 py-1 rounded bg-gray-100 text-gray-500 hover:bg-gray-200 transition ripple-btn" onclick="APP.switchView('all')" id="view-all-btn">全部候选人</button>
+            </div>
+        </div>
+        <div id="candidates-list" class="space-y-2">
+            <div class="loading-shimmer" style="height:60px;width:100%"></div>
+        </div>
+    </div>
+
+    <!-- ====== 4. 数据概览 ====== -->
+    <div class="card-glass rounded-xl p-3 page-transition" id="stats-section">
+        <div class="flex items-center justify-between mb-3">
+            <div class="text-xs font-medium text-gray-600 flex items-center gap-2">
+                <i class="fa fa-bar-chart text-primary"></i>数据概览
+            </div>
+            <span class="text-[10px] text-gray-400">岗位数据总览</span>
+        </div>
+        <div class="grid grid-cols-4 gap-2" id="stats-cards">
+            <!-- Rendered by JS -->
+        </div>
+        <div class="mt-3" id="stats-distribution">
+            <!-- Rendered by JS -->
+        </div>
+    </div>
+
+    <!-- ====== 5. 最近协作消息 ====== -->
+    <div class="card-glass rounded-xl p-3 page-transition" id="activity-section">
+        <div class="flex items-center justify-between mb-3">
+            <div class="text-xs font-medium text-gray-600 flex items-center gap-2">
+                <i class="fa fa-commenting text-amber-500"></i>最近协作动态
+            </div>
+            <span class="text-[10px] text-gray-400">PM 与猎头沟通记录</span>
+        </div>
+        <div id="activity-list" class="space-y-1">
+            <!-- Rendered by JS -->
+        </div>
+    </div>
+
+    <!-- ====== Footer ====== -->
+    <div class="text-center text-[10px] text-gray-400 py-4">
+        md-agent App · 数据持久化 · 点击操作实时生效
+    </div>
+</main>
+
+<!-- ==================== TOAST ==================== -->
+<div id="toast-container"></div>
+
+<!-- ==================== JAVASCRIPT ==================== -->
+<script type="module">
+// ============================================================
+// 数据层 —— 通过 hostApi 桥持久化
+// ============================================================
+const APP_ID = 'agent-demo';
+const DATA_KEY = 'app_data';
+
+// 默认种子数据（首次加载时使用）
+const SEED_DATA = {
+    companies: [
+        { id: 'co1', name: '云仓科技', logo: '🏢', industry: '物流科技', size: '500-1000人', stage: 'B轮', desc: '专注跨境物流科技的 SaaS 服务商' },
+        { id: 'co2', name: '数智中台', logo: '📊', industry: '数据服务', size: '100-500人', stage: 'A轮', desc: '企业级数据中台服务商' },
+        { id: 'co3', name: '客成科技', logo: '🤝', industry: 'SaaS', size: '200-500人', stage: 'C轮', desc: '客户成功管理平台' },
+    ],
+    projects: [
+        { id: 'prj1', name: '海外仓 WMS', company_id: 'co1', status: '招聘中', budget: 850, timeline: '2026-07 ~ 2026-12' },
+        { id: 'prj2', name: '数据中台 v2', company_id: 'co2', status: '建模中', budget: 600, timeline: '2026-08 ~ 2027-02' },
+        { id: 'prj3', name: '客户成功平台', company_id: 'co3', status: '招聘中', budget: 400, timeline: '2026-09 ~ 2027-01' },
+    ],
+    positions: [
+        { id: 'pos1', title: 'Java后端开发', project_id: 'prj1', company_id: 'co1', salary_min: 25, salary_max: 32, headcount: 2, tags: ['Java', '分布式', '微服务'], status: '招聘中', priority: '高', created: '2026-08-01' },
+        { id: 'pos2', title: '产品经理(AI方向)', project_id: 'prj1', company_id: 'co1', salary_min: 30, salary_max: 40, headcount: 1, tags: ['AI', '产品', 'SaaS'], status: '招聘中', priority: '高', created: '2026-08-02' },
+        { id: 'pos3', title: '前端开发工程师', project_id: 'prj2', company_id: 'co2', salary_min: 20, salary_max: 28, headcount: 2, tags: ['React', 'TypeScript', '前端'], status: '招聘中', priority: '中', created: '2026-08-03' },
+        { id: 'pos4', title: '数据分析师', project_id: 'prj2', company_id: 'co2', salary_min: 22, salary_max: 30, headcount: 1, tags: ['SQL', 'Python', 'BI'], status: '建模中', priority: '中', created: '2026-08-04' },
+        { id: 'pos5', title: '测试工程师', project_id: 'prj3', company_id: 'co3', salary_min: 15, salary_max: 22, headcount: 3, tags: ['自动化', '性能测试'], status: '招聘中', priority: '低', created: '2026-08-05' },
+    ],
+    candidates: [
+        { id: 'c1', name: '陈工', years: 4, current_title: 'Java高级开发', current_company: '美团', salary_expect: 30, location: '北京', tags: ['Java', '分布式', 'Spring Cloud'], education: '本科', source: 'AI匹配' },
+        { id: 'c2', name: '刘工', years: 3, current_title: 'Java开发', current_company: '京东', salary_expect: 28, location: '北京', tags: ['Java', '微服务', 'MySQL'], education: '本科', source: 'AI匹配' },
+        { id: 'c3', name: '王工', years: 5, current_title: 'Java架构师', current_company: '蚂蚁金服', salary_expect: 35, location: '杭州', tags: ['Java', '高并发', '分布式', '架构'], education: '硕士', source: '猎头推荐' },
+        { id: 'c4', name: '赵工', years: 2, current_title: 'Java开发', current_company: '字节跳动', salary_expect: 24, location: '北京', tags: ['Java', 'Go', '分布式'], education: '本科', source: '主动投递' },
+        { id: 'c5', name: '李然', years: 6, current_title: 'AI产品总监', current_company: '百度', salary_expect: 38, location: '北京', tags: ['AI', '产品', 'NLP', '策略'], education: '硕士', source: 'AI匹配' },
+        { id: 'c6', name: '张敏', years: 3, current_title: 'AI产品经理', current_company: '商汤科技', salary_expect: 32, location: '上海', tags: ['AI', '产品', '计算机视觉'], education: '本科', source: '猎头推荐' },
+        { id: 'c7', name: '周磊', years: 4, current_title: '前端开发', current_company: '小红书', salary_expect: 26, location: '上海', tags: ['React', 'TypeScript', 'Node.js'], education: '本科', source: 'AI匹配' },
+        { id: 'c8', name: '吴迪', years: 3, current_title: '前端开发', current_company: 'B站', salary_expect: 22, location: '北京', tags: ['Vue', 'React', 'Webpack'], education: '本科', source: 'AI匹配' },
+        { id: 'c9', name: '侯亮', years: 5, current_title: '数据分析师', current_company: '滴滴', salary_expect: 28, location: '北京', tags: ['SQL', 'Python', 'Tableau', 'Spark'], education: '硕士', source: '主动投递' },
+        { id: 'c10', name: '孙悦', years: 2, current_title: '数据分析师', current_company: '携程', salary_expect: 20, location: '上海', tags: ['SQL', 'Python', 'Excel'], education: '本科', source: 'AI匹配' },
+    ],
+    matches: [
+        { candidate_id: 'c1', position_id: 'pos1', score: 94, reason: '4年Java经验，分布式项目经验丰富，薪资匹配' },
+        { candidate_id: 'c2', position_id: 'pos1', score: 88, reason: '3年Java经验，微服务经验，薪资略低于预算' },
+        { candidate_id: 'c3', position_id: 'pos1', score: 96, reason: '5年Java架构经验，高并发经验丰富，能力溢出' },
+        { candidate_id: 'c4', position_id: 'pos1', score: 76, reason: '2年经验偏少，但基础扎实，可作为备选' },
+        { candidate_id: 'c5', position_id: 'pos2', score: 92, reason: '6年AI产品经验，NLP+策略背景，高度匹配' },
+        { candidate_id: 'c6', position_id: 'pos2', score: 85, reason: '3年AI产品经验，计算机视觉方向，可培养' },
+        { candidate_id: 'c7', position_id: 'pos3', score: 90, reason: '4年前端经验，React+TypeScript栈，完美匹配' },
+        { candidate_id: 'c8', position_id: 'pos3', score: 82, reason: '3年前端经验，Vue+React双栈，薪资匹配' },
+        { candidate_id: 'c9', position_id: 'pos4', score: 87, reason: '5年数据经验，Spark+Python，经验丰富' },
+        { candidate_id: 'c10', position_id: 'pos4', score: 73, reason: '2年经验偏少，但基础技能扎实' },
+    ],
+    applications: [
+        { id: 'app1', candidate_id: 'c1', position_id: 'pos1', stage: '面试', source: 'AI匹配', applied_at: '2026-08-05', status: '进行中' },
+        { id: 'app2', candidate_id: 'c2', position_id: 'pos1', stage: '投递', source: 'AI匹配', applied_at: '2026-08-05', status: '待处理' },
+        { id: 'app3', candidate_id: 'c5', position_id: 'pos2', stage: '简历过', source: '猎头推荐', applied_at: '2026-08-06', status: '进行中' },
+        { id: 'app4', candidate_id: 'c7', position_id: 'pos3', stage: '投递', source: '主动投递', applied_at: '2026-08-07', status: '待处理' },
+        { id: 'app5', candidate_id: 'c9', position_id: 'pos4', stage: 'offer', source: '猎头推荐', applied_at: '2026-08-03', status: '进行中' },
+    ],
+    interviews: [
+        { id: 'iv1', candidate_id: 'c1', position_id: 'pos1', round: '一轮', date: '2026-08-10', time: '14:00', type: '视频面试', status: '待面试', feedback: '' },
+        { id: 'iv2', candidate_id: 'c5', position_id: 'pos2', round: '二轮', date: '2026-08-11', time: '10:00', type: '现场面试', status: '待面试', feedback: '' },
+        { id: 'iv3', candidate_id: 'c9', position_id: 'pos4', round: '三轮', date: '2026-08-08', time: '15:00', type: '视频面试', status: '已完成', feedback: '技术能力符合要求，沟通良好，建议发offer' },
+    ],
+    sessions: [
+        { id: 's1', position_id: 'pos1', title: 'Java后端开发 - 25K-32K', pm: '张总', hunter: '我', status: '进行中', last_msg: '急需3年以上Java...', unread: 2 },
+        { id: 's2', position_id: 'pos2', title: '产品经理（AI方向）', pm: '张总', hunter: '我', status: '进行中', last_msg: '推荐了李然...', unread: 0 },
+        { id: 's3', position_id: 'pos3', title: '前端开发工程师', pm: '李经理', hunter: '我', status: '待回复', last_msg: '请推荐前端人选', unread: 1 },
+        { id: 's4', position_id: 'pos4', title: '数据分析师', pm: '王主管', hunter: '我', status: '已结束', last_msg: 'offer已发', unread: 0 },
+    ],
+    messages: {
+        's1': [
+            { role: 'pm', name: '张总', content: '急需3年以上Java，分布式微服务经验，预算上限32K，下周要面试人选', time: '10:30' },
+            { role: 'agent', content: 'ai_matched', candidates: ['c1', 'c2', 'c3'], time: '10:31' },
+            { role: 'hunter', name: '我', content: '我筛选了陈工，他有分布式项目经验，明天可以约面试', time: '10:35' },
+            { role: 'system', content: '已向候选人【陈工】发送面试邀约通知', time: '10:36' },
+        ],
+        's2': [
+            { role: 'pm', name: '张总', content: '我们需要一个AI方向的产品经理，要求有SaaS产品经验，懂AI技术栈', time: '09:00' },
+            { role: 'agent', content: 'ai_matched', candidates: ['c5', 'c6'], time: '09:01' },
+            { role: 'hunter', name: '我', content: '李然背景很匹配，百度AI产品总监，6年经验，已联系上', time: '09:15' },
+        ],
+        's3': [
+            { role: 'pm', name: '李经理', content: '前端岗位急需React+TypeScript方向的人选，麻烦推荐', time: '昨天' },
+            { role: 'agent', content: 'ai_matched', candidates: ['c7', 'c8'], time: '昨天' },
+        ],
+        's4': [
+            { role: 'pm', name: '王主管', content: '数据分析师岗位，要求SQL+Python+BI工具', time: '08-03' },
+            { role: 'agent', content: 'ai_matched', candidates: ['c9', 'c10'], time: '08-03' },
+            { role: 'hunter', name: '我', content: '侯亮非常合适，5年经验，滴滴背景，已推给HR面试', time: '08-04' },
+            { role: 'system', content: '侯亮已完成三轮面试，PM已发offer', time: '08-08' },
+        ],
+    }
+};
+
+// ---- 数据加载/保存 ----
+let APP_DATA = null;
+
+async function loadAppData() {
+    // 1. 尝试从服务器加载持久化数据
+    if (typeof window.hostApi === 'function') {
+        try {
+            const resp = await window.hostApi('/api/apps/' + APP_ID + '/data');
+            if (resp && resp.data && resp.data[DATA_KEY]) {
+                return JSON.parse(resp.data[DATA_KEY]);
+            }
+        } catch (e) {
+            console.warn('[agent-demo] 从服务器加载数据失败:', e);
+        }
+    }
+    // 2. 尝试从 localStorage 加载（本地缓存）
+    try {
+        const local = localStorage.getItem(DATA_KEY);
+        if (local) return JSON.parse(local);
+    } catch (e) {}
+    return null;
+}
+
+async function saveAppData() {
+    if (!APP_DATA) return;
+    // 写入 localStorage（BRIDGE 会自动同步到服务器）
+    try { localStorage.setItem(DATA_KEY, JSON.stringify(APP_DATA)); } catch (e) {}
+    // 同时也直接写到服务器（双重保障）
+    if (typeof window.hostApi === 'function') {
+        const toStore = {};
+        toStore[DATA_KEY] = JSON.stringify(APP_DATA);
+        try {
+            await window.hostApi('/api/apps/' + APP_ID + '/data', {
+                method: 'POST', body: { data: toStore }
+            });
+        } catch (e) {}
+    }
+}
+
+async function seedAppData() {
+    APP_DATA = JSON.parse(JSON.stringify(SEED_DATA));
+    await saveAppData();
+}
+
+// ---- LLM 调用 ----
+async function callLLM(messages) {
+    if (typeof window.hostApi !== 'function') return null;
+    try {
+        const result = await window.hostApi('/api/llm', {
+            method: 'POST',
+            body: { messages: messages, stream: false }
+        });
+        return result;
+    } catch (e) {
+        console.warn('[agent-demo] LLM 调用失败:', e);
+        return null;
+    }
+}
+
+// ============================================================
+// App 主逻辑
+// ============================================================
+const APP = {
+    activePositionId: 'pos1',
+    view: 'matched',
+    _freshnessTimer: null,
+    _lastRefresh: Date.now(),
+
+    // ---- 初始化 ----
+    async init() {
+        // 加载数据
+        await this.loadData();
+        // 渲染
+        this.renderAll();
+        this.bindRipple();
+        this.startFreshnessTimer();
+        // 更新状态
+        document.getElementById('agent-status-text').textContent = '就绪';
+        document.getElementById('agent-status-dot').className = 'status-dot ready';
+    },
+
+    async loadData() {
+        document.getElementById('agent-status-text').textContent = '加载中...';
+        document.getElementById('agent-status-dot').className = 'status-dot busy';
+        let data = await loadAppData();
+        if (!data) {
+            await seedAppData();
+            data = APP_DATA;
+        } else {
+            APP_DATA = data;
+        }
+    },
+
+    // ---- 渲染全部 ----
+    renderAll() {
+        this.renderContext();
+        this.renderPipeline();
+        this.renderCandidates();
+        this.renderStats();
+        this.renderActivity();
+    },
+
+    // ---- 渲染上下文卡片 ----
+    renderContext() {
+        const pos = APP_DATA.positions.find(p => p.id === this.activePositionId);
+        if (!pos) return;
+        const co = APP_DATA.companies.find(c => c.id === pos.company_id);
+        const matched = APP_DATA.matches.filter(m => m.position_id === pos.id).length;
+        document.getElementById('position-title').textContent = pos.title;
+        document.getElementById('position-company').textContent = co ? co.name : '';
+        document.getElementById('position-salary').textContent = pos.salary_min + 'K-' + pos.salary_max + 'K';
+        document.getElementById('position-tags').textContent = pos.tags.join(' · ');
+        document.getElementById('position-status').textContent = pos.status;
+        document.getElementById('position-hc').textContent = pos.headcount;
+        document.getElementById('position-matched').textContent = matched;
+        document.getElementById('current-context').textContent = pos.title;
+    },
+
+    // ---- 渲染 Pipeline 进度条 ----
+    renderPipeline() {
+        const bar = document.getElementById('pipeline-bar');
+        const stages = ['投递', '简历过', '面试', 'offer', '到岗'];
+        const colors = ['bg-blue-500', 'bg-cyan-500', 'bg-amber-500', 'bg-green-500', 'bg-purple-500'];
+        const icons = ['fa-paper-plane', 'fa-file-text-o', 'fa-users', 'fa-envelope-open-o', 'fa-check-circle'];
+        const apps = APP_DATA.applications.filter(a => a.position_id === this.activePositionId);
+        const maxCount = Math.max(1, ...stages.map(s => apps.filter(a => a.stage === s).length));
+
+        let html = '';
+        for (let i = 0; i < stages.length; i++) {
+            const count = apps.filter(a => a.stage === stages[i]).length;
+            const pct = (count / maxCount) * 100;
+            html += `
+                <div class="flex-1 pipeline-stage card-glass rounded-lg p-2 text-center">
+                    <div class="text-xs text-gray-500 flex items-center justify-center gap-1">
+                        <i class="fa ${icons[i]}"></i>${stages[i]}
+                    </div>
+                    <div class="text-lg font-bold mt-0.5 count-up">${count}</div>
+                    <div class="w-full bg-gray-100 rounded h-1.5 mt-1">
+                        <div class="${colors[i]} h-1.5 rounded transition-all" style="width:${pct}%"></div>
+                    </div>
+                </div>
+            `;
+            if (i < stages.length - 1) {
+                const next = apps.filter(a => a.stage === stages[i+1]).length;
+                const rate = count > 0 ? Math.round((next / count) * 100) : 0;
+                const cls = rate >= 60 ? 'high' : rate >= 30 ? 'medium' : 'low';
+                html += `
+                    <div class="pipeline-conversion shrink-0">
+                        <span class="arrow">→</span>
+                        <span class="rate ${cls}">${rate}%</span>
+                    </div>
+                `;
+            }
+        }
+        bar.innerHTML = html;
+
+        setTimeout(() => {
+            bar.querySelectorAll('.count-up').forEach(el => {
+                const t = parseInt(el.textContent);
+                if (!isNaN(t)) this.animateCountUp(el, t);
+            });
+        }, 50);
+    },
+
+    // ---- 渲染候选人 ----
+    renderCandidates() {
+        const list = document.getElementById('candidates-list');
+        const posMatches = APP_DATA.matches.filter(m => m.position_id === this.activePositionId)
+            .sort((a, b) => b.score - a.score);
+
+        let cands;
+        if (this.view === 'matched') {
+            cands = posMatches.map(m => {
+                const c = APP_DATA.candidates.find(c => c.id === m.candidate_id);
+                return c ? { ...c, match_score: m.score, match_reason: m.reason } : null;
+            }).filter(Boolean);
+        } else {
+            cands = APP_DATA.candidates.map(c => ({
+                ...c,
+                match_reason: (posMatches.find(m => m.candidate_id === c.id) || {}).reason || '未匹配'
+            }));
+        }
+
+        document.getElementById('match-summary').textContent = this.view === 'matched'
+            ? `找到 ${cands.length} 位匹配候选人`
+            : `共 ${cands.length} 位候选人`;
+
+        document.getElementById('view-matched-btn').className = this.view === 'matched'
+            ? 'text-xs px-2 py-1 rounded bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition ripple-btn'
+            : 'text-xs px-2 py-1 rounded bg-gray-100 text-gray-500 hover:bg-gray-200 transition ripple-btn';
+        document.getElementById('view-all-btn').className = this.view === 'all'
+            ? 'text-xs px-2 py-1 rounded bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition ripple-btn'
+            : 'text-xs px-2 py-1 rounded bg-gray-100 text-gray-500 hover:bg-gray-200 transition ripple-btn';
+
+        if (cands.length === 0) {
+            list.innerHTML = `
+                <div class="empty-state">
+                    <div class="icon">🔍</div>
+                    <div class="title">暂无匹配候选人</div>
+                    <div class="desc">AI 正在检索人才库，请稍后再查看</div>
+                </div>
+            `;
+            return;
+        }
+
+        list.innerHTML = cands.map(c => {
+            const scoreColor = c.match_score >= 90 ? 'score-high' : c.match_score >= 80 ? 'score-mid' : 'score-low';
+            return `
+                <div class="card-gradient-border bg-white border border-gray-200 rounded-lg p-3 cursor-pointer cand-row" onclick="APP.openCandidateDetail('${c.id}')">
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-3 min-w-0">
+                            ${this.renderRingScore(c.match_score, 40, 3)}
+                            <div class="min-w-0">
+                                <div class="flex items-center gap-2">
+                                    <span class="text-sm font-medium">${this.esc(c.name)}</span>
+                                    <span class="tag ${c.match_score >= 90 ? 'bg-green-100 text-green-700' : c.match_score >= 80 ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-500'}">${c.match_score}分</span>
+                                </div>
+                                <div class="text-xs text-gray-500 mt-0.5 truncate">
+                                    ${this.esc(c.current_title)} · ${this.esc(c.current_company)} · ${c.years}年
+                                </div>
+                            </div>
+                        </div>
+                        <div class="text-xs text-gray-400 text-right shrink-0">
+                            <div>期望 ${c.salary_expect}K</div>
+                            <div>${this.esc(c.location)}</div>
+                        </div>
+                    </div>
+                    <div class="flex items-center justify-between mt-2">
+                        <div class="flex gap-1 flex-wrap">
+                            ${c.tags.slice(0, 3).map(t => `<span class="impression-tag"><span class="dot"></span>${this.esc(t)}</span>`).join('')}
+                            <span class="text-[10px] text-gray-300">${this.esc(c.source)}</span>
+                        </div>
+                        <div class="flex gap-1.5">
+                            <button class="text-xs px-2.5 py-1 bg-gray-50 border border-gray-200 rounded hover:bg-gray-100 transition ripple-btn" onclick="event.stopPropagation();APP.viewResume('${c.id}')">
+                                <i class="fa fa-file-text-o mr-0.5"></i>简历
+                            </button>
+                            <button class="text-xs px-2.5 py-1 bg-indigo-50 text-indigo-600 border border-indigo-200 rounded hover:bg-indigo-100 transition ripple-btn" onclick="event.stopPropagation();APP.recommendToPM('${c.id}')">
+                                <i class="fa fa-paper-plane mr-0.5"></i>推荐
+                            </button>
+                        </div>
+                    </div>
+                    ${c.match_reason ? `<div class="text-[10px] text-gray-400 mt-1.5 pl-1 border-l-2 border-indigo-200">${this.esc(c.match_reason)}</div>` : ''}
+                </div>
+            `;
+        }).join('');
+    },
+
+    // ---- 渲染数据概览 ----
+    renderStats() {
+        const totalCand = APP_DATA.candidates.length;
+        const highScore = APP_DATA.matches.filter(m => m.score >= 90).length;
+        const midScore = APP_DATA.matches.filter(m => m.score >= 80 && m.score < 90).length;
+        const pendingIv = APP_DATA.interviews.filter(i => i.status === '待面试').length;
+        const offerCount = APP_DATA.applications.filter(a => a.stage === 'offer').length;
+
+        document.getElementById('stats-cards').innerHTML = `
+            <div class="card-glass rounded-lg p-2.5 text-center">
+                <div class="text-lg font-bold text-indigo-600 count-up">${totalCand}</div>
+                <div class="text-[10px] text-gray-500">候选人总数</div>
+            </div>
+            <div class="card-glass rounded-lg p-2.5 text-center">
+                <div class="text-lg font-bold text-emerald-600 count-up">${APP_DATA.positions.length}</div>
+                <div class="text-[10px] text-gray-500">在招岗位</div>
+            </div>
+            <div class="card-glass rounded-lg p-2.5 text-center">
+                <div class="text-lg font-bold text-amber-600 count-up">${highScore + midScore}</div>
+                <div class="text-[10px] text-gray-500">80分以上</div>
+            </div>
+            <div class="card-glass rounded-lg p-2.5 text-center">
+                <div class="text-lg font-bold text-purple-600 count-up">${pendingIv + offerCount}</div>
+                <div class="text-[10px] text-gray-500">面试+Offer</div>
+            </div>
+        `;
+
+        document.getElementById('stats-distribution').innerHTML = `
+            <div class="space-y-1.5">
+                <div class="flex items-center gap-2 text-xs">
+                    <span class="w-14 text-gray-500">90-100分</span>
+                    <div class="flex-1 bg-gray-100 rounded h-2">
+                        <div class="bg-green-500 h-2 rounded transition-all" style="width:${(highScore / Math.max(1, totalCand)) * 100}%"></div>
+                    </div>
+                    <span class="w-6 text-right text-gray-600">${highScore}</span>
+                </div>
+                <div class="flex items-center gap-2 text-xs">
+                    <span class="w-14 text-gray-500">80-89分</span>
+                    <div class="flex-1 bg-gray-100 rounded h-2">
+                        <div class="bg-blue-500 h-2 rounded transition-all" style="width:${(midScore / Math.max(1, totalCand)) * 100}%"></div>
+                    </div>
+                    <span class="w-6 text-right text-gray-600">${midScore}</span>
+                </div>
+                <div class="flex items-center gap-2 text-xs">
+                    <span class="w-14 text-gray-500">70-79分</span>
+                    <div class="flex-1 bg-gray-100 rounded h-2">
+                        <div class="bg-gray-400 h-2 rounded transition-all" style="width:${((totalCand - highScore - midScore) / Math.max(1, totalCand)) * 100}%"></div>
+                    </div>
+                    <span class="w-6 text-right text-gray-600">${totalCand - highScore - midScore}</span>
+                </div>
+            </div>
+        `;
+
+        setTimeout(() => {
+            document.querySelectorAll('.count-up').forEach(el => {
+                const t = parseInt(el.textContent);
+                if (!isNaN(t)) this.animateCountUp(el, t);
+            });
+        }, 50);
+    },
+
+    // ---- 渲染最近协作动态 ----
+    renderActivity() {
+        const list = document.getElementById('activity-list');
+        const session = APP_DATA.sessions.find(s => s.position_id === this.activePositionId);
+        if (!session) {
+            list.innerHTML = '<div class="text-xs text-gray-400 text-center py-4">暂无协作动态</div>';
+            return;
+        }
+        const msgs = APP_DATA.messages[session.id] || [];
+        const recent = msgs.slice(-4);
+
+        if (recent.length === 0) {
+            list.innerHTML = '<div class="text-xs text-gray-400 text-center py-4">暂无消息</div>';
+            return;
+        }
+
+        list.innerHTML = recent.map(msg => {
+            if (msg.role === 'system') {
+                return `<div class="sys-msg"><span class="bubble">${this.esc(msg.content)}</span></div>`;
+            }
+            const icon = msg.role === 'pm' ? '👔' : msg.role === 'hunter' ? '🕵️' : '🤖';
+            const name = msg.role === 'agent' ? 'AI猎头' : msg.name;
+            const align = msg.role === 'pm' ? 'justify-end' : 'justify-start';
+            const bg = msg.role === 'pm' ? 'bg-indigo-50' : msg.role === 'hunter' ? 'bg-gray-100' : 'bg-emerald-50';
+            const arrow = msg.role === 'pm' ? 'sent' : 'received';
+            return `
+                <div class="flex ${align} msg-bubble">
+                    <div class="max-w-[80%] ${bg} rounded-lg p-2.5 bubble-arrow ${arrow}" style="position:relative">
+                        <div class="text-[10px] text-gray-500 font-medium mb-0.5 flex items-center gap-1">
+                            ${icon} ${this.esc(name)}
+                            <span class="text-gray-300 font-normal">${this.esc(msg.time)}</span>
+                        </div>
+                        <p class="text-xs">${this.esc(msg.content)}</p>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        list.innerHTML += `
+            <div class="text-center text-[10px] text-gray-300 pt-1">
+                PM ${this.esc(session.pm)} 与猎头协作中 · 共 ${msgs.length} 条消息
+            </div>
+        `;
+    },
+
+    // ---- 切换视图 ----
+    switchView(view) {
+        this.view = view;
+        this.renderCandidates();
+    },
+
+    // ============================================================
+    // 工具函数
+    // ============================================================
+
+    renderRingScore(score, size, stroke) {
+        const r = (size - stroke) / 2;
+        const circumference = 2 * Math.PI * r;
+        const offset = circumference * (1 - score / 100);
+        const color = score >= 90 ? '#10b981' : score >= 80 ? '#6366f1' : '#f59e0b';
+        const textClass = score >= 90 ? 'score-high' : score >= 80 ? 'score-mid' : 'score-low';
+        const fontSize = size * 0.28;
+        return `
+            <div class="ring-score" style="width:${size}px;height:${size}px">
+                <svg width="${size}" height="${size}">
+                    <circle cx="${size/2}" cy="${size/2}" r="${r}" fill="none" stroke="#e5e7eb" stroke-width="${stroke}"/>
+                    <circle cx="${size/2}" cy="${size/2}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}"
+                        stroke-dasharray="${circumference}" stroke-dashoffset="${offset}" stroke-linecap="round"
+                        style="transition:stroke-dashoffset 0.6s ease-out"/>
+                </svg>
+                <span class="score-text ${textClass}" style="font-size:${fontSize}px">${score}</span>
+            </div>
+        `;
+    },
+
+    animateCountUp(el, target, duration) {
+        if (duration === undefined) duration = 500;
+        const start = 0, startTime = performance.now();
+        const step = (now) => {
+            const p = Math.min((now - startTime) / duration, 1);
+            const eased = 1 - Math.pow(1 - p, 3);
+            el.textContent = Math.round(start + (target - start) * eased);
+            if (p < 1) requestAnimationFrame(step);
+        };
+        requestAnimationFrame(step);
+    },
+
+    esc(s) {
+        if (s == null) return '';
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    },
+
+    // ---- 涟漪效果 ----
+    ripple(e) {
+        const btn = e.currentTarget;
+        const rect = btn.getBoundingClientRect();
+        const size = Math.max(rect.width, rect.height);
+        const x = e.clientX - rect.left - size / 2;
+        const y = e.clientY - rect.top - size / 2;
+        const ripple = document.createElement('span');
+        ripple.className = 'ripple';
+        ripple.style.width = ripple.style.height = size + 'px';
+        ripple.style.left = x + 'px';
+        ripple.style.top = y + 'px';
+        btn.appendChild(ripple);
+        setTimeout(() => ripple.remove(), 600);
+    },
+    bindRipple() {
+        document.querySelectorAll('.ripple-btn').forEach(btn => {
+            btn.addEventListener('mousedown', (e) => this.ripple(e));
+        });
+    },
+
+    // ---- 数据新鲜度 ----
+    startFreshnessTimer() {
+        if (this._freshnessTimer) clearInterval(this._freshnessTimer);
+        this._freshnessTimer = setInterval(() => this.updateFreshness(), 10000);
+    },
+    updateFreshness() {
+        const el = document.getElementById('freshness-text');
+        const dot = document.getElementById('freshness-dot');
+        if (!el) return;
+        const elapsed = Math.floor((Date.now() - this._lastRefresh) / 1000);
+        let text = '刚刚';
+        if (elapsed >= 60) { const mins = Math.floor(elapsed / 60); text = mins + '分钟前'; }
+        if (elapsed >= 3600) { const hrs = Math.floor(elapsed / 3600); text = hrs + '小时前'; }
+        el.textContent = text;
+        if (dot) dot.className = 'freshness-dot' + (elapsed > 300 ? ' stale' : '');
+    },
+
+    // ============================================================
+    // 交互操作（通过 LLM 或数据持久化真实响应）
+    // ============================================================
+
+    // 查看简历
+    viewResume(candId) {
+        const c = APP_DATA.candidates.find(c => c.id === candId);
+        if (!c) return;
+        this.showToast(`正在加载 ${c.name} 的简历...`, 'warn');
+        setTimeout(() => {
+            this.openModal(`${c.name} 的简历`, `
+                <div class="space-y-3 min-w-[320px]">
+                    <div class="flex items-center gap-3">
+                        <div class="w-12 h-12 rounded-full bg-indigo-100 flex items-center justify-center text-lg font-bold text-indigo-600">${c.name[0]}</div>
+                        <div>
+                            <div class="font-semibold">${this.esc(c.name)}</div>
+                            <div class="text-xs text-gray-500">${this.esc(c.current_title)} · ${this.esc(c.current_company)}</div>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 text-xs">
+                        <div class="bg-gray-50 rounded p-2"><span class="text-gray-500">经验</span><br><strong>${c.years}年</strong></div>
+                        <div class="bg-gray-50 rounded p-2"><span class="text-gray-500">学历</span><br><strong>${this.esc(c.education)}</strong></div>
+                        <div class="bg-gray-50 rounded p-2"><span class="text-gray-500">期望薪资</span><br><strong>${c.salary_expect}K</strong></div>
+                        <div class="bg-gray-50 rounded p-2"><span class="text-gray-500">地点</span><br><strong>${this.esc(c.location)}</strong></div>
+                    </div>
+                    <div class="flex flex-wrap gap-1">${c.tags.map(t => `<span class="tag bg-indigo-50 text-indigo-600">${this.esc(t)}</span>`).join('')}</div>
+                    <div class="text-xs text-gray-500">${this.esc(c.source)}</div>
+                    <div class="flex gap-2 pt-2 border-t border-gray-100">
+                        <button class="text-xs px-3 py-1.5 bg-indigo-500 text-white rounded hover:bg-indigo-600 transition" onclick="APP.closeModal();APP.recommendToPM('${candId}')">推荐给PM</button>
+                        <button class="text-xs px-3 py-1.5 bg-gray-100 rounded hover:bg-gray-200 transition" onclick="APP.closeModal()">关闭</button>
+                    </div>
+                </div>
+            `);
+            this.showToast(`已加载 ${c.name} 的简历`, 'success');
+        }, 600);
+    },
+
+    // 推荐给PM（真实操作：写入数据 + 通知）
+    async recommendToPM(candId) {
+        const c = APP_DATA.candidates.find(c => c.id === candId);
+        if (!c) return;
+        this.showToast(`正在向 PM 推荐 ${c.name}...`, 'warn');
+        // 持久化操作：记录推荐动作
+        const session = APP_DATA.sessions.find(s => s.position_id === this.activePositionId);
+        if (session && APP_DATA.messages[session.id]) {
+            APP_DATA.messages[session.id].push({
+                role: 'hunter', name: '我',
+                content: `推荐候选人 ${c.name}（${c.current_title} · ${c.current_company}）给 PM 确认`,
+                time: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+            });
+            await saveAppData();
+            this.renderActivity();
+        }
+        setTimeout(() => {
+            this.showToast(`已向 PM 推荐 ${c.name}，等待 PM 确认`, 'success');
+        }, 800);
+
+        // 走 Agent 回路生成匹配分析（agent:ask 通道：检索知识库 + 工具，替代裸 /api/llm）
+        try {
+            const pos = APP_DATA.positions.find(p => p.id === this.activePositionId);
+            const session = APP_DATA.sessions.find(s => s.position_id === this.activePositionId);
+            let analysis = '';
+            const setDot = (st) => {
+                const dot = document.getElementById('agent-status-dot');
+                if (dot) dot.className = 'status-dot ' + st;
+                const tx = document.getElementById('agent-status-text');
+                if (tx) tx.textContent = st === 'busy' ? '分析中' : st === 'error' ? '异常' : '就绪';
+            };
+            setDot('busy');
+            window.__agentCb = {
+                onChunk: (chunk) => { analysis += chunk; },
+                onDone: () => {
+                    setDot('ready');
+                    if (analysis.trim() && session && APP_DATA.messages[session.id]) {
+                        APP_DATA.messages[session.id].push({
+                            role: 'agent', content: '分析：' + analysis.trim(),
+                            time: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+                        });
+                        saveAppData().then(() => this.renderActivity());
+                    }
+                },
+            };
+            window.parent.postMessage({
+                type: 'agent:ask',
+                text: '我是猎头。请对岗位「' + (pos ? pos.title : '') + '」的候选人推荐给出简短分析评价（100 字内）：候选人 ' + c.name +
+                      '（' + c.current_title + '，' + c.years + '年经验，技能: ' + c.tags.join(',') + '）。可先检索知识库确认候选人信息，基于知识库回答。'
+            }, '*');
+        } catch (e) {}
+    },
+
+    // ---- Modal ----
+    modalEl: null,
+    openModal(title, contentHtml) {
+        this.closeModal();
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = 'app-modal';
+        overlay.innerHTML = `
+            <div class="modal-content p-5" onclick="event.stopPropagation()">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="font-semibold text-base">${title}</h3>
+                    <button class="text-gray-400 hover:text-gray-600 text-xl leading-none" onclick="APP.closeModal()">✕</button>
+                </div>
+                ${contentHtml}
+            </div>
+        `;
+        overlay.addEventListener('click', () => this.closeModal());
+        document.body.appendChild(overlay);
+        this.modalEl = overlay;
+    },
+    closeModal() {
+        const el = document.getElementById('app-modal');
+        if (el) el.remove();
+        this.modalEl = null;
+    },
+
+    // ---- Toast ----
+    showToast(msg, type) {
+        if (type === undefined) type = 'info';
+        const container = document.getElementById('toast-container');
+        const el = document.createElement('div');
+        el.className = 'toast-item ' + type;
+        const icons = { success: '✓', warn: '⋯', error: '✕', info: 'ℹ' };
+        el.innerHTML = `<span>${icons[type] || 'ℹ'}</span> ${msg}`;
+        container.appendChild(el);
+        setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 0.3s'; setTimeout(() => el.remove(), 300); }, 2500);
+    },
+
+    // ---- 帮助 ----
+    showHelp() {
+        this.openModal('关于 AI猎头助手 · App', `
+            <div class="space-y-2 text-sm min-w-[300px]">
+                <p class="text-xs text-gray-600">这是一个运行在 md-agent 沙箱中的 MCP 应用，数据通过 hostApi 桥持久化。</p>
+                <div class="text-xs text-gray-500 space-y-1 mt-3">
+                    <p>• <strong>AI 上下文</strong> — 顶部显示当前岗位和 AI 状态</p>
+                    <p>• <strong>Pipeline</strong> — 各阶段候选人分布</p>
+                    <p>• <strong>候选人</strong> — AI 匹配的候选人列表，可按"已匹配/全部"切换</p>
+                    <p>• <strong>数据概览</strong> — 岗位数据统计和匹配分分布</p>
+                    <p>• <strong>协作动态</strong> — PM 与猎头的最近沟通记录</p>
+                </div>
+                <div class="text-xs text-gray-400 mt-3 pt-3 border-t border-gray-100">
+                    <p>💡 点击"简历"查看候选人详情</p>
+                    <p>💡 点击"推荐"将候选人推荐给 PM（触发 LLM 分析）</p>
+                    <p>💡 所有数据持久化存储，重启后保留</p>
+                </div>
+                <div class="text-[10px] text-gray-300 mt-3">AI猎头助手 v0.1 · md-agent App · 数据持久化</div>
+            </div>
+        `);
+    },
+};
+
+// ---- 启动 ----
+window.APP = APP;
+APP.init().catch(function(e) {
+    console.error('[agent-demo] 初始化失败:', e);
+    document.getElementById('agent-status-text').textContent = '错误';
+    document.getElementById('agent-status-dot').className = 'status-dot error';
+});
+
+// ---- Agent 通道事件（agent:ask 的流式/工具/错误回推） ----
+window.addEventListener('message', function (ev) {
+    var msg = ev.data;
+    if (!msg) return;
+    if (msg.type === 'agent:chunk') {
+        if (msg.done) {
+            var cb = window.__agentCb;
+            window.__agentCb = null;
+            if (cb && cb.onDone) cb.onDone();
+        } else if (window.__agentCb) {
+            window.__agentCb.onChunk(msg.text);
+        }
+    } else if (msg.type === 'agent:error') {
+        var cb2 = window.__agentCb;
+        window.__agentCb = null;
+        if (cb2 && cb2.onDone) cb2.onDone();
+        var dot = document.getElementById('agent-status-dot');
+        if (dot) dot.className = 'status-dot error';
+        var tx = document.getElementById('agent-status-text');
+        if (tx) tx.textContent = '分析失败';
+    }
+});
+</script>
+</body>
+</html>

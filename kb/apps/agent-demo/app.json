@@ -1,0 +1,12 @@
+{
+  "id": "agent-demo",
+  "name": "AI猎头助手",
+  "version": "0.1.0",
+  "entry": "index.html",
+  "permissions": [
+    "llm",
+    "storage",
+    "agent"
+  ],
+  "description": "AI 猎头匹配工作台：候选人评估 / 岗位匹配 / Pipeline 追踪 / PM 协作"
+}
