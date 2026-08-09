@@ -12,7 +12,9 @@
   /* ---- 顶栏（精简：标题 + 搜索 + 3 动作） ---- */
   #toolbar { flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
     padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--bg2); }
-  #toolbar h1 { font-size: 14px; color: var(--rose); margin: 0; }
+  #toolbar h1 { font-size: 14.5px; letter-spacing: .5px; color: var(--fg); margin: 0;
+    font-weight: 700; display: inline-flex; align-items: center; gap: 6px; }
+  #toolbar h1::before { content: '🕸'; font-size: 15px; }
   #search-wrap { position: relative; flex: 1; min-width: 160px; max-width: 380px; }
   #search { width: 100%; box-sizing: border-box; background: var(--chip2); color: var(--fg);
     border: 1px solid var(--border); border-radius: 8px; padding: 6px 30px 6px 10px; font-size: 12px; outline: none; }
@@ -32,17 +34,19 @@
   #search-drop .sd-p { color: var(--muted); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; }
   .tb-sp { flex: 1; }
   .tbtn { background: var(--border); color: var(--fg); border: none; border-radius: 6px;
-    padding: 5px 10px; font-size: 12px; cursor: pointer; }
+    padding: 5px 10px; font-size: 12px; cursor: pointer; transition: background .15s, color .15s; }
   .tbtn:hover { background: var(--border2); }
   .tbtn.on { background: var(--accent); color: #fff; }
   #gfilter-orphans, #gfilter-hang { padding: 3px 10px; }
 
   /* ---- 中部：树抽屉 | 主画布 | 详情抽屉 ---- */
   #mid { flex: 1; min-height: 0; display: flex; }
-  /* 左抽屉：文档树（默认开，可关） */
+  /* 左抽屉：文档树（默认开，可关，滑入动画） */
   #tree-drawer { width: 240px; flex: none; display: none; flex-direction: column;
     border-right: 1px solid var(--border); background: var(--bg4); overflow: hidden; }
-  body.tree-open #tree-drawer { display: flex; }
+  body.tree-open #tree-drawer { display: flex; animation: dw-in .18s ease; }
+  body.detail-open #detail-drawer { display: flex; animation: dw-in .18s ease; }
+  @keyframes dw-in { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: none; } }
   .dw-head { flex: none; display: flex; align-items: center; gap: 6px; padding: 8px 12px;
     font-size: 12px; font-weight: 600; color: var(--fg2); border-bottom: 1px solid var(--border); }
   .dw-close { margin-left: auto; background: none; border: none; color: var(--muted);
@@ -67,10 +71,9 @@
   /* 右抽屉：详情情境（选中出现，标签页） */
   #detail-drawer { width: 300px; flex: none; display: none; flex-direction: column;
     border-left: 1px solid var(--border); background: var(--bg4); overflow: hidden; }
-  body.detail-open #detail-drawer { display: flex; }
   .dd-tabs { flex: none; display: flex; border-bottom: 1px solid var(--border); }
   .dd-tab { flex: 1; background: none; border: none; border-bottom: 2px solid transparent;
-    color: var(--muted); font-size: 12px; padding: 6px 0; cursor: pointer; }
+    color: var(--muted); font-size: 12px; padding: 6px 0; cursor: pointer; transition: color .15s; }
   .dd-tab:hover { color: var(--fg2); }
   .dd-tab.on { color: var(--accent); border-bottom-color: var(--accent); }
   .dd-body { flex: 1; overflow: auto; padding: 10px 12px; font-size: 12px; }
@@ -79,7 +82,8 @@
 
   /* 文件树 */
   .dir-line, .file-line { display: flex; align-items: center; gap: 6px;
-    padding: 3px 6px; border-radius: 5px; cursor: pointer; white-space: nowrap; }
+    padding: 3px 6px; border-radius: 5px; cursor: pointer; white-space: nowrap;
+    transition: background .12s; }
   .dir-line:hover, .file-line:hover { background: var(--chip2); }
   .dir-line .tw { width: 14px; color: var(--muted); text-align: center; flex: none; }
   .file-line .tw { width: 14px; flex: none; }
@@ -97,7 +101,7 @@
 
   /* 详情页（右抽屉） */
   #dd-info .d-title { font-size: 13px; font-weight: 600; color: var(--rose); margin-bottom: 4px; }
-  #dd-info .d-meta { color: var(--dim); font-size: 11.5px; margin-bottom: 6px; }
+  #dd-info .d-meta { color: var(--muted); font-size: 11.5px; margin-bottom: 6px; }
   .type-badge { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 999px;
     font-size: 11px; font-weight: 600; margin-bottom: 6px; }
   #dd-info .sec { color: var(--muted); margin-top: 8px; font-size: 11px; }
@@ -145,7 +149,8 @@
   .fb-sep { width: 1px; height: 14px; background: var(--border); flex: none; }
   #lg-chips { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
   .lg-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px;
-    border: 1px solid transparent; cursor: pointer; color: var(--fg2); background: var(--chip); }
+    border: 1px solid transparent; cursor: pointer; color: var(--fg2); background: var(--chip);
+    transition: opacity .15s, border-color .15s, background .15s; }
   .lg-chip:hover { border-color: var(--border2); }
   .lg-chip.off { opacity: 0.35; }
   .lg-chip .lg-dot { width: 8px; height: 8px; border-radius: 50%; }
@@ -153,8 +158,9 @@
   .lg-chip .lg-n { color: var(--muted); font-size: 10px; }
 
   #gp-tip { position: fixed; display: none; pointer-events: none; background: var(--bg2);
-    border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size: 11px;
-    color: var(--fg); z-index: 99; box-shadow: 0 4px 12px rgba(0,0,0,.3); }
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-size: 11px;
+    color: var(--fg); z-index: 99; box-shadow: 0 4px 12px rgba(0,0,0,.3);
+    max-width: 260px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>
 </head>
 <body class="tree-open">
@@ -297,6 +303,32 @@
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   }
+
+  // ================= 主题感知画布色（canvas 无法用 CSS 变量，读 getComputedStyle 缓存） =================
+  // 深/亮主题下标签/描边/边色必须随主题切换，否则亮色主题下浅色标签不可见
+  var cv = {};
+  function withAlpha(hex, a) {
+    var r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+    return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+  }
+  function loadThemeColors() {
+    var cs = getComputedStyle(document.documentElement);
+    var v = function (n, fb) { var s = cs.getPropertyValue(n).trim(); return s || fb; };
+    cv.fg = v('--fg', '#cdd6f4');
+    cv.muted = v('--muted', '#7f849c');
+    cv.border = v('--border', '#313244');
+    cv.accent = v('--accent', '#89b4fa');
+    cv.warn = v('--warn', '#f9e2af');
+    cv.danger = v('--danger', '#f38ba8');
+    cv.purple = v('--purple', '#cba6f7');
+    cv.rose = v('--rose', '#f5e0dc');
+    cv.ok = v('--ok', '#a6e3a1');
+  }
+  loadThemeColors();
+  // 宿主切换主题 → 重取色值并重绘（BRIDGE 已同步 data-theme）
+  window.addEventListener('message', function (ev) {
+    if (ev.data && ev.data.type === 'theme') { loadThemeColors(); scheduleGpFrame(); }
+  });
 
   // ================= 底部过滤条：类型图例 =================
   function renderLegend() {
@@ -623,7 +655,8 @@
     gpCanvas.width = w * dpr; gpCanvas.height = h * dpr;
     gpCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
     gpCtx.clearRect(0, 0, w, h);
-    gpCtx.fillStyle = 'rgba(127,132,148,0.10)';
+    // 背景网格点阵（主题 muted 低透明，深/亮自适应）
+    gpCtx.fillStyle = withAlpha(cv.muted, 0.12);
     for (var gx = (gp.ox % 24 + 24) % 24; gx < w; gx += 24) {
       for (var gy = (gp.oy % 24 + 24) % 24; gy < h; gy += 24) {
         gpCtx.fillRect(gx, gy, 1.2, 1.2);
@@ -647,15 +680,15 @@
       var ma = typeMeta(state.byPath[e.s] && state.byPath[e.s].type);
       var mb = typeMeta(state.byPath[e.t] && state.byPath[e.t].type);
       if (inPath) {
-        gpCtx.strokeStyle = '#f9e2af'; gpCtx.lineWidth = 3; gpCtx.globalAlpha = 1;
+        gpCtx.strokeStyle = cv.warn; gpCtx.lineWidth = 3; gpCtx.globalAlpha = 1;
       } else if (e.type === 'structure') {
-        gpCtx.strokeStyle = 'rgba(108,112,134,0.55)'; gpCtx.setLineDash([5, 4]); gpCtx.lineWidth = 1;
+        gpCtx.strokeStyle = withAlpha(cv.muted, 1); gpCtx.setLineDash([5, 4]); gpCtx.lineWidth = 1;
         gpCtx.globalAlpha = act ? 0.55 : 0.22;
       } else if (e.type === 'tag') {
-        gpCtx.strokeStyle = 'rgba(180,190,254,0.5)'; gpCtx.lineWidth = 1;
+        gpCtx.strokeStyle = withAlpha(cv.purple, 1); gpCtx.lineWidth = 1;
         gpCtx.globalAlpha = act ? 0.7 : 0.3;
       } else if (linked) {
-        gpCtx.strokeStyle = '#cdd6f4'; gpCtx.lineWidth = 1.6; gpCtx.globalAlpha = 0.95;
+        gpCtx.strokeStyle = withAlpha(cv.fg, 1); gpCtx.lineWidth = 1.6; gpCtx.globalAlpha = 0.95;
       } else {
         var grad = gpCtx.createLinearGradient(a.x, a.y, b.x, b.y);
         grad.addColorStop(0, ma.color); grad.addColorStop(1, mb.color);
@@ -683,22 +716,22 @@
       }
       gpCtx.beginPath();
       gpCtx.arc(n.x, n.y, r, 0, Math.PI * 2);
-      gpCtx.fillStyle = isC ? '#f38ba8' : m.color;
+      gpCtx.fillStyle = isC ? cv.accent : m.color; // 中心节点=主题强调色（深/亮均可见）
       gpCtx.fill();
-      if (inPath && !isC) { gpCtx.strokeStyle = '#f9e2af'; gpCtx.lineWidth = 2; gpCtx.stroke(); }
+      if (inPath && !isC) { gpCtx.strokeStyle = cv.warn; gpCtx.lineWidth = 2; gpCtx.stroke(); }
       if (state.sel === n.path) {
-        gpCtx.strokeStyle = '#ffffff'; gpCtx.lineWidth = 1.6; gpCtx.globalAlpha = active ? 0.9 : 0.3;
+        gpCtx.strokeStyle = cv.accent; gpCtx.lineWidth = 1.6; gpCtx.globalAlpha = active ? 0.9 : 0.3;
         gpCtx.stroke();
       }
       if (gp.fixed[n.path]) {
-        gpCtx.strokeStyle = '#a6adc8'; gpCtx.lineWidth = 1; gpCtx.globalAlpha = active ? 0.7 : 0.2;
+        gpCtx.strokeStyle = withAlpha(cv.muted, 1); gpCtx.lineWidth = 1; gpCtx.globalAlpha = active ? 0.7 : 0.2;
         gpCtx.stroke();
       }
       gpCtx.globalAlpha = 1;
       if (n.path !== gp.center && labelAlpha > 0.02) {
         var showLen = (gp.hover === n.path || gp.linkHover === n.path || (act && act[n.path])) ? 16 : 9;
-        gpCtx.fillStyle = '#cdd6f4';
-        gpCtx.font = (10 * Math.min(1, gp.scale)) + 'px Consolas, monospace';
+        gpCtx.fillStyle = cv.fg;
+        gpCtx.font = (10 * Math.min(1, gp.scale)) + 'px "Segoe UI","Microsoft YaHei",sans-serif';
         gpCtx.textAlign = 'center';
         gpCtx.globalAlpha = labelAlpha * (active ? 0.95 : 0.3);
         gpCtx.fillText((state.byPath[n.path].title || n.path.split('/').pop()).slice(0, showLen), n.x, n.y - r - 3);
@@ -756,7 +789,7 @@
           gpTip.style.left = (e.clientX + 12) + 'px';
           gpTip.style.top = (e.clientY + 12) + 'px';
           gpTip.innerHTML = m.ico + ' ' + esc(n.title || hit.path.split('/').pop()) +
-            ' <span style="color:#7f849c">' + m.label + ' · ' + (n.in_degree + n.out_degree) + ' 连接' +
+            ' <span style="color:var(--muted)">' + m.label + ' · ' + (n.in_degree + n.out_degree) + ' 连接' +
             (gp.fixed[hit.path] ? ' · 已固定' : '') + '</span>';
         } else {
           gpTip.style.display = 'none';
@@ -910,8 +943,8 @@
       '<span class="type-badge" style="color:' + m.color + ';border:1px solid ' + m.color + '55">' + m.ico + ' ' + m.label + '</span>' +
       '<div class="d-meta">' + esc(path) + '<br>项目: ' + esc(n.project) + (n.tags && n.tags !== '[]' ? ' · 标签: ' + esc(String(n.tags).replace(/[\[\]"']/g, '')) : '') + '<br>' +
       '入链 ' + n.in_degree + ' / 出链 ' + n.out_degree +
-      (orphan ? '<br><span style="color:#f38ba8">⚠ 孤立文档</span>' : '') +
-      (hang ? '<br><span style="color:#f9e2af">⚠ 含悬空链接</span>' : '') +
+      (orphan ? '<br><span style="color:var(--danger)">⚠ 孤立文档</span>' : '') +
+      (hang ? '<br><span style="color:var(--warn)">⚠ 含悬空链接</span>' : '') +
       '</div>' +
       '<button class="d-btn" id="btn-local">🕸 局部聚焦</button> ' +
       '<button class="d-btn" id="btn-explore">🔗 找关系</button>';
@@ -935,7 +968,7 @@
           li.innerHTML = (dn ? typeIco(dn.type) + ' ' : '') + esc(e.dst_path);
           li.addEventListener('click', function () { selectDoc(e.dst_path); });
         } else {
-          li.innerHTML = '<span style="color:#f9e2af">悬空: [[未知]]</span>';
+          li.innerHTML = '<span style="color:var(--warn)">悬空: [[未知]]</span>';
         }
         d.appendChild(li);
       });
@@ -987,14 +1020,14 @@
       });
       sug.appendChild(c);
     });
-    if (!candidates.length) sug.innerHTML = '<span style="color:#7f849c;font-size:11px">(无匹配文档)</span>';
+    if (!candidates.length) sug.innerHTML = '<span style="color:var(--muted);font-size:11px">(无匹配文档)</span>';
   }
   async function runExplore(toPath) {
     var from = state.sel;
     if (!from || !toPath) return;
     var box = document.getElementById('exp-path');
     var msg = document.getElementById('exp-msg');
-    box.innerHTML = '<span style="color:#7f849c">查询中…</span>';
+    box.innerHTML = '<span style="color:var(--muted)">查询中…</span>';
     msg.textContent = '';
     try {
       var r = await hostApi('/api/graph/paths?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(toPath) + '&max_depth=6');
@@ -1091,18 +1124,18 @@
       danglingEdges.slice(0, 10).forEach(function (e) {
         html += '<li data-path="' + esc(e.src).replace(/"/g, '&quot;') + '">' + esc(e.src) + ' → [[?]]</li>';
       });
-      if (danglingEdges.length > 10) html += '<li style="color:#7f849c">…共 ' + danglingEdges.length + ' 条</li>';
+      if (danglingEdges.length > 10) html += '<li style="color:var(--muted)">…共 ' + danglingEdges.length + ' 条</li>';
       html += '</ul>';
     }
     html += '</div>';
-    html += '<div class="h-sec"><div>孤立文档 <b style="color:#f38ba8">' + orphans.length + '</b></div>';
+    html += '<div class="h-sec"><div>孤立文档 <b style="color:var(--danger)">' + orphans.length + '</b></div>';
     if (!orphans.length) html += '<div class="h-ok">✓ 无</div>';
     else {
       html += '<ul>';
       orphans.slice(0, 10).forEach(function (n) {
         html += '<li data-path="' + esc(n.path).replace(/"/g, '&quot;') + '">' + esc(n.path) + '</li>';
       });
-      if (orphans.length > 10) html += '<li style="color:#7f849c">…共 ' + orphans.length + ' 个</li>';
+      if (orphans.length > 10) html += '<li style="color:var(--muted)">…共 ' + orphans.length + ' 个</li>';
       html += '</ul>';
     }
     html += '</div>';
@@ -1113,7 +1146,7 @@
       single.slice(0, 6).forEach(function (n) {
         html += '<li data-path="' + esc(n.path).replace(/"/g, '&quot;') + '">' + esc(n.path) + '</li>';
       });
-      if (single.length > 6) html += '<li style="color:#7f849c">…共 ' + single.length + ' 个</li>';
+      if (single.length > 6) html += '<li style="color:var(--muted)">…共 ' + single.length + ' 个</li>';
       html += '</ul>';
     }
     html += '</div>';
@@ -1144,8 +1177,8 @@
     var filTxt = (gfilter.orphans ? ' · 过滤:孤立' : '') + (gfilter.hang ? ' · 过滤:悬空' : '');
     stats.innerHTML =
       '<div>文档 <b>' + state.nodes.length + '</b> · 链接 <b>' + state.edges.length + '</b>（悬空 ' + dangling + '）</div>' +
-      '<div>孤立 <b style="color:#f38ba8">' + orphans.length + '</b> · 单连接 ' + single.length + '</div>' +
-      (filTxt ? '<div style="color:#f9e2af">' + filTxt + '</div>' : '');
+      '<div>孤立 <b style="color:var(--danger)">' + orphans.length + '</b> · 单连接 ' + single.length + '</div>' +
+      (filTxt ? '<div style="color:var(--warn)">' + filTxt + '</div>' : '');
   }
 
   // ================= 树（左抽屉） =================
