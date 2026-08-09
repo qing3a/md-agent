@@ -221,6 +221,12 @@ fn tools_json() -> Value {
             "example": "{}"
         },
         {
+            "name": "pending.list",
+            "desc": "列出待审提案（写操作人审队列：记忆/技能/巩固/笔记提案，approve 后落地）——用户问有什么待审、待批准、审核队列时使用",
+            "params": [],
+            "example": "{}"
+        },
+        {
             "name": "market.connect",
             "desc": "连接第三方 SkillHub 商店（应用市场索引）：拉取并校验 hub 索引后入库，返回 hub 名与可用应用清单——用户要求安装/连接/添加应用商店、应用市场、SkillHub 时使用",
             "params": [

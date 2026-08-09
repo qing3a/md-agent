@@ -28,6 +28,22 @@
   --rose: #f5e0dc;
   --peach: #fab387;
   --maroon: #eba0ac;
+  /* 装饰性变量（玻璃拟态 / 渐变 / 阴影层级） */
+  --glass-bg: rgba(30, 30, 46, .82);
+  --glass-border: rgba(255, 255, 255, .06);
+  --glass-shadow: 0 8px 32px rgba(0,0,0,.30);
+  --accent-gradient: linear-gradient(135deg, #89b4fa, #cba6f7);
+  --accent-gradient2: linear-gradient(135deg, #89b4fa, #a6e3a1);
+  --accent-glow: 0 0 24px rgba(137,180,250,.18);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,.20);
+  --shadow-md: 0 4px 14px rgba(0,0,0,.25);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,.35);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --welcome-gradient: radial-gradient(ellipse at 30% 20%, rgba(137,180,250,.10) 0%, transparent 60%),
+                      radial-gradient(ellipse at 70% 80%, rgba(203,166,247,.08) 0%, transparent 60%);
   /* rgba 变体（气泡/背景透色） */
   --accent-08: rgba(137, 180, 250, .08);
   --accent-10: rgba(137, 180, 250, .10);
@@ -96,6 +112,17 @@
   --hover-35: rgba(80, 90, 110, .18);
   --ok-12: rgba(47, 168, 94, .12);
   --muted-25: rgba(138, 145, 153, .25);
+  --glass-bg: rgba(247, 248, 250, .88);
+  --glass-border: rgba(0, 0, 0, .06);
+  --glass-shadow: 0 8px 32px rgba(0,0,0,.10);
+  --accent-gradient: linear-gradient(135deg, #4e6ef2, #7a5af8);
+  --accent-gradient2: linear-gradient(135deg, #4e6ef2, #2fa85e);
+  --accent-glow: 0 0 24px rgba(78,110,242,.15);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,.08);
+  --shadow-md: 0 4px 14px rgba(0,0,0,.10);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,.12);
+  --welcome-gradient: radial-gradient(ellipse at 30% 20%, rgba(78,110,242,.06) 0%, transparent 60%),
+                      radial-gradient(ellipse at 70% 80%, rgba(122,90,248,.04) 0%, transparent 60%);
   --ansi-30: #4a4e57;
   --ansi-31: #d92d44;
   --ansi-32: #1f9d55;

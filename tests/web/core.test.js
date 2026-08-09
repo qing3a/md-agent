@@ -54,6 +54,12 @@ test('tryParseTool：平铺/包裹/多选一/未知工具', () => {
   assert.strictEqual(Core.tryParseTool('正常回答', TOOL_API), null);
 });
 
+test('tryParseTool：工具名容错（DeepSeek 函数化调用式）', () => {
+  assert.strictEqual(Core.tryParseTool('{"tool":"search()","q":"x"}', TOOL_API).tool, 'search');
+  assert.strictEqual(Core.detectToolInFull('先查一下\n{"tool":"search()","q":"x"}', TOOL_API).tool, 'search');
+  assert.strictEqual(Core.tryParseTool('{"tool":"nope()"}', TOOL_API), null);
+});
+
 test('detectToolInFull：前缀说明/长正文不误判', () => {
   assert.strictEqual(Core.detectToolInFull('{"tool":"search","q":"x"}', TOOL_API).tool, 'search');
   assert.strictEqual(Core.detectToolInFull('需要检索一下\n\n{"tool":"search","q":"x"}', TOOL_API).tool, 'search');

@@ -9,6 +9,7 @@
   }
   // 终端壳重做（demo 结构）：DOM 消息流替代 xterm（stream.js），接口保持 writeln/write/onData 等
   const term = new StreamTerm();
+  initCardDelegation(); // 交互卡片按钮事件委托（#stream 上绑定一次，重放卡片无需补绑）
   // 多行串安全写屏：行级渲染，统一换行（stream.js 已按 \n 分行，这里只做兼容规范化）
   // DeepSeek 式原生 textarea：输入事件同步 line（无字符流事件）；草稿防抖落盘；打字计入活动（7 天归档判定）
   term._input.addEventListener('input', () => {
@@ -20,6 +21,16 @@
   let webToggle = false;
   document.getElementById('web-toggle').addEventListener('change', (e) => {
     webToggle = e.target.checked;
+  });
+
+  // 深度思考 / 联网搜索 toggle 按钮样式切换
+  document.getElementById('think-toggle')?.addEventListener('click', function() {
+    this.classList.toggle('active');
+  });
+  document.getElementById('search-toggle')?.addEventListener('click', function() {
+    this.classList.toggle('active');
+    const wt = document.getElementById('web-toggle');
+    if (wt) { wt.checked = this.classList.contains('active'); webToggle = wt.checked; }
   });
 
   // ---------- 主题（豆包式 data-theme：localStorage 优先 → 跟随系统；切换即时生效 + 广播面板） ----------
@@ -571,7 +582,7 @@
       compEl.appendChild(d);
     });
     // 定位：输入条上方（左侧锚定输入条左缘）
-    const ib = document.querySelector('#input-bar .i-row');
+    const ib = document.getElementById('ds-input-wrap') || document.querySelector('#input-bar .i-row');
     const r = ib.getBoundingClientRect();
     compEl.style.bottom = (window.innerHeight - r.top + 8) + 'px';
     compEl.style.left = Math.max(12, r.left) + 'px';
@@ -614,7 +625,7 @@
   const sendBtn = document.getElementById('send-btn');
   function setStopBtn(show) {
     if (!sendBtn) return;
-    sendBtn.textContent = show ? '停止' : '发送';
+    sendBtn.textContent = show ? '■' : '↑';
     sendBtn.classList.toggle('stop', show);
     sendBtn.title = show ? '停止回答' : '发送 (Enter)';
   }
@@ -1015,6 +1026,18 @@
     if (!chip) return;
     const cur = projectList.find((p) => p.id === currentProject);
     chip.textContent = (currentProject ? templateIcon(cur ? cur.template : '') : '🗂️') + ' ' + currentProjectName;
+    // 同步更新输入框顶部项目入口
+    const entry = document.getElementById('ds-project-entry');
+    const info = document.querySelector('.ds-project-info');
+    if (entry) {
+      const ico = currentProject ? templateIcon(cur ? cur.template : '') : '🗂️';
+      entry.querySelector('.ds-pe-ico').textContent = ico;
+      entry.querySelector('.ds-pe-name').textContent = currentProjectName;
+    }
+    if (info) {
+      info.textContent = currentProject ? '当前项目' : '选择一个项目开始对话';
+      info.style.display = currentProject ? 'none' : '';
+    }
   }
   function renderProjectMenu() {
     const list = document.getElementById('pm-list');
@@ -1037,16 +1060,15 @@
     const menu = document.getElementById('project-menu');
     if (!menu) return;
     const show = force !== undefined ? force : menu.hidden;
+    const entry = document.getElementById('ds-project-entry');
     if (show) {
       renderProjectMenu();
       if (anchorEl && anchorEl.getBoundingClientRect) {
-        // 从左侧栏「项目空间」行打开：菜单锚定该行下方（左下）
         const r = anchorEl.getBoundingClientRect();
         menu.style.top = (r.bottom + 4) + 'px';
         menu.style.left = (r.left) + 'px';
         menu.style.right = 'auto';
       } else {
-        // 从顶栏 chip 打开：菜单锚定右上角
         const chip = document.getElementById('project-chip');
         const r = chip ? chip.getBoundingClientRect() : null;
         menu.style.top = ((r ? r.bottom : 48) + 6) + 'px';
@@ -1054,8 +1076,10 @@
         menu.style.left = 'auto';
       }
       menu.hidden = false;
+      if (entry) entry.classList.add('active');
     } else {
       menu.hidden = true;
+      if (entry) entry.classList.remove('active');
     }
   }
   function closeProjectMenu() { toggleProjectMenu(false); }
@@ -1202,6 +1226,9 @@
   (function bindProjectUI() {
     const chip = document.getElementById('project-chip');
     if (chip) chip.addEventListener('click', (e) => { e.stopPropagation(); toggleProjectMenu(); });
+    // 输入框顶部项目入口
+    const entry = document.getElementById('ds-project-entry');
+    if (entry) entry.addEventListener('click', (e) => { e.stopPropagation(); toggleProjectMenu(undefined, entry); });
     const pmNew = document.getElementById('pm-new');
     if (pmNew) pmNew.addEventListener('click', openNewProjectWizard);
     const npwCancel = document.getElementById('npw-cancel');
@@ -1233,7 +1260,11 @@
     });
     document.addEventListener('click', (e) => {
       const menu = document.getElementById('project-menu');
-      if (menu && !menu.hidden && !menu.contains(e.target) && e.target.id !== 'project-chip') closeProjectMenu();
+      if (menu && !menu.hidden && !menu.contains(e.target)) {
+        const isChip = e.target.id === 'project-chip';
+        const isEntry = e.target.closest('#ds-project-entry');
+        if (!isChip && !isEntry) closeProjectMenu();
+      }
     });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeProjectMenu(); });
   })();
@@ -1700,6 +1731,13 @@
     'page': (a) => api('/api/page?url=' + encodeURIComponent(a.url || '')),
     'file': (a) => api('/api/file?path=' + encodeURIComponent(a.path || '')),
     'tasks': () => api('/api/tasks'),
+    'pending.list': async () => {
+      // 待审提案清单：写操作人审队列（记忆/技能/巩固/笔记）
+      const r = await api('/api/kb/pending');
+      const items = r.pending || [];
+      if (!items.length) return '无待审提案';
+      return items.map((i) => (i.kind ? '[' + i.kind + '] ' : '') + i.title + '（' + i.path + '）').join('\n');
+    },
     'market.connect': (a) => api('/api/hubs/connect', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url: a.hub_url || '' }),
@@ -1823,6 +1861,133 @@
         toggleOpen(true);
       },
     };
+  }
+
+  // ================= 交互卡片（对话流内旁路交互：工具结果富展示 + 操作按钮，不污染 LLM 上下文） =================
+  // 机制：渲染器注册表 CARD_RENDERERS（工具名 → 渲染器）；attachCard 在工具行后追加卡片，
+  // 后台执行时 beginMsg/appendCard/endMsg 三连自动入缓冲 → 切回重放天然还原卡片 DOM；
+  // 按钮事件走 #stream 委托分发（data-act），重放后的卡片无需补绑。
+  const CARD_KINDS = {
+    deadline: { ico: '⏰', label: '时效', cls: 'c-k-deadline' },
+    evidence_gap: { ico: '📋', label: '证据', cls: 'c-k-evidence' },
+    info_missing: { ico: '📎', label: '缺失', cls: 'c-k-info' },
+  };
+  const CARD_PKINDS = { memory: '记忆', skill: '技能', consolidate: '巩固', note: '笔记', code: '代码' };
+  function riskDaysBadge(days) {
+    if (days === null || days === undefined) return '';
+    const cls = days < 0 ? 'c-bad c-bad-red' : (days <= 7 ? 'c-bad c-bad-orange' : (days <= 30 ? 'c-bad c-bad-yellow' : 'c-bad'));
+    const txt = days < 0 ? '已过期 ' + (-days) + ' 天' : (days === 0 ? '今天到期' : days + ' 天后');
+    return '<span class="' + cls + '">' + txt + '</span>';
+  }
+  function riskCardHtml(r) {
+    const items = (r.items || []).slice(0, 20);
+    const rows = items.map((i) => {
+      const k = CARD_KINDS[i.kind] || { ico: '⚠️', label: i.kind || '风险', cls: '' };
+      return '<div class="card-row">' +
+        '<span class="c-k ' + k.cls + '">' + k.ico + ' ' + k.label + '</span>' +
+        '<span class="c-txt">' + escHtml(i.label) + '</span>' +
+        riskDaysBadge(i.days) +
+        '<button class="c-btn" data-act="locate" data-path="' + escHtml(i.path) + '">定位</button>' +
+        '</div>';
+    }).join('');
+    return {
+      head: '⚠ 风控预警 · ' + items.length + ' 条',
+      rows: rows || '<div class="c-empty">✓ 无风控预警</div>',
+    };
+  }
+  function pendingCardHtml(r) {
+    const items = r.pending || [];
+    const rows = items.map((i) => {
+      const kind = CARD_PKINDS[i.kind] || i.kind || '提案';
+      return '<div class="card-row">' +
+        '<span class="c-k">' + kind + '</span>' +
+        '<span class="c-txt" title="' + escHtml(i.path) + '">' + escHtml(i.title) + '</span>' +
+        '<button class="c-btn" data-act="pend-preview" data-path="' + escHtml(i.path) + '">预览</button>' +
+        '<button class="c-btn c-btn-ok" data-act="pend-approve" data-path="' + escHtml(i.path) + '">批准</button>' +
+        '<button class="c-btn c-btn-danger" data-act="pend-reject" data-path="' + escHtml(i.path) + '">拒绝</button>' +
+        '</div>';
+    }).join('');
+    return {
+      head: '📝 待审提案 · ' + items.length + ' 项',
+      rows: rows || '<div class="c-empty">✓ 无待审提案</div>',
+    };
+  }
+  function cardShell(cls, head, rows) {
+    return '<div class="card ' + cls + '"><div class="c-head">' + head + '</div>' +
+      '<div class="c-rows">' + rows + '</div><div class="c-prev"></div></div>';
+  }
+  async function renderRiskCard(t) {
+    let r;
+    try { r = await api('/api/risk'); } catch (e) { return; }
+    const h = riskCardHtml(r);
+    t.beginMsg('tool');
+    t.appendCard(cardShell('c-risk', h.head, h.rows), 'toolcard');
+    t.endMsg();
+  }
+  async function renderPendingCard(t) {
+    let r;
+    try { r = await api('/api/kb/pending'); } catch (e) { return; }
+    const h = pendingCardHtml(r);
+    t.beginMsg('tool');
+    t.appendCard(cardShell('c-pending', h.head, h.rows), 'toolcard');
+    t.endMsg();
+  }
+  const CARD_RENDERERS = { 'risk.check': renderRiskCard, 'pending.list': renderPendingCard };
+  // 在工具行之后追加交互卡片（无渲染器/取数失败静默跳过，不打断回答）
+  async function attachCard(t, toolName) {
+    const renderer = CARD_RENDERERS[toolName];
+    if (!renderer) return;
+    try { await renderer(t); } catch (e) { /* 卡片是旁路展示，失败不打扰回答流 */ }
+  }
+  // 待审卡就地刷新（approve/reject 后重取列表，更新 head/rows，不重建容器）
+  async function refreshPendingCard(card) {
+    let r;
+    try { r = await api('/api/kb/pending'); } catch (e) { return; }
+    const h = pendingCardHtml(r);
+    const head = card.querySelector('.c-head');
+    const rows = card.querySelector('.c-rows');
+    if (head) head.innerHTML = h.head;
+    if (rows) rows.innerHTML = h.rows;
+  }
+  // #stream 事件委托：卡片按钮统一分发（重放后的卡片无需补绑）
+  function initCardDelegation() {
+    const stream = document.getElementById('stream');
+    if (!stream) return;
+    stream.addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('[data-act]');
+      if (!btn || !btn.dataset.act) return;
+      const card = btn.closest('.card');
+      const act = btn.dataset.act;
+      const path = btn.dataset.path || '';
+      if (act === 'locate') { openViewForPath(path); return; }
+      if (act === 'pend-preview') {
+        let p;
+        try { p = await api('/api/kb/pending/preview?path=' + encodeURIComponent(path)); } catch (e) { return; }
+        const box = card ? card.querySelector('.c-prev') : null;
+        if (!box) return;
+        box.innerHTML = '<div class="c-prev-in"><div class="c-prev-t">目标: ' + escHtml(p.target || '') + '（' + (p.kind || '') + '）</div>' +
+          '<pre>' + escHtml(String(p.added || '').slice(0, 1000)) + '</pre></div>';
+        return;
+      }
+      if (act === 'pend-approve' || act === 'pend-reject') {
+        const label = act === 'pend-approve' ? '批准' : '拒绝';
+        btn.disabled = true;
+        btn.textContent = '…';
+        try {
+          await api('/api/kb/pending/' + act.slice('pend-'.length), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }),
+          });
+          const fb = card ? card.querySelector('.c-prev') : null;
+          if (fb) fb.innerHTML = '<div class="c-fb-ok">✓ 已' + label + '：' + escHtml(path) + '</div>';
+          if (card) refreshPendingCard(card);
+        } catch (e) {
+          btn.disabled = false;
+          btn.textContent = label;
+        }
+        return;
+      }
+    });
   }
 
   async function runTool(name, args) {
@@ -2267,7 +2432,7 @@
     let reasoningStartAt = null;
     let firstContentAt = null;
     let lastUsage = null;
-    const MAX_TOOL = 3;
+    const MAX_TOOL = 8;
     let toolCount = 0;
     // 联网通道开关：输入条开关（webToggle）或触发词首轮开启；知识检索 0 命中时自动开启
     let web = webToggle || Core.webTrigger(question);
@@ -2314,7 +2479,10 @@
       try { result = await runTool(tj.tool, tj.args); }
       catch (e) { toolFail = ((e && e.message) || e); result = '工具调用失败: ' + toolFail; touchExperience('tool_failure', tj.tool + ': ' + toolFail); }
       if (toolFail) toolRow.fail(toolFail);
-      else toolRow.done(result);
+      else {
+        toolRow.done(result);
+        await attachCard(t, tj.tool); // 交互卡片：旁路富展示（风险/待审），不进入 messages
+      }
       // 知识检索 0 命中 → 下一轮开启联网通道（服务端 web_search），让模型在知识库不足时能搜到外部信息
       if (!web && /无命中|未命中|未定位|无片段|未找到/.test(String(result))) {
         web = true;
@@ -2452,7 +2620,7 @@
     ];
     let full = '';
     let toolCount = 0;
-    const MAX_TOOL = 3;
+    const MAX_TOOL = 8;
     for (;;) {
       t.writeln('\x1b[90m(App 请求' + (toolCount ? ' · 继续' : '') + '...)\x1b[0m');
       const r = await llmStreamOnce(messages, false, (line) => post({ type: 'agent:chunk', text: line, done: false }), t);
@@ -2466,7 +2634,10 @@
       let result;
       try { result = await runTool(tj.tool, tj.args); }
       catch (e) { result = '工具调用失败: ' + ((e && e.message) || e); toolRow.fail((e && e.message) || e); }
-      if (!/调用失败/.test(result)) toolRow.done(result);
+      if (!/调用失败/.test(result)) {
+        toolRow.done(result);
+        await attachCard(t, tj.tool); // 交互卡片：旁路富展示（风险/待审），不进入 messages
+      }
       post({ type: 'agent:tool', name: tj.tool, status: 'done', result: String(result).slice(0, 500) });
       messages.push({ role: 'assistant', content: r.full });
       messages.push({ role: 'user', content: '工具 ' + tj.tool + ' 返回（基于它直接回答；仍缺关键信息才可再调用工具，引用标注 [工具:' + tj.tool + ']）：\n' + String(result).slice(0, 3000) });

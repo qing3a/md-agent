@@ -1064,9 +1064,11 @@
     var dup = {};
     state.nodes.forEach(function (n) {
       var t = (n.title || n.path.split('/').pop());
-      dup[t] = (dup[t] || 0) + 1;
+      if (!dup[t]) dup[t] = { count: 0, paths: [] };
+      dup[t].count++;
+      dup[t].paths.push(n.path);
     });
-    var dups = Object.keys(dup).filter(function (t) { return dup[t] > 1; });
+    var dups = Object.keys(dup).filter(function (t) { return dup[t].count > 1; });
     var html = '<div class="h-title">🩺 结构健康度</div>';
     html += '<div class="h-sec"><div>悬空链接 <b>' + danglingEdges.length + '</b></div>';
     if (!danglingEdges.length) html += '<div class="h-ok">✓ 无</div>';
@@ -1103,7 +1105,15 @@
     html += '</div>';
     html += '<div class="h-sec"><div>重复标题 <b>' + dups.length + '</b></div>';
     if (!dups.length) html += '<div class="h-ok">✓ 无</div>';
-    else html += '<ul>' + dups.slice(0, 6).map(function (t) { return '<li>' + esc(t) + ' ×' + dup[t] + '</li>'; }).join('') + '</ul>';
+    else {
+      dups.slice(0, 6).forEach(function (t) {
+        var g = dup[t];
+        html += '<div style="margin-top:3px"><b>' + esc(t) + ' ×' + g.count + '</b></div>';
+        html += '<ul>' + g.paths.map(function (p) {
+          return '<li data-path="' + esc(p).replace(/"/g, '&quot;') + '">' + esc(p) + '</li>';
+        }).join('') + '</ul>';
+      });
+    }
     html += '</div>';
     h.innerHTML = html;
     h.querySelectorAll('li[data-path]').forEach(function (li) {

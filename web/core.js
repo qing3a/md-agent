@@ -78,16 +78,21 @@
   };
 
   // 解析工具调用 JSON：必须以 { 开头；支持一次输出多个工具 JSON（DeepSeek 会用空格分隔），取第一个合法；
-  // 兼容平铺参数（{"tool":"x","q":..}）与 args 包裹（{"tool":"x","args":{..}}）；toolApi 为工具名→处理器的映射
+  // 兼容平铺参数（{"tool":"x","q":..}）与 args 包裹（{"tool":"x","args":{..}}）；toolApi 为工具名→处理器的映射；
+  // 工具名容错：DeepSeek 偶发把函数名写成调用式（risk.check() → risk.check）
+  Core.normalizeToolName = function (name) {
+    return String(name || '').replace(/\(\)\s*$/, '').trim();
+  };
   Core.tryParseTool = function (text, toolApi) {
     const t = String(text || '').trim();
     if (!t.startsWith('{')) return null;
     for (const raw of Core.extractJsonObjects(t)) {
       try {
         const j = JSON.parse(raw);
-        if (j && typeof j.tool === 'string' && toolApi && toolApi[j.tool]) {
+        const name = Core.normalizeToolName(j && j.tool);
+        if (name && toolApi && toolApi[name]) {
           const args = (j.args && typeof j.args === 'object' && !Array.isArray(j.args)) ? j.args : j;
-          return { tool: j.tool, args };
+          return { tool: name, args };
         }
       } catch (e) { /* 跳过非工具 JSON 对象 */ }
     }
@@ -105,9 +110,10 @@
     for (const raw of Core.extractJsonObjects(t.slice(ti))) {
       try {
         const j = JSON.parse(raw);
-        if (j && typeof j.tool === 'string' && toolApi && toolApi[j.tool]) {
+        const name = Core.normalizeToolName(j && j.tool);
+        if (name && toolApi && toolApi[name]) {
           const args = (j.args && typeof j.args === 'object' && !Array.isArray(j.args)) ? j.args : j;
-          return { tool: j.tool, args };
+          return { tool: name, args };
         }
       } catch (e) { /* 跳过 */ }
     }
