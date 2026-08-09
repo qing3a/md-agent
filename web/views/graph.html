@@ -269,14 +269,13 @@
 
   var state = { nodes: [], edges: [], byPath: {}, sel: null,
     dirNodes: [], tagNodes: [], structEdges: [], tagEdges: [], dirByPath: {}, tagOf: {} };
+  var hangMap = {}; // 含悬空链接的文档集合（P8：一次 O(E) 预计算，替代每节点 O(E) 的 hasHang 扫描）
   var gfilter = { orphans: false, hang: false };
   var searchHits = [];   // 当前搜索命中的 path 集合
   var pendingHighlight = null; // 宿主引用点击早于数据就绪时的缓存（P9 竞态修复）
 
   function isOrphan(n) { return n.in_degree === 0 && n.out_degree === 0; }
-  function hasHang(n) {
-    return state.edges.some(function (e) { return e.src === n.path && !e.dst_path; });
-  }
+  function hasHang(n) { return !!hangMap[n.path]; }
   // 统一可见性口径（树/图/健康度共用；dir/tag 只看类型开关，不看孤立/悬空）
   function visFilter(n) {
     if (!typeOn(n.type)) return false;
@@ -413,9 +412,9 @@
   function gpFocusNode(path) {
     var n = gp.nodes.find(function (x) { return x.path === path; });
     if (!n) return;
-    var w = gpCanvas.clientWidth || 600;
-    var h = gpCanvas.clientHeight || 400;
-    gp.anim = { ox0: gp.ox, oy0: gp.oy, ox1: w / 2 - n.x * gp.scale, oy1: h / 2 - n.y * gp.scale, t0: performance.now(), dur: 320 };
+    // 相机目标：屏幕 = w/2 + ox + x*scale → 要让世界点 (n.x, n.y) 居中，ox = -n.x*scale
+    // （旧公式 w/2 - x*scale 差一个 w/2，会把目标推到屏幕右边缘——中心点偏移根因）
+    gp.anim = { ox0: gp.ox, oy0: gp.oy, ox1: -n.x * gp.scale, oy1: -n.y * gp.scale, t0: performance.now(), dur: 320 };
     scheduleGpFrame();
   }
   // 画布坐标 → 节点命中（隐藏节点视为空白）
@@ -819,9 +818,14 @@
     if (minX === Infinity) return;
     var bw = Math.max(60, maxX - minX), bh = Math.max(60, maxY - minY);
     var s = Math.max(0.4, Math.min(2.4, Math.min((w - 60) / bw, (h - 60) / bh)));
+    // 锚定「逻辑中心节点」居中（图谱心智模型：中心节点永远在视觉中心）；
+    // 中心节点被过滤隐藏时退化为包围盒中心。ox = -tx*scale（见 gpFocusNode 注释）
+    var c = gp.nodes.find(function (n) { return n.path === gp.center; });
+    var tx = (c && !hiddenSet[c.path]) ? c.x : (minX + maxX) / 2;
+    var ty = (c && !hiddenSet[c.path]) ? c.y : (minY + maxY) / 2;
     gp.anim = {
       ox0: gp.ox, oy0: gp.oy,
-      ox1: w / 2 - (minX + maxX) / 2 * s, oy1: h / 2 - (minY + maxY) / 2 * s,
+      ox1: -tx * s, oy1: -ty * s,
       t0: performance.now(), dur: 320,
     };
     gp.scale = s;
@@ -1350,6 +1354,9 @@
     state.tagOf = {};
     g.tag_nodes.forEach(function (n) { state.byPath[n.path] = n; state.tagOf[n.path] = []; });
     g.tag_edges.forEach(function (e) { (state.tagOf[e.src] = state.tagOf[e.src] || []).push(e.dst_path); });
+    // P8：悬空链接集合一次预计算（O(E)）
+    hangMap = {};
+    g.edges.forEach(function (e) { if (!e.dst_path) hangMap[e.src] = 1; });
     recomputeHidden();
     if (!g.nodes.length) {
       document.getElementById('tree').innerHTML =
