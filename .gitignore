@@ -19,3 +19,6 @@ config.json
 # 项目制隔离区派生库（可由 md 重建）
 *.db
 *.db-*
+
+# 图谱 UI 状态（本地偏好，非知识）
+kb/.graph-ui.json

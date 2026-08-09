@@ -280,6 +280,42 @@
   var searchHits = [];   // 当前搜索命中的 path 集合
   var pendingHighlight = null; // 宿主引用点击早于数据就绪时的缓存（P9 竞态修复）
 
+  // ================= UI 状态持久化（kb/.graph-ui.json，防抖落盘 + 加载恢复） =================
+  // 沙箱无 localStorage；内置面板桥全通 → hostApi /api/file 读写 kb 根状态文件（零宿主改动）
+  var UI_STATE_KEY = '.graph-ui.json';
+  var uiSaveTimer = null;
+  var uiStateLoaded = false; // 恢复完成前不落盘（防止加载覆盖用户上次状态）
+  function saveUiState() {
+    if (!uiStateLoaded) return;
+    clearTimeout(uiSaveTimer);
+    uiSaveTimer = setTimeout(function () {
+      var payload = {
+        typeFilter: typeFilter,
+        gfilter: gfilter,
+        depth: parseInt((document.getElementById('gp-depth') || {}).value || '3', 10) || 3,
+        treeOpen: document.body.classList.contains('tree-open'),
+      };
+      hostApi('/api/file', { method: 'POST', body: { path: UI_STATE_KEY, content: JSON.stringify(payload) } })
+        .catch(function () { /* 落盘失败静默，不影响交互 */ });
+    }, 800);
+  }
+  function loadUiState() {
+    return hostApi('/api/file?path=' + encodeURIComponent(UI_STATE_KEY))
+      .then(function (r) {
+        var s = {};
+        try { s = JSON.parse(r.content || '{}'); } catch (e) { /* 损坏则用默认 */ }
+        if (s.typeFilter && typeof s.typeFilter === 'object') {
+          Object.keys(s.typeFilter).forEach(function (k) { typeFilter[k] = s.typeFilter[k]; });
+        }
+        if (s.gfilter) gfilter = Object.assign({ orphans: false, hang: false }, s.gfilter);
+        if (s.depth) document.getElementById('gp-depth').value = String(Math.max(1, Math.min(6, s.depth)));
+        if (s.treeOpen) document.body.classList.add('tree-open');
+        else document.body.classList.remove('tree-open');
+        uiStateLoaded = true;
+      })
+      .catch(function () { uiStateLoaded = true; /* 无状态文件 → 默认 */ });
+  }
+
   function isOrphan(n) { return n.in_degree === 0 && n.out_degree === 0; }
   function hasHang(n) { return !!hangMap[n.path]; }
   // 统一可见性口径（树/图/健康度共用；dir/tag 只看类型开关，不看孤立/悬空）
@@ -354,6 +390,7 @@
         renderTree();
         renderHealth();
         scheduleGpFrame();
+        saveUiState();
       });
       chips.appendChild(c);
     });
@@ -884,6 +921,7 @@
     if (gp.fullMode) return;
     gp.depth = parseInt(this.value, 10) || 1;
     if (gp.center) buildLocalGraph();
+    saveUiState();
   });
   // ⛶ 全图：回全库图谱（唯一入口，替代旧「全屏/双栏」双旗标）
   document.getElementById('full-btn').addEventListener('click', function () {
@@ -901,11 +939,13 @@
     document.body.classList.toggle('tree-open');
     syncTreeBtn();
     scheduleGpFrame();
+    saveUiState();
   });
   document.getElementById('tree-close').addEventListener('click', function () {
     document.body.classList.remove('tree-open');
     syncTreeBtn();
     scheduleGpFrame();
+    saveUiState();
   });
   syncTreeBtn();
 
@@ -1390,6 +1430,11 @@
     // P8：悬空链接集合一次预计算（O(E)）
     hangMap = {};
     g.edges.forEach(function (e) { if (!e.dst_path) hangMap[e.src] = 1; });
+    // UI 状态恢复（typeFilter/gfilter/depth/树开合）——先恢复再渲染，过滤态直接生效
+    await loadUiState();
+    document.getElementById('gfilter-orphans').classList.toggle('on', !!gfilter.orphans);
+    document.getElementById('gfilter-hang').classList.toggle('on', !!gfilter.hang);
+    syncTreeBtn();
     recomputeHidden();
     if (!g.nodes.length) {
       document.getElementById('tree').innerHTML =
@@ -1424,6 +1469,7 @@
       renderHealth();
       renderStats();
       scheduleGpFrame();
+      saveUiState();
     });
   }
   bindGfilter(document.getElementById('gfilter-orphans'), 'orphans');

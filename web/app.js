@@ -1947,12 +1947,44 @@
     t.appendCard(cardShell('c-pending', h.head, h.rows), 'toolcard');
     t.endMsg();
   }
-  const CARD_RENDERERS = { 'risk.check': renderRiskCard, 'pending.list': renderPendingCard };
+  // 图谱链接卡（第二批）：出链/入链清单，带类型色点 + 定位按钮（复用 data-act=locate 委托）
+  function linkCardHtml(r, head) {
+    const rows = (r.linked || []).map((l) => {
+      if (!l.resolved || !l.dst_path) {
+        return '<div class="card-row"><span class="c-k">🔗</span>' +
+          '<span class="c-txt" style="color:var(--muted)">悬空: [[未知]]</span></div>';
+      }
+      return '<div class="card-row"><span class="c-k">🔗</span>' +
+        '<span class="c-txt" title="' + escHtml(l.dst_path) + '">' + escHtml(l.dst || l.dst_path) + '</span>' +
+        '<button class="c-btn" data-act="locate" data-path="' + escHtml(l.dst_path) + '">定位</button>' +
+        '</div>';
+    }).join('');
+    return { head, rows: rows || '<div class="c-empty">✓ 无</div>' };
+  }
+  async function renderLinkCard(t, args, kind) {
+    const path = (args && args.path) || '';
+    if (!path) return;
+    let r;
+    try {
+      r = await api('/api/graph/' + kind + '?path=' + encodeURIComponent(path));
+    } catch (e) { return; }
+    const label = kind === 'linked' ? '出链' : '入链';
+    const h = linkCardHtml(r, '🔗 ' + label + ' · ' + (r.linked || []).length + '（' + path + '）');
+    t.beginMsg('tool');
+    t.appendCard(cardShell('c-link', h.head, h.rows), 'toolcard');
+    t.endMsg();
+  }
+  const CARD_RENDERERS = {
+    'risk.check': renderRiskCard,
+    'pending.list': renderPendingCard,
+    'graph.linked': (t, a) => renderLinkCard(t, a, 'linked'),
+    'graph.backlinks': (t, a) => renderLinkCard(t, a, 'backlinks'),
+  };
   // 在工具行之后追加交互卡片（无渲染器/取数失败静默跳过，不打断回答）
-  async function attachCard(t, toolName) {
+  async function attachCard(t, toolName, args) {
     const renderer = CARD_RENDERERS[toolName];
     if (!renderer) return;
-    try { await renderer(t); } catch (e) { /* 卡片是旁路展示，失败不打扰回答流 */ }
+    try { await renderer(t, args); } catch (e) { /* 卡片是旁路展示，失败不打扰回答流 */ }
   }
   // 待审卡就地刷新（approve/reject 后重取列表，更新 head/rows，不重建容器）
   async function refreshPendingCard(card) {
@@ -2496,7 +2528,7 @@
       if (toolFail) toolRow.fail(toolFail);
       else {
         toolRow.done(result);
-        await attachCard(t, tj.tool); // 交互卡片：旁路富展示（风险/待审），不进入 messages
+        await attachCard(t, tj.tool, tj.args); // 交互卡片：旁路富展示（风险/待审），不进入 messages
       }
       // 知识检索 0 命中 → 下一轮开启联网通道（服务端 web_search），让模型在知识库不足时能搜到外部信息
       if (!web && /无命中|未命中|未定位|无片段|未找到/.test(String(result))) {
@@ -2651,7 +2683,7 @@
       catch (e) { result = '工具调用失败: ' + ((e && e.message) || e); toolRow.fail((e && e.message) || e); }
       if (!/调用失败/.test(result)) {
         toolRow.done(result);
-        await attachCard(t, tj.tool); // 交互卡片：旁路富展示（风险/待审），不进入 messages
+        await attachCard(t, tj.tool, tj.args); // 交互卡片：旁路富展示（风险/待审），不进入 messages
       }
       post({ type: 'agent:tool', name: tj.tool, status: 'done', result: String(result).slice(0, 500) });
       messages.push({ role: 'assistant', content: r.full });
