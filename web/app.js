@@ -10,6 +10,27 @@
   // 终端壳重做（demo 结构）：DOM 消息流替代 xterm（stream.js），接口保持 writeln/write/onData 等
   const term = new StreamTerm();
   initCardDelegation(); // 交互卡片按钮事件委托（#stream 上绑定一次，重放卡片无需补绑）
+  // 会话相对时间：只显示距现在的 小时/天（+ 月/年兜底）；mtime 优先，date 字符串本地解析
+  function relTimeOf(s) {
+    let ts = s.mtime ? s.mtime * 1000 : NaN;
+    if (!ts || isNaN(ts)) {
+      if (!s.date) return '';
+      const t = new Date(s.date.replace(/-/g, '/') + ' 00:00:00').getTime(); // 本地时区解析 YYYY-MM-DD
+      ts = isNaN(t) ? Date.now() : t;
+    }
+    const diff = Date.now() - ts;
+    const min = Math.floor(diff / 60000);
+    if (min < 1) return '刚刚';
+    if (min < 60) return min + ' 分钟前';
+    const h = Math.floor(min / 60);
+    if (h < 24) return h + ' 小时前';
+    const d = Math.floor(h / 24);
+    if (d < 30) return d + ' 天前';
+    const mo = Math.floor(d / 30);
+    if (mo < 12) return mo + ' 个月前';
+    return Math.floor(mo / 12) + ' 年前';
+  }
+
   // 多行串安全写屏：行级渲染，统一换行（stream.js 已按 \n 分行，这里只做兼容规范化）
   // DeepSeek 式原生 textarea：输入事件同步 line（无字符流事件）；草稿防抖落盘；打字计入活动（7 天归档判定）
   term._input.addEventListener('input', () => {
@@ -798,7 +819,7 @@
           t.title = s.id;
           const d = document.createElement('span');
           d.className = 'sb-item-meta';
-          d.textContent = (s.count || 0) + ' 轮 · ' + (s.date || (s.mtime ? new Date(s.mtime * 1000).toISOString().slice(0, 10) : ''));
+          d.textContent = (s.count || 0) + ' 轮 · ' + relTimeOf(s);
           if (exeRun) {
             // 该会话有未完成执行：运行点（思考/工具/回答全过程；后台执行也标）
             const run = document.createElement('span');
@@ -1717,6 +1738,23 @@
     if (appsCache) return appsCache;
     try { appsCache = (await api('/api/apps')).apps || []; } catch (e) { appsCache = []; }
     return appsCache;
+  }
+  // 工作台子菜单：已安装应用前 3 个显示在左侧菜单「工作台」下（点击打开应用面板）
+  async function renderSidebarApps(force) {
+    const box = document.getElementById('sb-apps');
+    if (!box) return;
+    if (force) appsCache = null;
+    let apps = [];
+    try { apps = await getApps(); } catch (e) { apps = []; }
+    box.innerHTML = '';
+    apps.slice(0, 3).forEach((a) => {
+      const b = document.createElement('button');
+      b.dataset.cmd = '/view ' + a.id;
+      b.title = a.name + (a.desc ? '：' + a.desc : '');
+      b.innerHTML = '<span class="mi-ico">📦</span><span>' + escHtml(a.name || a.id) + '</span>';
+      b.addEventListener('click', () => submitCmd('/view ' + a.id));
+      box.appendChild(b);
+    });
   }
 
   // ---------- CE 记账增强（per-source 分桶）：输入按源分桶估算 + 指纹，miss 归因在 /api/context/stats（ZCode inputBaselineBySource 思想）
@@ -3423,6 +3461,7 @@
     viewOverlay.classList.add('hidden');
     updateMenuActive(null);
     applySplit(false); // 视图关闭：退出分屏（终端恢复全宽）+ 焦点归还终端
+    renderSidebarApps(true); // 面板关闭后刷新工作台子菜单（装/卸应用立即反映）
     term.focus();
   }
 
@@ -3633,6 +3672,7 @@
     const v = new URLSearchParams(location.search).get('view');
     if (v) { try { await viewCmd(v); } catch (e) { term.writeln('\x1b[31m自动打开失败: ' + e.message + '\x1b[0m'); } }
   })();
+  renderSidebarApps(); // 启动渲染工作台子菜单（已安装应用前 3 个）
 
   // ---------- 应用市场（阶段 2）：/market list | import <路径> | uninstall <id> | update <id> <路径> ----------
   // ---------- SkillHub（阶段 4）：connect <url> | hubs | disconnect <name> | refresh <name> | catalog | install <id> ----------
