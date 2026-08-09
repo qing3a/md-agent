@@ -374,6 +374,12 @@
     if (atPrompt && statusLine) term.setStatus(statusLine.replace(/\x1b\[[0-9;]*m/g, ''));
   }
   // 输入框（输入中）：DOM 输入条常驻底部（DeepSeek 式），输入值/状态直接落 DOM
+  // 空状态切换：新对话时输入框居中偏下；首条消息后回底部
+  const mainEl = document.getElementById('main');
+  function setEmptyState(empty) {
+    if (empty) mainEl.classList.add('empty-state');
+    else mainEl.classList.remove('empty-state');
+  }
   function showPrompt() {
     atPrompt = true;
     term._input.value = line;
@@ -381,9 +387,10 @@
     term.setStatus((statusLine || '').replace(/\x1b\[[0-9;]*m/g, ''));
     term.focus();
   }
-  // 回车提交：提交内容渲染为用户气泡（.msg.user），输入条清空
+// 回车提交：提交内容渲染为用户气泡（.msg.user），输入条清空
   function submitMsg() {
     atPrompt = false;
+    setEmptyState(false); // 首条消息 → 输入框回底部
     compClose();
     term.beginMsg('user');
     term.appendCard(escHtml(line));
@@ -905,9 +912,21 @@
     });
   }
   document.getElementById('session-new').addEventListener('click', (ev) => {
-    // 新建对话 → 选择归属项目（弹项目菜单锚定按钮下方；选中即在该项目开新会话）
-    ev.stopPropagation(); // 防止冒泡到 document 监听被立即关闭
-    toggleProjectMenu(undefined, document.getElementById('session-new'));
+    // 新对话：直接在当前项目开新会话（不弹项目选择子菜单）
+    ev.stopPropagation();
+    closeProjectMenu();
+    closeView();
+    if (sessionLog.length && !sessionArchived) archiveSession();
+    if (currentAbort) { try { currentAbort.abort(); } catch (e) { /* 忽略 */ } currentAbort = null; }
+    for (const k in exes) exes[k].done = true; activeExe = null;
+    history = []; saveHistory(); Core.resetSectionCache();
+    sessionFile = null; sessionLog = []; sessionArchived = false; sessionTaskId = null;
+    if (topbarTitle) topbarTitle.textContent = '新对话';
+    term.clear();
+    printBanner();
+    setEmptyState(true);
+    refreshStatus();
+    setTimeout(() => { sbFingerprint = ''; paintSidebar(); }, 400);
   });
   paintSidebar();
 
@@ -984,20 +1003,12 @@
   function printBanner() {
     const bannerRow = term.appendCard(
       '<div class="welcome">' +
-        '<div class="w-title">md-agent' + (currentProject ? ' · ' + currentProjectName : '') + '</div>' +
         '<div class="w-hello">有什么我能帮你的吗？</div>' +
-        '<div class="w-line dim">' + (currentProject ? '项目空间：' + currentProjectName + '（与其它项目完全隔离）' : '私人 AI 运营中心 · 你的 AI 做了什么，永远可查') + '</div>' +
-        '<div class="w-chips">' +
-          '<button data-cmd="/view automation">🔄 自动化</button>' +
-          '<button data-cmd="/side">⌘ 命令速览</button>' +
-        '</div>' +
-        '<div class="w-status">状态加载中…</div>' +
       '</div>'
     );
-    bannerRow.querySelectorAll('.w-chips button').forEach((b) => b.addEventListener('click', () => submitCmd(b.dataset.cmd)));
-    // 状态汇总改由 refreshStatus（8s 轮询）填充：banner 状态行与输入条状态行同源
   }
   printBanner();
+  setEmptyState(true); // 启动 = 新对话空状态
 
   // ---- 项目制（多项目硬隔离）：项目切换器 + 新建项目 ----
   function loadProjectState() {
@@ -1035,8 +1046,7 @@
       entry.querySelector('.ds-pe-name').textContent = currentProjectName;
     }
     if (info) {
-      info.textContent = currentProject ? '当前项目' : '选择一个项目开始对话';
-      info.style.display = currentProject ? 'none' : '';
+      info.style.display = 'none';
     }
   }
   function renderProjectMenu() {
@@ -1106,6 +1116,7 @@
     renderProjectChip();
     term.clear();
     printBanner();
+    setEmptyState(true);
     paintSidebar();
     refreshStatus();
     busy = currentExeBusy();
@@ -1373,6 +1384,10 @@
   (async function loadL1() {
     try {
       const res = await fetch('/api/l1?full=1');
+      // 后端未启动 / 返回 HTML 错误页 → 友好提示，不抛 JSON 解析异常
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const ct = res.headers.get('content-type') || '';
+      if (!ct.includes('application/json')) throw new Error('服务未就绪（未返回 JSON）');
       const b = await res.json();
       if (b.l1 && b.l1.length) {
         L1_TEXT = b.l1.map((f) => '【' + f.name + '】\n' + f.content).join('\n\n');
@@ -1386,7 +1401,7 @@
         term.writeln('\x1b[33m警告: L1 层为空，规范/记忆未注入\x1b[0m');
       }
     } catch (e) {
-      term.writeln('\x1b[33mL1 加载失败: ' + e.message + '\x1b[0m');
+      /* 后端未启动时静默处理，不显示错误 */
     }
     await bannerDone;
     // 恢复未提交草稿（刷新前未发送的输入）

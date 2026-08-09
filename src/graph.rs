@@ -444,6 +444,11 @@ pub struct EdgeInfo {
 pub struct GraphData {
     pub nodes: Vec<NodeInfo>,
     pub edges: Vec<EdgeInfo>,
+    // 思源式图增强（2026-08-09）：结构边（目录层级）+ 标签节点，独立数组不污染 ref 语义
+    pub dir_nodes: Vec<NodeInfo>,
+    pub tag_nodes: Vec<NodeInfo>,
+    pub structure_edges: Vec<EdgeInfo>,
+    pub tag_edges: Vec<EdgeInfo>,
 }
 
 /// 全量图谱数据（供 /view 可视化视图）
@@ -503,7 +508,112 @@ pub fn graph_data(root: &Path) -> Result<GraphData, String> {
         n.out_degree = outd.get(n.path.as_str()).copied().unwrap_or(0);
         n.in_degree = ind.get(n.path.as_str()).copied().unwrap_or(0);
     }
-    Ok(GraphData { nodes, edges })
+
+    // 结构边（思源式：目录层级父子链，浅色组织关系）——每文档逐级父目录，目录去重
+    // 根目录文档（无 "/" 的 path，如 MEMORY.md）不产生目录边；目录节点 type="dir"
+    let mut dirs: Vec<String> = Vec::new(); // 有序目录清单（保证输出稳定）
+    let mut dir_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for n in &nodes {
+        let mut parts: Vec<&str> = n.path.split('/').collect();
+        parts.pop(); // 去掉文件名
+        let mut acc = String::new();
+        for (i, seg) in parts.iter().enumerate() {
+            if i > 0 {
+                acc.push('/');
+            }
+            acc.push_str(seg);
+            if dir_set.insert(acc.clone()) {
+                dirs.push(acc.clone());
+            }
+        }
+    }
+    let mut dir_nodes: Vec<NodeInfo> = Vec::new();
+    for d in &dirs {
+        dir_nodes.push(NodeInfo {
+            path: d.clone(),
+            title: d.rsplit('/').next().unwrap_or(d).to_string(),
+            project: String::new(),
+            r#type: "dir".into(),
+            tags: String::new(),
+            in_degree: 0,
+            out_degree: 0,
+        });
+    }
+    // 目录父子边 + 目录→文件边（src=父，dst=子；渲染无向）
+    let mut structure_edges: Vec<EdgeInfo> = Vec::new();
+    for (i, d) in dirs.iter().enumerate() {
+        if let Some(idx) = d.rfind('/') {
+            let parent = &d[..idx];
+            if dir_set.contains(parent) {
+                structure_edges.push(EdgeInfo {
+                    src: parent.to_string(),
+                    dst_path: Some(d.clone()),
+                });
+            }
+        }
+        let _ = i;
+    }
+    for n in &nodes {
+        if let Some(idx) = n.path.rfind('/') {
+            let parent = &n.path[..idx];
+            if dir_set.contains(parent) {
+                structure_edges.push(EdgeInfo {
+                    src: parent.to_string(),
+                    dst_path: Some(n.path.clone()),
+                });
+            }
+        }
+    }
+
+    // 标签节点（思源式：#标签# 进图，文档↔标签边）——tags 字段是 frontmatter 原文（如 "[a, b]"）
+    let mut tag_nodes: Vec<NodeInfo> = Vec::new();
+    let mut tag_edges: Vec<EdgeInfo> = Vec::new();
+    {
+        let mut tag_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut tag_order: Vec<String> = Vec::new();
+        for n in &nodes {
+            let raw = n.tags.trim();
+            let stripped = raw
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or(raw);
+            for t in stripped.split(',') {
+                let t = t.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                let key = format!("#{t}#");
+                if tag_set.insert(key.clone()) {
+                    tag_order.push(key.clone());
+                }
+                tag_edges.push(EdgeInfo {
+                    src: n.path.clone(),
+                    dst_path: Some(key),
+                });
+            }
+        }
+        for key in &tag_order {
+            let name = key.trim_matches('#');
+            tag_nodes.push(NodeInfo {
+                path: key.clone(),
+                title: name.to_string(),
+                project: String::new(),
+                r#type: "tag".into(),
+                tags: String::new(),
+                in_degree: 0,
+                out_degree: 0,
+            });
+        }
+    }
+
+    Ok(GraphData {
+        nodes,
+        edges,
+        dir_nodes,
+        tag_nodes,
+        structure_edges,
+        tag_edges,
+    })
 }
 
 /// BFS 最短路径查询（A 和 B 什么关系）：返回路径链 [{path, title, type}]（含 from/to）。
@@ -1016,6 +1126,54 @@ mod tests {
         // 同文档 → 单节点
         let same = paths(&root, "notes/案件总览.md", "notes/案件总览.md", 6).unwrap();
         assert_eq!(same.len(), 1);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn graph_data_builds_dirs_and_tags() {
+        let root = test_root("dirs-tags");
+        // 带标签的子目录文档 + 根目录无标签文档
+        write(
+            &root,
+            "notes/子目录/a.md",
+            "---\ntitle: A\ntags: [案由, 民事]\n---\n# A\n\n无双链（孤立）\n",
+        );
+        write(
+            &root,
+            "notes/子目录/b.md",
+            "---\ntitle: B\ntags: [案由]\n---\n# B\n\n无双链（孤立）\n",
+        );
+        write(&root, "根文档.md", "# 根文档\n\n根目录无目录边\n");
+        let _ = sync_graph(&root).unwrap();
+        let data = graph_data(&root).unwrap();
+
+        // 目录节点：逐级父目录（notes、notes/子目录），去重
+        let mut dirs: Vec<&str> = data.dir_nodes.iter().map(|n| n.path.as_str()).collect();
+        dirs.sort();
+        assert_eq!(dirs, vec!["notes", "notes/子目录"]);
+        assert!(data.dir_nodes.iter().all(|n| n.r#type == "dir"));
+
+        // 结构边：目录父子 + 目录→文件（3 条）
+        assert_eq!(data.structure_edges.len(), 3);
+        assert!(data.structure_edges.iter().any(|e| e.src == "notes" && e.dst_path.as_deref() == Some("notes/子目录")));
+        assert!(data.structure_edges.iter().any(|e| e.src == "notes/子目录" && e.dst_path.as_deref() == Some("notes/子目录/a.md")));
+        // 根目录文档无目录边
+        assert!(!data.structure_edges.iter().any(|e| e.dst_path.as_deref() == Some("根文档.md")));
+
+        // 标签节点：去重共用
+        let mut tags: Vec<&str> = data.tag_nodes.iter().map(|n| n.path.as_str()).collect();
+        tags.sort();
+        assert_eq!(tags, vec!["#案由#", "#民事#"]);
+        assert!(data.tag_nodes.iter().all(|n| n.r#type == "tag"));
+        // 标签边：a→案由/民事，b→案由（3 条）
+        assert_eq!(data.tag_edges.len(), 3);
+        assert!(data.tag_edges.iter().any(|e| e.src == "notes/子目录/b.md" && e.dst_path.as_deref() == Some("#案由#")));
+
+        // 语义隔离：ref 边/度数/孤立不受结构边与标签边影响（无双链文档仍孤立）
+        assert_eq!(data.edges.len(), 0);
+        let a = data.nodes.iter().find(|n| n.path == "notes/子目录/a.md").unwrap();
+        assert_eq!((a.in_degree, a.out_degree), (0, 0), "结构/tag 边不计入度数");
+        assert_eq!(data.nodes.len(), 3, "nodes 仅文档");
         fs::remove_dir_all(&root).unwrap();
     }
 }

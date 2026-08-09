@@ -15,3 +15,7 @@ config.json
 /.build
 /target-e2e
 /dist-test
+
+# 项目制隔离区派生库（可由 md 重建）
+*.db
+*.db-*

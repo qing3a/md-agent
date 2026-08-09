@@ -227,6 +227,9 @@
     index:     { ico: '📑', color: '#7f849c', label: '索引' },
     note:      { ico: '📝', color: '#a6adc8', label: '笔记' },
     doc:       { ico: '📄', color: '#7f849c', label: '文档' },
+    // 思源式图增强（2026-08-09）：目录组织节点 + 标签聚合节点（进图渲染，不进树/统计）
+    dir:       { ico: '📁', color: '#585b70', label: '目录' },
+    tag:       { ico: '#',  color: '#b4befe', label: '标签' },
   };
   function typeMeta(t) { return TYPES[t] || TYPES.doc; }
   function typeIco(t) { return typeMeta(t).ico; }
@@ -237,7 +240,9 @@
   var typeFilter = {};
   function typeOn(t) { return typeFilter[t] !== false; }
 
-  var state = { nodes: [], edges: [], byPath: {}, sel: null };
+  var state = { nodes: [], edges: [], byPath: {}, sel: null,
+    // 思源式图增强：目录/标签节点与结构/标签边（独立数组，不污染 ref 语义）
+    dirNodes: [], tagNodes: [], structEdges: [], tagEdges: [], dirByPath: {}, tagOf: {} };
   var gfilter = { orphans: false, hang: false };
   var searchHits = [];   // 当前搜索命中的 path 集合
 
@@ -261,6 +266,9 @@
   function renderLegend() {
     var counts = {};
     state.nodes.forEach(function (n) { counts[n.type] = (counts[n.type] || 0) + 1; });
+    // 目录/标签节点计数入图例（树/统计不含，图例体现图内可见性）
+    state.dirNodes.forEach(function (n) { counts[n.type] = (counts[n.type] || 0) + 1; });
+    state.tagNodes.forEach(function (n) { counts[n.type] = (counts[n.type] || 0) + 1; });
     var chips = document.getElementById('lg-chips');
     chips.innerHTML = '';
     Object.keys(counts).sort(function (a, b) {
@@ -277,6 +285,12 @@
         c.classList.toggle('off', !typeOn(t));
         renderTree();
         renderHealth();
+        // 图随过滤重建（含 dir/tag 的组织/聚合节点）：不丢拖拽固定（fixed 按 path 保留）
+        if (!gpPanel.classList.contains('hidden')) {
+          if (gp.fullMode) buildFullGraph();
+          else buildLocalGraph();
+          scheduleGpFrame();
+        }
         if (gp.center && !typeOn(state.byPath[gp.center].type)) closeLocalGraph();
       });
       chips.appendChild(c);
@@ -396,7 +410,7 @@
 
   function openLocalGraph(path) {
     var n = state.byPath[path];
-    if (!n) return;
+    if (!n || n.type === 'dir' || n.type === 'tag') return; // 目录/标签节点无文档，不以之开局部图
     gp.center = path;
     gp.fullMode = false; // 局部聚焦模式（滑块深度生效）
     gp.depth = parseInt(document.getElementById('gp-depth').value, 10) || 1;
@@ -451,6 +465,7 @@
     gp.edges = edges.filter(function (e, i, arr) {
       return arr.findIndex(function (x) { return x.s === e.s && x.t === e.t; }) === i;
     });
+    attachExtras();
     var conn = {};
     gp.nodes.forEach(function (n) { conn[n.path] = 0; });
     gp.edges.forEach(function (e) { conn[e.s] = (conn[e.s] || 0) + 1; conn[e.t] = (conn[e.t] || 0) + 1; });
@@ -498,6 +513,7 @@
     gp.edges = edges.filter(function (e, i, arr) {
       return arr.findIndex(function (x) { return x.s === e.s && x.t === e.t; }) === i;
     });
+    attachExtras();
     var conn = {};
     gp.nodes.forEach(function (n) { conn[n.path] = 0; });
     gp.edges.forEach(function (e) { conn[e.s] = (conn[e.s] || 0) + 1; conn[e.t] = (conn[e.t] || 0) + 1; });
@@ -506,6 +522,53 @@
       (state.byPath[gp.center].title || gp.center.split('/').pop()) + ' 的关联';
     document.getElementById('gp-meta').textContent = gp.nodes.length + ' 节点 · ' + gp.edges.length + ' 边';
     layoutGp();
+  }
+  // 思源式图增强（2026-08-09）：给当前图补目录链（结构边）+ 标签节点（标签边）——
+  // 目录链递归到顶层、标签一层；随类型过滤（typeOn）开关；ref 语义不受影响（BFS/度数仍只走 state.edges）
+  function attachExtras() {
+    var haveN = {};
+    gp.nodes.forEach(function (n) { haveN[n.path] = 1; });
+    var extra = [];
+    function dirChain(p, hop) {
+      var idx = p.lastIndexOf('/');
+      if (idx <= 0) return;
+      var parent = p.slice(0, idx);
+      if (!state.dirByPath[parent]) return;
+      if (!haveN[parent]) { haveN[parent] = 1; extra.push({ path: parent, x: 0, y: 0, hop: hop }); }
+      dirChain(parent, hop);
+    }
+    if (typeOn('dir')) {
+      gp.nodes.forEach(function (n) { dirChain(n.path, n.hop); });
+    }
+    if (typeOn('tag')) {
+      gp.nodes.forEach(function (n) {
+        (state.tagOf[n.path] || []).forEach(function (tg) {
+          if (!haveN[tg]) { haveN[tg] = 1; extra.push({ path: tg, x: 0, y: 0, hop: n.hop }); }
+        });
+      });
+    }
+    if (extra.length) gp.nodes = gp.nodes.concat(extra);
+    // 边：结构边（目录→子目录/文件）+ 标签边（文档→标签），仅连两端都在图中的
+    var haveE = {};
+    gp.edges.forEach(function (e) { haveE[e.s + '→' + e.t] = 1; });
+    var extraE = [];
+    if (typeOn('dir')) {
+      state.structEdges.forEach(function (e) {
+        if (haveN[e.src] && haveN[e.dst_path] && !haveE[e.src + '→' + e.dst_path]) {
+          haveE[e.src + '→' + e.dst_path] = 1;
+          extraE.push({ s: e.src, t: e.dst_path, type: 'structure' });
+        }
+      });
+    }
+    if (typeOn('tag')) {
+      state.tagEdges.forEach(function (e) {
+        if (haveN[e.src] && haveN[e.dst_path] && !haveE[e.src + '→' + e.dst_path]) {
+          haveE[e.src + '→' + e.dst_path] = 1;
+          extraE.push({ s: e.src, t: e.dst_path, type: 'tag' });
+        }
+      });
+    }
+    if (extraE.length) gp.edges = gp.edges.concat(extraE);
   }
   function layoutGp() {
     var center = gp.nodes.find(function (n) { return n.path === gp.center; });
@@ -604,6 +667,14 @@
       var mb = typeMeta(state.byPath[e.t] && state.byPath[e.t].type);
       if (inPath) {
         gpCtx.strokeStyle = '#f9e2af'; gpCtx.lineWidth = 3; gpCtx.globalAlpha = 1;
+      } else if (e.type === 'structure') {
+        // 结构边（目录组织）：浅灰虚线，区别于知识关联
+        gpCtx.strokeStyle = 'rgba(108,112,134,0.55)'; gpCtx.setLineDash([5, 4]); gpCtx.lineWidth = 1;
+        gpCtx.globalAlpha = act ? 0.55 : 0.22;
+      } else if (e.type === 'tag') {
+        // 标签边（聚合）：紫系低透明
+        gpCtx.strokeStyle = 'rgba(180,190,254,0.5)'; gpCtx.lineWidth = 1;
+        gpCtx.globalAlpha = act ? 0.7 : 0.3;
       } else if (linked) {
         gpCtx.strokeStyle = '#cdd6f4'; gpCtx.lineWidth = 1.6; gpCtx.globalAlpha = 0.95;
       } else {
@@ -612,6 +683,7 @@
         gpCtx.strokeStyle = grad; gpCtx.lineWidth = 1; gpCtx.globalAlpha = act ? 0.10 : 0.32;
       }
       gpCtx.beginPath(); gpCtx.moveTo(a.x, a.y); gpCtx.lineTo(b.x, b.y); gpCtx.stroke();
+      gpCtx.setLineDash([]);
     });
     gpCtx.globalAlpha = 1;
     // 节点：度数定大小；hover 节点光晕；选中节点光环；邻域淡化
@@ -945,6 +1017,8 @@
   // ================= 树 =================
   function selectDoc(path) {
     state.sel = path;
+    var n = state.byPath[path];
+    if (!n || n.type === 'dir' || n.type === 'tag') return; // 目录/标签节点无文档详情，只保留选中态
     var lines = document.querySelectorAll('.file-line');
     for (var i = 0; i < lines.length; i++) {
       lines[i].classList.toggle('sel', lines[i].getAttribute('data-path') === path);
@@ -1224,8 +1298,18 @@
     var g = await hostApi('/api/graph/graph');
     state.nodes = g.nodes;
     state.edges = g.edges;
+    state.dirNodes = g.dir_nodes || [];
+    state.tagNodes = g.tag_nodes || [];
+    state.structEdges = g.structure_edges || [];
+    state.tagEdges = g.tag_edges || [];
     state.byPath = {};
     g.nodes.forEach(function (n) { state.byPath[n.path] = n; });
+    // 目录/标签节点进 byPath（渲染查类型用），但树/统计/搜索仍只走 state.nodes
+    state.dirByPath = {};
+    g.dir_nodes.forEach(function (n) { state.dirByPath[n.path] = n; state.byPath[n.path] = n; });
+    state.tagOf = {};
+    g.tag_nodes.forEach(function (n) { state.byPath[n.path] = n; state.tagOf[n.path] = []; });
+    g.tag_edges.forEach(function (e) { (state.tagOf[e.src] = state.tagOf[e.src] || []).push(e.dst_path); });
     if (!g.nodes.length) {
       document.getElementById('tree').innerHTML =
         '<div class="tree-empty">图谱为空，点击「同步」按钮或终端执行 /rescan 重建</div>';
