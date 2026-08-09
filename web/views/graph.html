@@ -9,12 +9,9 @@
   #wrap { display: flex; height: 100vh; }
   #main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 
-  /* ---- 顶栏（精简：标题 + 搜索 + 3 动作） ---- */
+  /* ---- 顶栏（宿主标题栏已显示标题；内部只放工具栏，避免两层标题栏） ---- */
   #toolbar { flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
     padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--bg2); }
-  #toolbar h1 { font-size: 14.5px; letter-spacing: .5px; color: var(--fg); margin: 0;
-    font-weight: 700; display: inline-flex; align-items: center; gap: 6px; }
-  #toolbar h1::before { content: '🕸'; font-size: 15px; }
   #search-wrap { position: relative; flex: 1; min-width: 160px; max-width: 380px; }
   #search { width: 100%; box-sizing: border-box; background: var(--chip2); color: var(--fg);
     border: 1px solid var(--border); border-radius: 8px; padding: 6px 30px 6px 10px; font-size: 12px; outline: none; }
@@ -33,9 +30,11 @@
   #search-drop .sd-t { overflow: hidden; text-overflow: ellipsis; }
   #search-drop .sd-p { color: var(--muted); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; }
   .tb-sp { flex: 1; }
-  .tbtn { background: var(--border); color: var(--fg); border: none; border-radius: 6px;
-    padding: 5px 10px; font-size: 12px; cursor: pointer; transition: background .15s, color .15s; }
-  .tbtn:hover { background: var(--border2); }
+  /* 头部按钮（与宿主标题栏按钮同风格：--chip 底圆角 6px） */
+  .tbtn { background: var(--chip); color: var(--fg); border: none; border-radius: 6px;
+    padding: 4px 12px; font-size: 12px; cursor: pointer; transition: background .15s, color .15s;
+    font-family: inherit; }
+  .tbtn:hover { background: var(--hover2); }
   .tbtn.on { background: var(--accent); color: #fff; }
   #gfilter-orphans, #gfilter-hang { padding: 3px 10px; }
 
@@ -167,9 +166,8 @@
 <div id="gp-tip"></div>
 <div id="wrap">
   <div id="main">
-    <!-- 顶栏：标题 + 搜索 + 动作 -->
+    <!-- 顶栏：搜索 + 动作（标题由宿主标题栏统一显示） -->
     <div id="toolbar">
-      <h1>🕸 知识图谱</h1>
       <div id="search-wrap">
         <input id="search" type="text" placeholder="搜索文档…（命中高亮并聚焦）" autocomplete="off" spellcheck="false">
         <span id="search-clear" title="清除">×</span>
@@ -178,6 +176,7 @@
       <span class="tb-sp"></span>
       <button class="tbtn" id="tree-toggle" title="显示/隐藏文档树">📁 树</button>
       <button class="tbtn" id="full-btn" title="回到全库图谱">⛶ 全图</button>
+      <button class="tbtn" id="reset-btn" title="重置视图（恢复默认过滤/深度/树开合）">↺ 重置</button>
       <button class="tbtn" id="refresh" title="重新加载图谱">↻</button>
     </div>
 
@@ -1475,6 +1474,22 @@
   bindGfilter(document.getElementById('gfilter-orphans'), 'orphans');
   bindGfilter(document.getElementById('gfilter-hang'), 'hang');
   document.getElementById('refresh').addEventListener('click', function () {
+    load();
+  });
+  // ↺ 重置视图：恢复默认过滤/深度/树开合（覆盖状态文件为默认 + 重载）
+  document.getElementById('reset-btn').addEventListener('click', function () {
+    typeFilter = {};
+    gfilter = { orphans: false, hang: false };
+    document.getElementById('gp-depth').value = '3';
+    document.body.classList.add('tree-open');
+    syncTreeBtn();
+    hostApi('/api/file', {
+      method: 'POST',
+      body: {
+        path: UI_STATE_KEY,
+        content: JSON.stringify({ typeFilter: {}, gfilter: { orphans: false, hang: false }, depth: 3, treeOpen: true }),
+      },
+    }).catch(function () { /* 覆盖失败则下次变化时再落盘 */ });
     load();
   });
 

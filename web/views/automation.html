@@ -12,13 +12,14 @@
   body { background: var(--bg); color: var(--fg);
     font: 13px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif;
     height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
-  header { display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+  header { display: flex; align-items: center; gap: 12px; padding: 8px 14px;
     border-bottom: 1px solid var(--line); }
   h1 { font-size: 15px; color: var(--cyan); }
   .sp { flex: 1; }
   button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
     border-radius: 7px; padding: 5px 14px; font-size: 12px; cursor: pointer; font-family: inherit; }
   button:hover { border-color: var(--blue); color: var(--blue); }
+  header button { background: var(--chip); border: none; border-radius: 6px; padding: 4px 12px; }
   button.primary { background: var(--green); color: var(--bg3); border-color: var(--green); font-weight: 600; }
   button.danger { background: var(--red); color: var(--bg3); border-color: var(--red); font-weight: 600; }
   button.ok { background: var(--green); color: var(--bg3); border-color: var(--green); font-weight: 600; }
@@ -146,7 +147,6 @@
 </head>
 <body>
 <header>
-  <h1>🔄 自动化</h1>
   <span class="sp"></span>
   <button onclick="refreshAll()">刷新</button>
 </header>

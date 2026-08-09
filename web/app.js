@@ -1974,11 +1974,34 @@
     t.appendCard(cardShell('c-link', h.head, h.rows), 'toolcard');
     t.endMsg();
   }
+  // 任务卡（第三批）：任务清单（状态徽标着色，纯展示；操作按钮后置）
+  const TASK_STATES = {
+    todo: { label: '待办', cls: '' },
+    doing: { label: '进行中', cls: 'c-k-evidence' },
+    done: { label: '完成', cls: 'c-k-ok' },
+    abandoned: { label: '放弃', cls: '' },
+  };
+  async function renderTaskCard(t) {
+    let r;
+    try { r = await api('/api/tasks'); } catch (e) { return; }
+    const items = r.tasks || [];
+    const rows = items.map((x) => {
+      const st = TASK_STATES[x.status] || { label: x.status || '待办', cls: '' };
+      const title = x.title || x.goal || ('任务 #' + x.id);
+      return '<div class="card-row"><span class="c-k ' + st.cls + '">' + st.label + '</span>' +
+        '<span class="c-txt" title="任务 #' + escHtml(String(x.id)) + '">' + escHtml(title) + '</span></div>';
+    }).join('');
+    const h = { head: '📋 任务 · ' + items.length + ' 项', rows: rows || '<div class="c-empty">✓ 无任务</div>' };
+    t.beginMsg('tool');
+    t.appendCard(cardShell('c-tasks', h.head, h.rows), 'toolcard');
+    t.endMsg();
+  }
   const CARD_RENDERERS = {
     'risk.check': renderRiskCard,
     'pending.list': renderPendingCard,
     'graph.linked': (t, a) => renderLinkCard(t, a, 'linked'),
     'graph.backlinks': (t, a) => renderLinkCard(t, a, 'backlinks'),
+    'tasks': renderTaskCard,
   };
   // 在工具行之后追加交互卡片（无渲染器/取数失败静默跳过，不打断回答）
   async function attachCard(t, toolName, args) {
