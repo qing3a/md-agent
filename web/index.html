@@ -69,6 +69,13 @@
   .sb-proj-head { cursor: pointer; border-radius: 6px; padding: 4px 6px; color: var(--muted); }
   .sb-proj-head:hover { background: var(--chip2); color: var(--fg); }
   .sb-proj-head.cur { color: var(--accent); font-weight: 700; }
+  /* AI 处理中运行指示（会话行运行点 / 首问顶部指示条） */
+  .sb-item.running { background: var(--accent-10); }
+  .run-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none;
+    animation: runPulse 1s ease-in-out infinite; }
+  @keyframes runPulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.75); } }
+  .sb-running { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 8px;
+    background: var(--accent-10); color: var(--accent); font-size: 12px; margin-bottom: 4px; }
   .sb-item-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--fg2); }
   .sb-item-meta { flex: none; font-size: 10.5px; color: var(--muted2); }
   .sb-item-x { flex: none; color: var(--muted); font-weight: 700; padding: 0 3px; border-radius: 4px; visibility: hidden; }

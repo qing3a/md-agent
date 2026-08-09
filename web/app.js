@@ -426,6 +426,7 @@
     }
     busy = true;
     setBusyUI();
+    if (!t.startsWith('/')) aiRunningOn(); // 非命令提问 = AI 问答 → 会话行运行图标
     try {
       await run(t);
     } catch (e) {
@@ -433,6 +434,7 @@
     } finally {
       busy = false;
       setBusyUI();
+      if (!t.startsWith('/')) aiRunningOff();
       showPrompt();   // 回答结束后重画输入框（上边框/输入行/下边框/状态行）
       updateTopTitle();
       refreshStatus();
@@ -678,6 +680,20 @@
   let sbSearchTimer = null;
   let sbCache = null;        // /api/sessions lite 列表缓存（8s 轮询指纹对比，变化才重绘——R6）
   let sbFingerprint = '';
+  let aiRunning = false;     // 当前是否有 AI 处理中（问答/App 请求）——侧边栏会话行显示运行图标
+  // AI 处理生命周期：开始/结束 → 重绘侧边栏（当前会话行 ⏳ / 首问顶部指示条）
+  function aiRunningOn() {
+    if (aiRunning) return;
+    aiRunning = true;
+    sbFingerprint = '';
+    paintSidebar();
+  }
+  function aiRunningOff() {
+    if (!aiRunning) return;
+    aiRunning = false;
+    sbFingerprint = '';
+    paintSidebar();
+  }
   // 单会话归档（侧边栏 ×）：只翻 status 字段（不覆盖完整归档版）；projId 非空时跨项目操作
   async function archiveSessionStatus(id, projId) {
     const hdrs = projId ? { 'X-Project': projId } : {};
@@ -718,6 +734,13 @@
       : [{ id: null, name: '个人空间', is_default: true, sessions: all }];
     const curId = (sessionFile || '').replace('sessions/', '').replace(/\.md$/, '');
     sbList.innerHTML = '';
+    // AI 处理中且首问会话文件未落盘（列表无对应行）→ 顶部指示条
+    if (aiRunning && !sessionFile) {
+      const runBar = document.createElement('div');
+      runBar.className = 'sb-running';
+      runBar.innerHTML = '<span class="run-dot"></span> AI 处理中…';
+      sbList.appendChild(runBar);
+    }
     const isCur = (g) => (g.id || null) === currentProject;
     let anySession = false;
     for (const g of groups) {
@@ -744,7 +767,7 @@
         sbList.appendChild(h);
         for (const s of items.slice(0, 60)) {
           const it = document.createElement('div');
-          it.className = 'sb-item' + (s.id === curId ? ' current' : '');
+          it.className = 'sb-item' + (s.id === curId ? ' current' : '') + (aiRunning && s.id === curId ? ' running' : '');
           const t = document.createElement('span');
           t.className = 'sb-item-title';
           t.textContent = String(s.title || s.id).slice(0, 24);
@@ -752,6 +775,13 @@
           const d = document.createElement('span');
           d.className = 'sb-item-meta';
           d.textContent = (s.count || 0) + ' 轮 · ' + (s.date || (s.mtime ? new Date(s.mtime * 1000).toISOString().slice(0, 10) : ''));
+          if (aiRunning && s.id === curId) {
+            // AI 处理中：当前会话行加运行点（思考/工具/回答全过程）
+            const run = document.createElement('span');
+            run.className = 'run-dot';
+            run.title = 'AI 处理中';
+            it.appendChild(run);
+          }
           const x = document.createElement('span');
           x.className = 'sb-item-x';
           x.textContent = '×';
@@ -3142,6 +3172,7 @@
       if (!text) { tab.iframe.contentWindow.postMessage({ type: 'agent:error', message: '空提问' }, '*'); return; }
       busy = true;
       setBusyUI();
+      aiRunningOn(); // App 请求同样标运行图标
       try {
         await runAsApp(text, tab);
       } catch (e) {
@@ -3149,6 +3180,7 @@
       } finally {
         busy = false;
         setBusyUI();
+        aiRunningOff();
         refreshStatus();
       }
       return;
