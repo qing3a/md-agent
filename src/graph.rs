@@ -1155,7 +1155,10 @@ pub struct SpreadResult {
     pub recalled: Vec<(String, f64, String)>,
 }
 
-/// 无向邻接表：引用边 1.0 + 规则边 0.8；标签/结构边不参与
+/// 无向邻接表：引用边 1.0 + 规则边 0.8；标签/结构边不参与。
+/// 度归一化（2026-08-11）：高入度"枢纽文档"（L1 导航/被广泛引用的核心笔记）作为扩散目标
+/// 时天然分虚高——边权按目标节点无向度数归一化 w/log2(1+deg)，压平枢纽噪声。
+/// deg=1 因子 1.0（普通文档不受影响），deg=10 压到 ~1/4。
 fn adjacency(conn: &Connection) -> Result<HashMap<String, Vec<(String, f64)>>, String> {
     let mut adj: HashMap<String, Vec<(String, f64)>> = HashMap::new();
     let mut add = |a: &str, b: &str, w: f64| {
@@ -1182,6 +1185,15 @@ fn adjacency(conn: &Connection) -> Result<HashMap<String, Vec<(String, f64)>>, S
     for row in rows.flatten() {
         add(&row.0, &row.1, RULE_EDGE_W);
     }
+    // 度归一化（第二遍）：目标节点度数越大，进入它的扩散分被压得越狠
+    let degs: HashMap<String, usize> =
+        adj.iter().map(|(k, v)| (k.clone(), v.len())).collect();
+    for neighbors in adj.values_mut() {
+        for (n, w) in neighbors.iter_mut() {
+            let d = degs.get(n).copied().unwrap_or(1).max(1);
+            *w /= (1.0 + d as f64).log2();
+        }
+    }
     Ok(adj)
 }
 
@@ -1204,8 +1216,13 @@ pub fn spread_activation(root: &Path, seeds: &[(String, f64)]) -> Result<SpreadR
         let Some(neighbors) = adj.get(f.as_str()) else { continue };
         for (n, w) in neighbors {
             if let Some(ns) = norm.get(n.as_str()) {
-                // n 也是命中 → f 获得簇提升（有图背书的命中上浮）
-                *boosted.entry(f.clone()).or_insert(0.0) += ns * w * CLUSTER_BOOST;
+                // n 也是命中 → f 获得簇提升（背书强度 = n 指向 f 的边权：
+                // 低度目标足额背书，枢纽目标被度数稀释）
+                let back_w = adj
+                    .get(n.as_str())
+                    .and_then(|ns2| ns2.iter().find(|(m, _)| m == f).map(|(_, w2)| *w2))
+                    .unwrap_or(*w);
+                *boosted.entry(f.clone()).or_insert(0.0) += ns * back_w * CLUSTER_BOOST;
                 continue;
             }
             if seed_set.contains(n.as_str()) {
@@ -1718,19 +1735,20 @@ mod tests {
         write(&root, "notes/C.md", "# C\n");
         sync_graph(&root).unwrap();
 
-        // 单种子 A：1 跳召回 B（1.0），2 跳召回 C（1.0×1.0×1.0×0.5=0.5，via=B）
+        // 单种子 A：1 跳召回 B（A→B 边权经度归一化：B 度 2 → 1/log2(3)=0.631），
+        // 2 跳召回 C（B→C：C 度 1 → 1.0；0.631×1.0×0.5=0.3155，via=B）
         let r = spread_activation(&root, &[("notes/A.md".into(), 1.0)]).unwrap();
         assert_eq!(r.recalled.len(), 2);
         let b = r.recalled.iter().find(|(f, _, _)| f == "notes/B.md").unwrap();
-        assert!((b.1 - 1.0).abs() < 1e-9);
+        assert!((b.1 - 0.6309).abs() < 1e-3, "1 跳经度归一化：{}", b.1);
         let c = r.recalled.iter().find(|(f, _, _)| f == "notes/C.md").unwrap();
-        assert!((c.1 - 0.5).abs() < 1e-9, "2 跳衰减 0.5");
+        assert!((c.1 - 0.3155).abs() < 1e-3, "2 跳衰减 0.5：{}", c.1);
         assert_eq!(c.2, "notes/B.md", "2 跳 via=中间节点");
 
-        // 种子 A+B 互链 → 簇提升（0.3 × 邻居归一化分 × 边权）
+        // 种子 A+B 互链 → 簇提升（0.3 × 邻居归一化分 × 边权，边权按目标节点度归一化）
         let r = spread_activation(&root, &[("notes/A.md".into(), 2.0), ("notes/B.md".into(), 1.0)]).unwrap();
-        assert!((r.boosted["notes/A.md"] - 0.3 * 0.5 * 1.0).abs() < 1e-9, "A 获 B 的簇提升");
-        assert!((r.boosted["notes/B.md"] - 0.3 * 1.0 * 1.0).abs() < 1e-9, "B 获 A 的簇提升");
+        assert!((r.boosted["notes/A.md"] - 0.3 * 0.5 * 1.0).abs() < 1e-9, "A 获 B 背书（B→A 目标 A 度 1 → 1.0）");
+        assert!((r.boosted["notes/B.md"] - 0.3 * 1.0 * 0.6309).abs() < 1e-3, "B 获 A 背书（A→B 目标 B 度 2 → 0.631）");
         fs::remove_dir_all(&root).unwrap();
     }
 
