@@ -198,7 +198,10 @@
     scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
   #stream::-webkit-scrollbar { width: 8px; }
   #stream::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-  #stream > * { margin: 0 auto; max-width: 820px; }
+  /* 子元素居中/限宽：排除 .msg（消息气泡各自控制对齐：user 右对齐靠 margin-left:auto，
+     assistant/tool 整宽左对齐；#stream > * 的 margin:0 auto 曾以 ID 优先级覆盖 .msg.user
+     的右对齐 → 用户消息被居中，feca0e1 遗留） */
+  #stream > *:not(.msg) { margin: 0 auto; max-width: 820px; }
   .row { margin-bottom: 8px; }
 
   /* 用户气泡（右对齐） */

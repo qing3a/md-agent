@@ -194,6 +194,7 @@
     }
     if (!parsed.length) term.writeln('（空会话，无内容可显示）');
     enhanceRefs(); // 恢复会话渲染完成后：历史回答中的 [文件:行号] 引用同样可点击
+    setEmptyState(false); // 恢复会话 = 对话页形态：输入框回底部（勿留首页居中态，否则首页输入框"复用"到对话页）
   }
 
   async function resumeCmd(arg) {
