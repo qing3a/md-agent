@@ -666,6 +666,33 @@
   .card .c-btn:hover { transform: translateY(-1px); box-shadow: 0 2px 6px var(--accent-12); }
   .card .c-btn:active { transform: translateY(0); }
 
+  /* ---- 消息操作（Open WebUI 式：用户消息 hover 出 ✏️🗑，AI 回答 hover 出 ↻） ---- */
+  .msg { position: relative; }
+  .msg-user-actions { display: flex; gap: 2px; justify-content: flex-end; margin-top: 6px;
+    opacity: 0; transition: opacity .15s; }
+  .msg.user:hover .msg-user-actions { opacity: 1; }
+  .msg-user-actions button { border: none; background: transparent; color: var(--muted);
+    cursor: pointer; font-size: 12px; padding: 3px 7px; border-radius: 6px; line-height: 1; font-family: inherit; }
+  .msg-user-actions button:hover { background: var(--chip3); color: var(--fg); }
+  .msg-regen { position: absolute; top: -10px; right: 6px; z-index: 2; border: 1px solid var(--border);
+    background: var(--bg2); color: var(--muted); border-radius: 50%; width: 26px; height: 26px;
+    font-size: 14px; cursor: pointer; opacity: 0; transition: opacity .15s; line-height: 1; }
+  .msg.assistant:hover .msg-regen { opacity: 1; }
+  .msg-regen:hover { color: var(--accent); border-color: var(--accent); }
+  /* 原地编辑态（Open WebUI 式：消息位置变输入框，Esc 取消 / Ctrl+Enter 确认） */
+  .msg-edit-box { width: 100%; }
+  .msg-edit-box textarea { width: 100%; box-sizing: border-box; resize: none; outline: none;
+    background: var(--input-bg); color: var(--fg); border: 1px solid var(--accent-25);
+    border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 13px; line-height: 1.6; }
+  .msg-edit-box textarea:focus { border-color: var(--accent); }
+  .msg-edit-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 6px; }
+  .msg-edit-actions button { border: 1px solid var(--border); background: var(--chip); color: var(--fg2);
+    border-radius: 6px; padding: 4px 12px; font-size: 12px; cursor: pointer; font-family: inherit; }
+  .msg-edit-actions button:hover { border-color: var(--accent); color: var(--fg); }
+  .msg-edit-actions .msg-edit-ok { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .msg-edit-actions .msg-edit-ok:hover { color: #fff; }
+  .msg-edit-hint { color: var(--muted); font-size: 11px; margin-top: 4px; }
+
   /* ---- 空状态 / 加载 ---- */
   .sb-empty { font-size: 12px; padding: 16px 8px; }
 

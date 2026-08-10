@@ -183,6 +183,7 @@
       if (String(p.q || '').trim()) {
         term.beginMsg('user');
         term.appendCard(escHtml(p.q));
+        attachUserActions(term.currentMsg());
         term.endMsg();
       }
       const a = String(p.a || '').trim();
@@ -194,7 +195,167 @@
     }
     if (!parsed.length) term.writeln('（空会话，无内容可显示）');
     enhanceRefs(); // 恢复会话渲染完成后：历史回答中的 [文件:行号] 引用同样可点击
+    attachRegenToLastAssistant();
     setEmptyState(false); // 恢复会话 = 对话页形态：输入框回底部（勿留首页居中态，否则首页输入框"复用"到对话页）
+  }
+
+  // ================= 消息操作：编辑 / 删除 / 重新生成 =================
+  // 交互借鉴 Open WebUI（hover 出按钮 / 原地编辑 / Esc 取消 / Ctrl+Enter 确认），
+  // 语义取 DeepSeek 线性截断（编辑或重生成 = 该轮之后全部移除，重新生成；不建分支树）
+  let editingMsg = null; // 正在编辑中的用户气泡（防重复进入/提交时先收起）
+
+  function attachUserActions(msgEl) {
+    if (!msgEl || msgEl.querySelector('.msg-user-actions')) return;
+    const act = document.createElement('div');
+    act.className = 'msg-user-actions';
+    act.innerHTML = '<button data-act="edit" title="编辑此消息并重新生成">✏️</button>' +
+      '<button data-act="del" title="删除此消息">🗑</button>';
+    msgEl.appendChild(act);
+  }
+  function attachRegenToLastAssistant() {
+    const msgs = document.querySelectorAll('#stream > .msg.assistant');
+    const last = msgs[msgs.length - 1];
+    if (!last || last.querySelector('.msg-regen')) return;
+    const btn = document.createElement('button');
+    btn.className = 'msg-regen';
+    btn.dataset.act = 'regen';
+    btn.title = '重新生成';
+    btn.textContent = '↻';
+    last.appendChild(btn);
+  }
+  // 取用户气泡正文行（appendCard 创建的 .row，直接子元素）
+  function userRowOf(msgEl) {
+    if (!msgEl) return null;
+    return msgEl.querySelector(':scope > .row');
+  }
+  // 截断：DOM 删该气泡之后所有流元素；sessionLog/history 按 DOM 位置同步移除
+  // （被操作的是第 k 条用户消息 → 日志从第 k 轮起截断；中断未入日志的轮按位置自然对齐）
+  function truncateFrom(msgEl) {
+    if (currentAbort) { try { currentAbort.abort(); } catch (e) { /* 忽略 */ } currentAbort = null; }
+    setStopBtn(false);
+    for (const k in exes) { const ex = exes[k]; if (ex && !ex.done) ex.done = true; }
+    activeExe = null;
+    let el = msgEl.nextElementSibling;
+    while (el) { const nx = el.nextElementSibling; el.remove(); el = nx; }
+    const userEls = [...document.querySelectorAll('#stream > .msg.user')];
+    const k = userEls.indexOf(msgEl);
+    if (k < 0) return;
+    if (sessionLog.length > k) sessionLog.length = k;
+    let seen = -1;
+    for (let i = 0; i < history.length; i++) {
+      if (history[i].role === 'user') {
+        seen++;
+        if (seen === k) { history.length = i; break; }
+      }
+    }
+    if (seen < k) { // history 缺该轮（中断未入）：截到最后一个 user 之前
+      let lastU = -1;
+      for (let i = history.length - 1; i >= 0; i--) { if (history[i].role === 'user') { lastU = i; break; } }
+      if (lastU >= 0) history.length = lastU;
+    }
+    saveHistory();
+  }
+  // 编辑/重生成确认后重新提交（跳过用户气泡渲染——原气泡已更新/保留）
+  async function reAsk(text) {
+    if (!text) return;
+    busy = true;
+    setBusyUI();
+    try { await run(text); }
+    catch (e) { term.writeln('\x1b[31m' + ((e && e.message) || e) + '\x1b[0m'); }
+    finally {
+      busy = false;
+      setBusyUI();
+      showPrompt();
+      updateTopTitle();
+      refreshStatus();
+    }
+  }
+  // ---- 原地编辑（Open WebUI 式） ----
+  function startEditMsg(msgEl) {
+    if (!msgEl || editingMsg || busy) return;
+    const contentRow = userRowOf(msgEl);
+    if (!contentRow) return;
+    editingMsg = msgEl;
+    const actRow = msgEl.querySelector('.msg-user-actions');
+    if (actRow) actRow.style.display = 'none';
+    contentRow.style.display = 'none';
+    const box = document.createElement('div');
+    box.className = 'msg-edit-box';
+    box.innerHTML = '<textarea rows="1"></textarea>' +
+      '<div class="msg-edit-actions"><button class="msg-edit-cancel">取消</button><button class="msg-edit-ok">确认并重发</button></div>' +
+      '<div class="msg-edit-hint">Ctrl+Enter 确认 · Esc 取消</div>';
+    const ta = box.querySelector('textarea');
+    ta.value = contentRow.textContent;
+    msgEl.insertBefore(box, contentRow);
+    const autogrow = () => { ta.style.height = 'auto'; ta.style.height = Math.min(200, ta.scrollHeight) + 'px'; };
+    autogrow();
+    ta.addEventListener('input', autogrow);
+    box.querySelector('.msg-edit-cancel').addEventListener('click', cancelEditMsg);
+    box.querySelector('.msg-edit-ok').addEventListener('click', () => confirmEditMsg());
+    ta.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') { ev.preventDefault(); cancelEditMsg(); }
+      else if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); confirmEditMsg(); }
+    });
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }
+  function cancelEditMsg() {
+    const msgEl = editingMsg;
+    editingMsg = null;
+    if (!msgEl) return;
+    const box = msgEl.querySelector('.msg-edit-box');
+    if (box) box.remove();
+    const contentRow = userRowOf(msgEl);
+    if (contentRow) contentRow.style.display = '';
+    const actRow = msgEl.querySelector('.msg-user-actions');
+    if (actRow) actRow.style.display = '';
+  }
+  function confirmEditMsg() {
+    const msgEl = editingMsg;
+    if (!msgEl) return;
+    const ta = msgEl.querySelector('.msg-edit-box textarea');
+    const text = (ta ? ta.value : '').trim();
+    if (!text) return; // 空内容禁保存（Open WebUI 同）
+    const contentRow = userRowOf(msgEl);
+    if (contentRow) contentRow.textContent = text;
+    cancelEditMsg(); // 还原显示（内容行已更新为新文本）
+    truncateFrom(msgEl);
+    reAsk(text);
+  }
+  // ---- 删除（软确认弹窗；线性截断 = 该轮之后全删） ----
+  async function delMsg(msgEl) {
+    if (!msgEl || busy || editingMsg) return;
+    const ok = await uiConfirm('删除这条消息及其后的回答？', { danger: true });
+    if (!ok) return;
+    truncateFrom(msgEl);
+    msgEl.remove();
+    if (!document.querySelector('#stream > .msg')) { setEmptyState(true); printBanner(); }
+    refreshStatus();
+  }
+  // ---- 重新生成（↻：从父用户消息起截断，重新提交） ----
+  function regenMsg(assistantEl) {
+    if (!assistantEl || busy || editingMsg) return;
+    let prev = assistantEl.previousElementSibling;
+    while (prev && !(prev.classList && prev.classList.contains('msg') && prev.classList.contains('user'))) {
+      prev = prev.previousElementSibling;
+    }
+    const contentRow = prev ? userRowOf(prev) : null;
+    if (!contentRow) return;
+    const text = contentRow.textContent;
+    truncateFrom(prev);
+    reAsk(text);
+  }
+  // 消息操作事件委托（一次绑定，按钮增删免挂点）
+  if (term.element) {
+    term.element.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-act]');
+      if (!btn) return;
+      const msgEl = btn.closest('.msg');
+      const act = btn.dataset.act;
+      if (act === 'edit') startEditMsg(msgEl);
+      else if (act === 'del') delMsg(msgEl);
+      else if (act === 'regen') regenMsg(msgEl);
+    });
   }
 
   async function resumeCmd(arg) {
@@ -417,6 +578,7 @@
     compClose();
     term.beginMsg('user');
     term.appendCard(escHtml(line));
+    attachUserActions(term.currentMsg());
     term.endMsg();
     line = '';
     term._input.value = '';
@@ -472,6 +634,7 @@
   async function submitCmd(text) {
     const t = String(text || '').trim();
     if (!t || cfCb) return;
+    if (editingMsg) cancelEditMsg(); // 直接提交新消息：先收起未完成的原地编辑
     if (busy && !isNavCmd(t)) return;   // 回答中：非导航命令仍拦截
     if (busy) {                          // 回答中导航：不动 busy/输入框，回答流继续，视图静默打开
       try { await run(t); } catch (e) { term.writeln('\x1b[31m' + ((e && e.message) || e) + '\x1b[0m'); }
@@ -2752,6 +2915,7 @@
       sessionLog.push({ q: question, a: cleanFull || '(无回答/中断)', ts: Date.now() });
       if (sessionLog.length > MAX_SESSION_LOG) sessionLog = sessionLog.slice(-MAX_SESSION_LOG);
       scheduleL0Snapshot();
+      attachRegenToLastAssistant(); // 回答完成：最后一条 AI 回答挂 ↻ 重生成
     } else if (t.exe.key) {
       // 后台完成：追加问答对到 exe 所属会话文件（缓冲已渲染过/待重放，记录必须归属正确）
       appendSessionQA(t.exe.key, question, cleanFull || '(无回答/中断)');
