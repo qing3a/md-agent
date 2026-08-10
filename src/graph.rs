@@ -43,6 +43,9 @@ fn connect(root: &Path) -> Result<Connection, String> {
             src      TEXT NOT NULL,
             dst_path TEXT NOT NULL,
             kind     TEXT NOT NULL DEFAULT '',
+            -- 定向即从属（2026-08-11 通用化）：directed=1 时 src 是父（如 案件→证据），
+            -- 前端骨架布局按定向边构建业务树；关联型规则边 directed=0（无向）
+            directed INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (src, dst_path)
          );
          CREATE INDEX IF NOT EXISTS idx_rule_dst ON rule_links(dst_path);",
@@ -59,6 +62,21 @@ fn connect(root: &Path) -> Result<Connection, String> {
     if !cols.iter().any(|c| c == "type") {
         conn.execute("ALTER TABLE documents ADD COLUMN type TEXT NOT NULL DEFAULT 'doc'", [])
             .map_err(|e| format!("迁移 type 列失败: {e}"))?;
+    }
+    // 存量 rule_links 库补 directed 列（新列随 CREATE 建立，旧库幂等 ADD）
+    let rule_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(rule_links)")
+        .map_err(|e| format!("读 rule_links 列失败: {e}"))?
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| format!("读 rule_links 列失败: {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+    if !rule_cols.iter().any(|c| c == "directed") {
+        conn.execute(
+            "ALTER TABLE rule_links ADD COLUMN directed INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("迁移 directed 列失败: {e}"))?;
     }
     // 索引统一在此建（新库/旧库都走到；旧库 batch 阶段已避开缺失列）
     conn.execute("CREATE INDEX IF NOT EXISTS idx_docs_type ON documents(type)", [])
@@ -189,32 +207,36 @@ fn text_matches(a: &str, b: &str) -> bool {
     short.chars().count() >= 2 && long.contains(short)
 }
 
-/// 无向边统一 (min, max) 方向入集（seen 去重：同对节点一条边，kind 首个 wins）
+/// 无向边统一 (min, max) 方向入集（seen 去重：同对节点一条边，kind 首个 wins）；
+/// 定向边（从属型，directed=true）保持 (父, 子) 顺序不排序——前端骨架布局的语义来源
 fn push_pair(
     seen: &mut std::collections::HashSet<(String, String)>,
-    out: &mut Vec<(String, String, String)>,
+    out: &mut Vec<(String, String, String, bool)>,
     a: &str,
     b: &str,
     kind: &str,
+    directed: bool,
 ) {
     if a == b {
         return;
     }
-    let (s, d) = if a < b {
+    let (s, d) = if directed || a < b {
         (a.to_string(), b.to_string())
     } else {
         (b.to_string(), a.to_string())
     };
     if seen.insert((s.clone(), d.clone())) {
-        out.push((s, d, kind.to_string()));
+        out.push((s, d, kind.to_string(), directed));
     }
 }
 
-/// 生成模板规则边：返回 (src, dst_path, kind)，已排序（src < dst，路径升序）
+/// 生成模板规则边：返回 (src, dst_path, kind, directed)——定向即从属（2026-08-11 通用化：
+/// 核心只认「定向/无向」语义，不认行业名；case-rel 是第一个从属型实例）。已排序（关联型
+/// src<dst；定向型 src=父）。
 fn rule_edges_for(
     docs: &[(String, String)],     // (path, type)
     contents: &[(String, String)], // (path, 原文)
-) -> Vec<(String, String, String)> {
+) -> Vec<(String, String, String, bool)> {
     let content_map: HashMap<&str, &str> =
         contents.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
     let mut by_project: HashMap<String, Vec<&(String, String)>> = HashMap::new();
@@ -222,13 +244,13 @@ fn rule_edges_for(
         by_project.entry(project_of(&d.0)).or_default().push(d);
     }
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
-    let mut out: Vec<(String, String, String)> = Vec::new();
+    let mut out: Vec<(String, String, String, bool)> = Vec::new();
     for group in by_project.values() {
-        // 律师：case ↔ party/evidence/timeline/law 同项目全连
+        // 律师：case ↔ party/evidence/timeline/law 同项目全连（定向：case 是父）
         let lawyer_types = ["party", "evidence", "timeline", "law"];
         for d in group.iter().filter(|d| d.1 == "case") {
             for o in group.iter().filter(|d| lawyer_types.contains(&d.1.as_str())) {
-                push_pair(&mut seen, &mut out, &d.0, &o.0, "case-rel");
+                push_pair(&mut seen, &mut out, &d.0, &o.0, "case-rel", true);
             }
         }
         // 猎头：字段/表格提取
@@ -273,7 +295,7 @@ fn rule_edges_for(
             };
             for (cp, cname) in &companies {
                 if text_matches(&cv, cname) {
-                    push_pair(&mut seen, &mut out, pp, cp, "position-company");
+                    push_pair(&mut seen, &mut out, pp, cp, "position-company", false);
                 }
             }
         }
@@ -281,12 +303,12 @@ fn rule_edges_for(
         for (cp, cells) in &candidates {
             for (pp, pname) in &positions {
                 if text_matches(cells, pname) {
-                    push_pair(&mut seen, &mut out, cp, pp, "candidate-position");
+                    push_pair(&mut seen, &mut out, cp, pp, "candidate-position", false);
                 }
             }
             for (mp, mname) in &companies {
                 if text_matches(cells, mname) {
-                    push_pair(&mut seen, &mut out, cp, mp, "candidate-company");
+                    push_pair(&mut seen, &mut out, cp, mp, "candidate-company", false);
                 }
             }
         }
@@ -294,12 +316,12 @@ fn rule_edges_for(
         for (cp, cells) in &comms {
             for (pp, pname) in &positions {
                 if text_matches(cells, pname) {
-                    push_pair(&mut seen, &mut out, cp, pp, "comm-rel");
+                    push_pair(&mut seen, &mut out, cp, pp, "comm-rel", false);
                 }
             }
             for (mp, mname) in &companies {
                 if text_matches(cells, mname) {
-                    push_pair(&mut seen, &mut out, cp, mp, "comm-rel");
+                    push_pair(&mut seen, &mut out, cp, mp, "comm-rel", false);
                 }
             }
         }
@@ -479,10 +501,10 @@ pub fn sync_graph(root: &Path) -> Result<GraphSyncReport, String> {
     let rule_rows = rule_edges_for(&typed, &contents);
     {
         let mut stmt = conn
-            .prepare("INSERT INTO rule_links (src, dst_path, kind) VALUES (?1, ?2, ?3)")
+            .prepare("INSERT INTO rule_links (src, dst_path, kind, directed) VALUES (?1, ?2, ?3, ?4)")
             .map_err(|e| format!("prepare rule_links 失败: {e}"))?;
-        for (s, d, k) in &rule_rows {
-            stmt.execute(params![s, d, k])
+        for (s, d, k, dir) in &rule_rows {
+            stmt.execute(params![s, d, k, if *dir { 1 } else { 0 }])
                 .map_err(|e| format!("插入规则边失败: {e}"))?;
         }
     }
@@ -654,12 +676,14 @@ pub struct EdgeInfo {
     pub dst_path: Option<String>,
 }
 
-/// 模板规则边（推导产物，非作者引用）：kind 标注规则来源（case-rel / position-company / candidate-* / comm-rel）
+/// 模板规则边（推导产物，非作者引用）：kind 标注规则来源（case-rel / position-company / candidate-* / comm-rel）；
+/// directed=true 时 src 是父（从属型，骨架布局按此构建业务树）
 #[derive(Debug, Serialize)]
 pub struct RuleEdge {
     pub src: String,
     pub dst_path: String,
     pub kind: String,
+    pub directed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -833,7 +857,7 @@ pub fn graph_data(root: &Path) -> Result<GraphData, String> {
     // 模板规则边（读表，不重新解析文件）
     let rule_edges: Vec<RuleEdge> = {
         let mut stmt = conn
-            .prepare("SELECT src, dst_path, kind FROM rule_links ORDER BY src, dst_path")
+            .prepare("SELECT src, dst_path, kind, directed FROM rule_links ORDER BY src, dst_path")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -841,11 +865,17 @@ pub fn graph_data(root: &Path) -> Result<GraphData, String> {
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
         rows.filter_map(Result::ok)
-            .map(|(src, dst_path, kind)| RuleEdge { src, dst_path, kind })
+            .map(|(src, dst_path, kind, directed)| RuleEdge {
+                src,
+                dst_path,
+                kind,
+                directed: directed != 0,
+            })
             .collect()
     };
 
@@ -1587,10 +1617,9 @@ mod tests {
         let data = graph_data(&root).unwrap();
         assert_eq!(data.rule_edges.len(), 4);
         assert!(data.rule_edges.iter().all(|e| e.kind == "case-rel"));
-        // 方向稳定：src < dst；每条都连到 case
-        assert!(data.rule_edges.iter().all(|e| e.src < e.dst_path));
+        // 定向即从属：src=案件总览（父），全部 directed
         let case = "notes/案件总览.md";
-        assert!(data.rule_edges.iter().all(|e| e.src == case || e.dst_path == case));
+        assert!(data.rule_edges.iter().all(|e| e.src == case && e.directed));
         // 规则边不进度数（ref 语义隔离）
         assert!(data.nodes.iter().all(|n| n.in_degree == 0 && n.out_degree == 0));
         // 孤立被规则边救活（audit + stats 同口径）
@@ -1633,6 +1662,8 @@ mod tests {
         assert!(kinds.contains(&"candidate-company"));
         assert!(kinds.contains(&"position-company"));
         assert!(kinds.contains(&"comm-rel"));
+        // 猎头规则边是关联型：全部无向（directed=false，src<dst）
+        assert!(data.rule_edges.iter().all(|e| !e.directed && e.src < e.dst_path));
         // 李四行（云启数据/产品经理）无对应目标，不额外产生边
         assert_eq!(data.rule_edges.len(), 4);
         // comm 只匹配公司（对象=蓝海科技，职位名=高级工程师 不匹配）
@@ -1816,6 +1847,12 @@ mod migration_tests {
             .exists([])
             .unwrap();
         assert!(has_rule, "迁移后应自动建 rule_links 表");
+        let has_dir: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('rule_links') WHERE name='directed'")
+            .unwrap()
+            .exists([])
+            .unwrap();
+        assert!(has_dir, "迁移后 rule_links 应有 directed 列");
         drop(conn); // 释放库句柄（WAL 文件锁），否则 remove_dir_all 失败
         // sync 后旧数据也能入库（type 缺省 doc）
         let _ = sync_graph(&root).unwrap();

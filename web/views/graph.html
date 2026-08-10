@@ -175,6 +175,7 @@
       </div>
       <span class="tb-sp"></span>
       <button class="tbtn" id="tree-toggle" title="显示/隐藏文档树">📁 树</button>
+      <button class="tbtn" id="view-mode" title="切换骨架/关联视角（骨架=层次树，关联=引用网）">🌲 骨架</button>
       <button class="tbtn" id="full-btn" title="回到全库图谱">⛶ 全图</button>
       <button class="tbtn" id="reset-btn" title="重置视图（恢复默认过滤/深度/树开合）">↺ 重置</button>
       <button class="tbtn" id="refresh" title="重新加载图谱">↻</button>
@@ -269,7 +270,10 @@
   function typeLabel(t) { return typeMeta(t).label; }
 
   // 类型过滤状态（legend 点击切换；off = 隐藏该类）
-  var typeFilter = {};
+  // 默认关 dir/tag（2026-08-11 C 降噪）：目录/标签是导航噪声，需要时图例开启；骨架视角不受此影响
+  var typeFilter = { dir: false, tag: false };
+  // 视角（2026-08-11 A 双骨架）：skeleton=层次放射树（定向规则边从属树 / 目录树），graph=引用关联网
+  var viewMode = 'skeleton';
   function typeOn(t) { return typeFilter[t] !== false; }
 
   var state = { nodes: [], edges: [], byPath: {}, sel: null,
@@ -291,6 +295,7 @@
       var payload = {
         typeFilter: typeFilter,
         gfilter: gfilter,
+        viewMode: viewMode,
         depth: parseInt((document.getElementById('gp-depth') || {}).value || '3', 10) || 3,
         treeOpen: document.body.classList.contains('tree-open'),
       };
@@ -306,6 +311,7 @@
         if (s.typeFilter && typeof s.typeFilter === 'object') {
           Object.keys(s.typeFilter).forEach(function (k) { typeFilter[k] = s.typeFilter[k]; });
         }
+        if (s.viewMode === 'graph' || s.viewMode === 'skeleton') viewMode = s.viewMode;
         if (s.gfilter) gfilter = Object.assign({ orphans: false, hang: false }, s.gfilter);
         if (s.depth) document.getElementById('gp-depth').value = String(Math.max(1, Math.min(6, s.depth)));
         if (s.treeOpen) document.body.classList.add('tree-open');
@@ -421,10 +427,10 @@
   var gpRaf = null;
   var gpTip = document.getElementById('gp-tip');
 
-  function initForces() {
+  function initForces(alpha0) {
     gp.vel = {};
     gp.nodes.forEach(function (n) { gp.vel[n.path] = { vx: 0, vy: 0 }; });
-    gp.alpha = 1;
+    gp.alpha = alpha0 === undefined ? 1 : alpha0;
   }
   function forceTick() {
     if (gp.alpha < 0.03) { gp.alpha = 0; return false; }
@@ -583,6 +589,94 @@
     var title = (state.byPath[gp.center].title || gp.center.split('/').pop()) + ' 的关联';
     finalizeGraph(title);
   }
+  // ================= 骨架视角：放射树（2026-08-11 A 双骨架） =================
+  // 骨架=层次（目录结构边 或 定向规则边 从属树），关联边只叠加绘制不参与布局。
+  // 通用语义：定向即从属——存在 directed 规则边 → 业务骨架（根=无入边的父）；
+  // 否则目录骨架（根=无入边的顶层目录）。静态布局（不跑力导向，根治同心圆被摧毁问题）。
+  function buildSkeletonGraph() {
+    var maxDepth = parseInt(depthInput.value, 10) || 3;
+    // 1) 骨架边与根
+    var dirEdges = state.ruleEdges.filter(function (e) { return e.directed; });
+    var isBiz = dirEdges.length > 0;
+    var skel = isBiz
+      ? dirEdges.map(function (e) { return { p: e.src, c: e.dst_path, kind: e.kind }; })
+      : state.structEdges
+          .filter(function (e) { return e.dst_path && state.dirByPath[e.src]; })
+          .map(function (e) { return { p: e.src, c: e.dst_path, kind: 'dir' }; });
+    if (!skel.length) { buildLocalGraph(); return; } // 空库兜底 → 关联视角
+    var children = {}, hasParent = {};
+    skel.forEach(function (e) {
+      (children[e.p] = children[e.p] || []).push(e.c);
+      hasParent[e.c] = true;
+    });
+    var roots = Object.keys(children).filter(function (p) { return !hasParent[p]; });
+    if (!roots.length) roots = [skel[0].p];
+    // 2) 子树叶子计数（角度分配权重：文件多的子树占大扇区）
+    var leafMemo = {};
+    function leafCount(p, depth) {
+      if (leafMemo[p]) return leafMemo[p];
+      if (depth > 30) return 1;
+      var kids = children[p] || [];
+      leafMemo[p] = kids.length ? kids.reduce(function (s, k) { return s + leafCount(k, depth + 1); }, 0) : 1;
+      return leafMemo[p];
+    }
+    // 3) 放射布局：角度区间按叶子比例，半径=深度×R
+    var g2 = { nodes: [], edges: [] };
+    var placed = {};
+    var R = Math.max(66, (gpCanvas.clientHeight || 400) * 0.24);
+    function place(p, depth, a0, a1) {
+      if (depth > maxDepth || placed[p]) return;
+      placed[p] = 1;
+      var mid = (a0 + a1) / 2;
+      g2.nodes.push({ path: p, x: Math.cos(mid) * R * depth, y: Math.sin(mid) * R * depth, hop: depth, skel: true });
+      var kids = children[p] || [];
+      var total = kids.reduce(function (s, k) { return s + leafCount(k, 0); }, 0) || 1;
+      var cur = a0;
+      kids.forEach(function (k) {
+        var span = (a1 - a0) * (leafCount(k, 0) / total);
+        if (depth + 1 <= maxDepth) {
+          place(k, depth + 1, cur, cur + span);
+          g2.edges.push({ s: p, t: k, type: 'skel' });
+        }
+        cur += span;
+      });
+    }
+    var span0 = (Math.PI * 2) / roots.length;
+    roots.forEach(function (r2, i) { place(r2, 1, i * span0, (i + 1) * span0); });
+    // 4) 骨架外节点（孤立/未入骨架）：最外环均分
+    var outer = R * (maxDepth + 0.6);
+    state.nodes.forEach(function (n) {
+      if (placed[n.path]) return;
+      g2.nodes.push({ path: n.path, x: 0, y: 0, hop: 99, skel: false });
+    });
+    var outerList = g2.nodes.filter(function (n) { return !n.skel; });
+    outerList.forEach(function (n, i) {
+      var ang = (i / Math.max(1, outerList.length)) * Math.PI * 2 - Math.PI / 2;
+      n.x = Math.cos(ang) * outer; n.y = Math.sin(ang) * outer;
+    });
+    // 5) 叠加关联边：引用/标签/关联规则边，两端都在当前节点集（不参与布局）
+    var haveN = {};
+    g2.nodes.forEach(function (n) { haveN[n.path] = 1; });
+    function overlay(edges, type) {
+      edges.forEach(function (e) {
+        if (e.src !== e.dst_path && haveN[e.src] && haveN[e.dst_path]) {
+          g2.edges.push({ s: e.src, t: e.dst_path, type: type });
+        }
+      });
+    }
+    overlay(state.edges, undefined); // 引用（默认渐变样式）
+    overlay(state.tagEdges, 'tag');
+    state.ruleEdges.forEach(function (e) {
+      if (!e.directed) overlay([e], 'rule');
+    });
+    // 6) 静态布局：不跑力导向
+    gp.nodes = g2.nodes;
+    gp.edges = g2.edges;
+    gp.center = roots[0];
+    gp.fullMode = true; // 深度滑块在骨架视角=层数
+    gp.alpha = 0;
+    finalizeGraph(isBiz ? '业务骨架' : '目录骨架');
+  }
   // 思源式图增强：目录链（结构边）+ 标签节点（标签边），随类型过滤开关
   function attachExtras() {
     var haveN = {};
@@ -643,6 +737,13 @@
     gp.nodes.forEach(function (n) { n.conn = conn[n.path] || 0; });
     document.getElementById('gp-title').textContent = title;
     document.getElementById('gp-meta').textContent = gp.nodes.length + ' 节点 · ' + gp.edges.length + ' 边';
+    if (viewMode === 'skeleton') {
+      // 骨架视角：静态布局（放射树坐标即最终形态），不跑力导向
+      gp.scale = 1; gp.ox = 0; gp.oy = 0;
+      gp.alpha = 0;
+      scheduleGpFrame();
+      return;
+    }
     layoutGp();
     scheduleGpFrame();
   }
@@ -656,10 +757,13 @@
       var hasEdge = gp.edges.some(function (e) { return e.s === n.path || e.t === n.path; });
       hops[n.path] = hasEdge ? 1 : 99;
     });
+    // B（2026-08-11）：结构/标签边脱钩 hop——目录/标签不污染层次计算（只算引用/规则边）
+    var sem = function (e) { return e.type !== 'structure' && e.type !== 'tag'; };
     var changed = true;
     while (changed) {
       changed = false;
       gp.edges.forEach(function (e) {
+        if (!sem(e)) return;
         var a = hops[e.s], b = hops[e.t];
         if (a + 1 < b) { hops[e.t] = a + 1; changed = true; }
         if (b + 1 < a) { hops[e.s] = b + 1; changed = true; }
@@ -676,7 +780,10 @@
     Object.keys(layers).forEach(function (h) {
       var arr = layers[h];
       if (h === '0') return;
+      // B：半径自适应——层内节点多时扩大圆环（每节点 ≥26px 弧长），节点少的层不空转
       var r = R * (h === '99' ? maxH + 0.6 : parseInt(h, 10));
+      var minR = (arr.length * 26) / (Math.PI * 2);
+      if (r < minR) r = minR;
       arr.forEach(function (n, i) {
         var ang = (i / arr.length) * Math.PI * 2 - Math.PI / 2;
         n.tx = Math.cos(ang) * r;
@@ -688,7 +795,7 @@
       n.x = n.tx; n.y = n.ty;
     });
     gp.scale = 1; gp.ox = 0; gp.oy = 0;
-    initForces();
+    initForces(0.3); // B：力微调（alpha 从 0.3 起跑，只微调不摧毁分层骨架）
   }
   function gpNodeR(n) { return n.path === gp.center ? 11 : 5 + Math.min(9, (n.conn || 0) * 1.8); }
   function gpNeighbors(path) {
@@ -750,6 +857,10 @@
       } else if (e.type === 'rule') {
         // 模板自动建边：accent 蓝点线（推导关联，区别于作者引用）
         gpCtx.strokeStyle = withAlpha(cv.accent, 1); gpCtx.setLineDash([2, 3]); gpCtx.lineWidth = 1;
+        gpCtx.globalAlpha = act ? 0.8 : 0.45;
+      } else if (e.type === 'skel') {
+        // 骨架边（目录层级/从属树）：浅灰实线，层次主干
+        gpCtx.strokeStyle = withAlpha(cv.muted, 1); gpCtx.lineWidth = 1.2;
         gpCtx.globalAlpha = act ? 0.8 : 0.45;
       } else if (linked) {
         gpCtx.strokeStyle = withAlpha(cv.fg, 1); gpCtx.lineWidth = 1.6; gpCtx.globalAlpha = 0.95;
@@ -888,13 +999,17 @@
   gpCanvas.addEventListener('dblclick', function (e) {
     var hit = gpHit(e);
     if (hit && hit.path !== gp.center && !hiddenSet[hit.path]) {
-      // 双击：以节点为中心重布局聚焦（局部模式，深度滑块生效）
+      // 双击：切到关联视角，以节点为中心重布局聚焦（局部模式，深度滑块=hop）
+      viewMode = 'graph';
+      syncViewBtn();
       gp.center = hit.path;
       gp.fullMode = false;
       gp.pathSet = null;
       gp.depth = parseInt(document.getElementById('gp-depth').value, 10) || 3;
       buildLocalGraph();
       selectDoc(hit.path);
+      syncDepthUI();
+      saveUiState();
     }
   });
   gpCanvas.addEventListener('click', function (e) {
@@ -937,27 +1052,56 @@
     gp.scale = Math.max(0.4, Math.min(3, gp.scale / 1.25));
     scheduleGpFrame();
   });
-  // 深度滑块：局部聚焦时生效；全库图禁用（P13：禁用态视觉）
+  // 深度滑块：骨架视角=展开层数（始终可用）；关联视角=局部聚焦 hop（全库禁用）
   var depthCtl = document.getElementById('depth-ctl');
   var depthInput = document.getElementById('gp-depth');
   function syncDepthUI() {
+    if (viewMode === 'skeleton') {
+      depthInput.disabled = false;
+      depthCtl.classList.remove('disabled');
+      return;
+    }
     depthInput.disabled = gp.fullMode;
     depthCtl.classList.toggle('disabled', gp.fullMode);
   }
   depthInput.addEventListener('input', function () {
-    if (gp.fullMode) return;
     gp.depth = parseInt(this.value, 10) || 1;
-    if (gp.center) buildLocalGraph();
+    if (viewMode === 'skeleton') {
+      buildSkeletonGraph();
+      gpFit();
+    } else if (!gp.fullMode && gp.center) {
+      buildLocalGraph();
+    }
     saveUiState();
   });
-  // ⛶ 全图：回全库图谱（唯一入口，替代旧「全屏/双栏」双旗标）
+  // ⛶ 全图：切回关联视角全库图谱（骨架视角下从「层级」回到「关联」）
   document.getElementById('full-btn').addEventListener('click', function () {
+    viewMode = 'graph';
+    syncViewBtn();
     gp.fullMode = true;
     gp.center = null;
     gp.pathSet = null;
     buildFullGraph();
     gpFit();
     syncDepthUI();
+    saveUiState();
+  });
+  // 🌲 骨架/关联视角切换（2026-08-11 A 双骨架）
+  var viewBtn = document.getElementById('view-mode');
+  function syncViewBtn() { viewBtn.classList.toggle('on', viewMode === 'skeleton'); }
+  viewBtn.addEventListener('click', function () {
+    viewMode = viewMode === 'skeleton' ? 'graph' : 'skeleton';
+    syncViewBtn();
+    if (viewMode === 'skeleton') {
+      buildSkeletonGraph();
+    } else if (gp.fullMode) {
+      buildFullGraph();
+    } else if (gp.center) {
+      buildLocalGraph();
+    }
+    gpFit();
+    syncDepthUI();
+    saveUiState();
   });
   // 📁 树抽屉开关
   var treeToggle = document.getElementById('tree-toggle');
@@ -1431,6 +1575,8 @@
     pendingHighlight = msg.path;
   });
   function doHighlight(path) {
+    viewMode = 'graph'; // 引用聚焦=关联语义，切回关联视角
+    syncViewBtn();
     expandToPath(path);
     selectDoc(path);
     gp.center = path;
@@ -1478,9 +1624,14 @@
     renderTree();
     renderHealth();
     renderStats();
-    // 默认 = 全库图谱 + 树抽屉开（无全屏黑幕；工具栏全部可用）
+    // 默认 = 骨架视角（层次树，3 层）+ 树抽屉开；「⛶ 全图」/「🌲」切换关联视角
     gp.fullMode = true;
-    buildFullGraph();
+    syncViewBtn();
+    if (viewMode === 'skeleton') {
+      buildSkeletonGraph();
+    } else {
+      buildFullGraph();
+    }
     syncDepthUI();
     gpFit();
     // P9：数据就绪后补执行引用高亮
@@ -1511,7 +1662,8 @@
   });
   // ↺ 重置视图：恢复默认过滤/深度/树开合（覆盖状态文件为默认 + 重载）
   document.getElementById('reset-btn').addEventListener('click', function () {
-    typeFilter = {};
+    typeFilter = { dir: false, tag: false };
+    viewMode = 'skeleton';
     gfilter = { orphans: false, hang: false };
     document.getElementById('gp-depth').value = '3';
     document.body.classList.add('tree-open');
@@ -1520,7 +1672,7 @@
       method: 'POST',
       body: {
         path: UI_STATE_KEY,
-        content: JSON.stringify({ typeFilter: {}, gfilter: { orphans: false, hang: false }, depth: 3, treeOpen: true }),
+        content: JSON.stringify({ typeFilter: { dir: false, tag: false }, gfilter: { orphans: false, hang: false }, viewMode: 'skeleton', depth: 3, treeOpen: true }),
       },
     }).catch(function () { /* 覆盖失败则下次变化时再落盘 */ });
     load();
