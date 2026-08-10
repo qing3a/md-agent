@@ -774,7 +774,24 @@ pub fn reject_pending(root: &Path, rel: &str) -> Result<usize, String> {
 /// 计算记忆条目将追加的文本（行级 diff 预览与落盘共用）
 fn memory_added_text(old: &str, content: &str) -> String {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let entry = content.trim();
+    // 剥离前导提示行（2026-08-11：LLM 提案的 "> 说明" 引用块与空行不进记忆）
+    let mut started = false;
+    let body: String = content
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            if !started && (t.starts_with('>') || t.is_empty()) {
+                return false; // 跳过提示行与前导空行
+            }
+            started = true;
+            true
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let entry = body.trim();
+    if entry.is_empty() {
+        return String::new(); // 只有提示行无可沉淀
+    }
     let strip = |s: &str| -> String { s.trim_start_matches(['-', '#', ' ']).trim().to_string() };
     if entry.starts_with("## ") {
         format!("\n\n{entry}\n")
@@ -1359,6 +1376,20 @@ mod tests {
         let d = memory_added_text("# 记忆\n\n## 2026-01-01\n- 旧\n", "新条目");
         assert!(d.contains(&format!("## {today}")), "无当日节则新建");
         assert!(!d.contains("2026-01-01"), "不触碰旧节");
+        fs::remove_dir_all(&std::env::temp_dir().join("md-agent-ut-rej")).ok();
+    }
+
+    #[test]
+    fn memory_added_strips_proposal_hint_lines() {
+        // 2026-08-11：LLM 提案的 "> 说明" 引用块与空行不进记忆
+        let hint = "> 会话收尾提炼（LLM 生成，批准前请人工核对）。\n\n## 决策\n- 双骨架方案\n\n## 经验\n- 及时沉淀\n";
+        let a = memory_added_text("", hint);
+        assert!(!a.contains("人工核对"), "提示行剥离");
+        assert!(!a.contains("> 会话"), "引用块不进记忆");
+        assert!(a.contains("## 决策"), "决策小节保留");
+        assert!(a.contains("双骨架方案"), "正文内容保留");
+        // 只有提示行 → 无可沉淀
+        assert_eq!(memory_added_text("# 记忆\n", "> 仅提示行\n"), "");
         fs::remove_dir_all(&std::env::temp_dir().join("md-agent-ut-rej")).ok();
     }
 

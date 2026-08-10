@@ -44,8 +44,6 @@ source: sessions/test.md
 target: MEMORY.md
 ---
 
-> 会话收尾提炼（LLM 生成，批准前请人工核对）。批准后按当日小节合并进 MEMORY.md。
-
 ## 决策
 - 图谱层次优化采用双骨架方案：目录放射树做通用骨架，定向规则边（case-rel）做业务骨架，力导向降级为微调。
 
