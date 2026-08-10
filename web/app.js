@@ -750,6 +750,25 @@
       headers: { 'Content-Type': 'application/json', ...hdrs },
       body: JSON.stringify({ path: 'sessions/' + id + '.md', content: next }),
     }).catch(() => {});
+    // 检索化：× 轻归档也落规则摘要到 notes/会话归档/（可检索层；LLM 完整版已存在则跳过，不覆盖）
+    try {
+      const ar = 'notes/会话归档/' + localToday() + '-' + id + '.md';
+      const exists = await api('/api/file?path=' + encodeURIComponent(ar), { headers: hdrs }).catch(() => null);
+      if (!exists || !exists.content) {
+        const qs = [...f.content.matchAll(/## Q: ([^\n]*)/g)].map((m) => '- ' + String(m[1]).slice(0, 40)).join('\n');
+        const title = ((f.content.match(/^title: (.+)$/m) || [])[1] || id).trim();
+        if (qs) {
+          await api('/api/file', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...hdrs },
+            body: JSON.stringify({
+              path: ar,
+              content: '---\ntype: session-archive\ndate: ' + localToday() + '\nsource: sessions/' + id + '.md\n---\n\n# 会话归档：' + title + '\n\n' + qs + '\n',
+            }),
+          }).catch(() => {});
+        }
+      }
+    } catch (e) { /* 摘要落盘失败不影响归档本身 */ }
   }
   // 会话重命名（豆包式 ⋯ 菜单）：改 frontmatter title（纯前端，POST /api/file）；projId 非空时跨项目操作
   async function renameSession(id, oldTitle, projId) {
