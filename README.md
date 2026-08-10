@@ -28,7 +28,7 @@
 
 - **全文检索**：内嵌 ripgrep 内核（grep + ignore crate），多关键词任一命中、智能大小写、小节上下文（`section`/`context`）
 - **知识图谱**：SQLite `documents`/`links` 两表：`[[双向链接]]` 解析、反向链接、孤立文档检测、标签/项目维度统计；首次调用自动建库，`/sync`、`/rescan` 或心跳自动重建
-- **图谱可视化（/view graph）**：打开即**全库大图**（Obsidian 式，默认全屏，可切「双栏」树+图）；度数最高文档为 hub 中心展开全部连通节点、孤立文档补最外环；hover 邻域高亮+其余淡化（画布↔树行双向）、节点大小∝连接数、缩放文字淡出、入场动画、节点拖拽固定、选中光环+相机平滑聚焦、搜索候选下拉带类型色点（命中即聚焦）、边按类型渐变着色、深度滑块 1-3
+- **图谱可视化（/view graph）**：沉浸画布 + 情境抽屉——图即页面主体（全窗口弹性画布），左树抽屉（可关）+ 右详情抽屉（选中滑出，详情/路径/健康标签页）+ 底部过滤条（类型 chips/孤立/悬空，渲染级过滤不丢布局）；单击聚焦+详情、点空白收起、双击以节点为中心重布局、⛶ 全图恢复；hover 邻域高亮、节点大小∝连接数、缩放文字淡出、拖拽固定、路径链橙色高亮；**思源式增强**：目录组织节点（结构边浅灰虚线）+ 标签节点（标签边紫色）进图；搜索候选带类型色点；UI 状态持久化（过滤/深度/树开合记忆）；canvas 颜色随主题（深/亮自适应）
 
 ### 终端交互
 
@@ -56,8 +56,19 @@
 
 ### Agent 与 LLM
 
-- **LLM 代理**：OpenAI 兼容（Ollama/DeepSeek 等），后端代理防 CORS 与密钥暴露；SSE 流式透传
-- **Agent 问答回路**：启动注入 L1 → 提取关键词 → 检索 L2 → 拼 Prompt → 流式回答 → `[文件:行号]` 引用（检索词当前为前端启发式提取；LLM 显式 Tool Use 见路线图 Phase 3-C P1）
+- **LLM 代理**：OpenAI 兼容（Ollama/DeepSeek 等），后端代理防 CORS 与密钥暴露；SSE 流式透传；联网通道（Responses API web_search，触发词或检索 0 命中自动开）
+- **Agent 问答回路**：启动注入 L1 → LLM 显式调工具（/api/tools 声明式清单：search/read_l1/memory_search/graph/risk.check/fetch/page/file/tasks/pending.list/dev 工具链等）→ 宿主执行回填 → 循环（上限 8 轮，强制回答轮兜底）→ 流式回答 → `[文件:行号]` 引用可点击跳图谱；**交互卡片**：工具结果旁路渲染对话流卡片（风控/待审/路径链/任务/链接卡，按钮直接操作，不污染 LLM 上下文）
+
+### 应用平台（工作台）
+
+- **工作台/应用市场**：`kb/apps/<id>/` 单文件 HTML 应用，沙箱 iframe + manifest 权限白名单（llm/storage/agent/search/graph/file/write…）；安装走 `/market import|install`（dry_run 人审确认），SkillHub 索引连接；侧边栏「工作台」子菜单展示已装应用前 3 个
+- **应用 × Agent 协作（agent:ask 通道）**：应用委托宿主 agent 全回路（知识库+工具+记忆）——context 结构化入参、结果 JSON 约定标记回推（`<!-- md-agent-app-data -->`）、应用任务授权（受信任应用的分析请求不被角色边界拒绝）；三应用已接入（猎头助手 L2 / 相亲评估 L2 / 招聘工作台 L0）
+- **应用空间（Phase A）**：每个应用私有知识层 `kb/apps/<id>/notes/`——`agent:ask space:true` 注入应用知识摘要、agent 可 file 读详情；桥写文件限定自己目录（防越权）；应用空间排除出主库检索/图谱/心跳
+- **AI 升级应用代码（自组织迭代）**：应用内「改进应用」→ agent 读自己代码 → dev.patch 生成改进提案（限定自己目录）→ 待审人审 → dev.apply 应用（备份/构建/回滚；纯应用文件跳过构建）
+
+### MCP 薄壳（对外能力出口）
+
+- **`md-agent --mcp`**：stdio JSON-RPC（MCP 协议），暴露 10 个纯本地工具（search/read_l1/memory_search/graph.linked/backlinks/paths/risk.check/file_read/pending.list/tasks）——Claude Code / DeepSeek Harness / Cursor 等 MCP 客户端一行配置接入，把 md-agent 当「知识/记忆/风控层」，推理由调用方负责（零 LLM 依赖）
 
 ### 常驻与运维
 
@@ -96,6 +107,7 @@
 cargo run                # 托盘模式（tray-icon + winit）
 cargo run -- --no-tray   # 纯服务模式（调试用）
 cargo run -- --port 9000 # 自定义端口（默认 8756）
+cargo run -- --mcp       # MCP 薄壳模式（stdio JSON-RPC，供 MCP 客户端一行配置接入）
 ```
 
 环境变量：`MD_AGENT_KB`（KB 根目录）、`MD_AGENT_PORT`、`MD_AGENT_CONFIG`（config.json 路径）、`MD_AGENT_NO_TRAY`（=1 等同 --no-tray）。
@@ -280,7 +292,8 @@ Phase 3-C Harness 深化（✅ P1/P3/P4 + SkillHub 接入已完成；P2 巩固�
          ├─ ✅ P4 App 系统（原 Phase 4 提前）：manifest + 权限白名单 + 生命周期（/api/market/*）+ 面板/托盘动态菜单 + 沙箱 iframe 渲染（/view）
          └─ ✅ SkillHub 接入：应用市场 = hub 管理端 + 客户端——**侧边栏入口已升级为「工作台」**（/view market：我的应用卡片网格 + 状态速览，纯应用启动器；应用市场收进右上角「🛒 应用市场」二级入口；项目空间/会话列表在左侧栏下方——顶部「🗂 项目空间」行点击切换 + 「进行中/会话列表」分组，目录/已安装双 Tab、打开默认「已安装」、目录已装应用排最前标注徽标）；/market connect 连接第三方 SkillHub（skillhub.md 索引协议），安装走命令行（人审确认）；本地导入兜底；market.connect 工具 + 技能触发（LLM 一句话连商店）；条目统一（应用与技能同目录，按包内容识别落点：app.json→kb/apps/，SKILL.md/裸 md→kb/skills/）
 Phase 4  生态化（可选，与"轻量"定位有张力，个人场景可长期搁置）
-         ├─ MCP 客户端（Stdio/SSE）；兼容标准 MCP App 渲染（复用统一 iframe 渲染层）
+         ├─ ✅ MCP **server** 出口已做（--mcp 薄壳：stdio JSON-RPC + 10 个纯本地工具，Claude Code/Harness 一行接入）
+         ├─ ▶ MCP **客户端**（Stdio/SSE，接第三方工具）未做；兼容标准 MCP App 渲染（复用统一 iframe 渲染层）
          └─ WASM 计算后端（仅当出现"本地运行不可信计算"的真实需求）
 ```
 
@@ -298,7 +311,7 @@ Phase 4  生态化（可选，与"轻量"定位有张力，个人场景可长期
 
 ## 已知短板与边界
 
-- 工具调用已 LLM 显式决策（/api/tools 声明式清单 + Agent Loop），但工具集仍为宿主内建（8+1 个），外部工具/MCP 客户端（Stdio/SSE）未做（Phase 4）
+- 工具调用已 LLM 显式决策（/api/tools 声明式清单 + Agent Loop）；**MCP server 出口已做**（`--mcp` 薄壳，纯本地工具），MCP **客户端**（接第三方 Stdio/SSE 工具）未做（Phase 4）
 - 无 Subagent / Multi-Agent：单 Agent 模型；`/task plan` 拆解由 LLM 一次性生成、宿主顺序执行
 - 记忆巩固器已实现（规则+LLM 两阶段、走待审通道），自动遗忘/降级与按任务动态注入的深化未做（Phase 3-C P2 余项）
 - Skills 注册表已就绪（/api/skills + trigger 触发注入），技能产物的质量收敛仍依赖人审（/approve）
@@ -352,10 +365,11 @@ src/fetch.rs      /fetch 静态网页抓取（HTTP + HTML 文本提取）
 src/page.rs       /page 动态网页 + /page act 动作执行（chromiumoxide + 系统 Edge/Chrome headless CDP）
 src/heartbeat.rs  心跳自动同步（指纹检测 / 状态结构）
 src/task.rs       任务引擎（kb/.tasks.db 独立库：状态机/依赖/日志）
+src/mcp.rs        MCP 薄壳（--mcp：stdio JSON-RPC + 工具映射，对外能力出口）
 src/kb.rs         双层记忆布局 / frontmatter 解析 / INDEX 自动生成 / 路径安全 / 待审机制
 src/config.rs     本地配置
 web/              xterm.js 终端前端（Agent 回路 + 管理命令）+ config.html 配置页
-web/views/        内置面板视图（graph.html 全库大图可视化 / automation.html 自动化三栏目 / market.html 应用市场 / board.html 任务看板）
+web/views/        内置面板视图（graph.html 沉浸画布图谱 / automation.html 自动化三栏目 / market.html 工作台 / board.html 任务看板 / home.html 功能首页）
 tests/web/        前端 node:test 纯逻辑测试（core.test.js / market.test.js）
 kb/               L1 规范层 + L2 内容层（首次运行自动补齐模板）
 scripts/          mock_llm.py / frontend-test.js / e2e.py / test.sh
