@@ -1020,7 +1020,7 @@
     ['/reject', '拒绝待审'], ['/view', '面板渲染层'], ['/audit', '知识库健康审计'], ['/risk', '风控预警（时效/证据/信息）'],
     ['/conflicts', '冲突检查'], ['/link', '补链接'],
     ['/link-all', '批量补链接'], ['/suggest', '补全缺失文档'], ['/fetch', '抓取网页'],
-    ['/page', '动态网页读取'], ['/task', '任务引擎'], ['/market', '工作台/应用市场'], ['/clear', '清空多轮记忆'],
+    ['/page', '动态网页读取'], ['/task', '任务引擎'], ['/skills', '技能商店/注册表'], ['/clear', '清空多轮记忆'],
     ['/config', '查看配置'], ['/heartbeat', '心跳自动同步'], ['/newproject', '新建项目'],
     ['clear', '清屏'],
   ];
@@ -1636,10 +1636,9 @@
       case '/approve': await pendingAct('approve', rest[0]); break;
       case '/reject': await pendingAct('reject', rest[0]); break;
       case '/view': await viewCmd(rest[0]); break;
-      case '/market': await marketCmd(rest); break;
+      case '/skills': await skillsCmd(rest); break;
       case '/side': toggleSide(); break;
       case '/consolidate': await consolidateCmd(rest[0]); break;
-      case '/skills': await skillsCmd(); break;
       case '/audit': await auditCmd(); break;
       case '/risk': await riskCmd(); break;
       case '/conflicts': await conflicts(); break;
@@ -1811,11 +1810,11 @@
       if (!items.length) return '无待审提案';
       return items.map((i) => (i.kind ? '[' + i.kind + '] ' : '') + i.title + '（' + i.path + '）').join('\n');
     },
-    'market.connect': (a) => api('/api/hubs/connect', {
+    'skills.connect': (a) => api('/api/hubs/connect', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url: a.hub_url || '' }),
     }),
-    'market.search': (a) => api('/api/hubs/search', {
+    'skills.search': (a) => api('/api/hubs/search', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ q: a.q || '' }),
     }),
@@ -2204,18 +2203,18 @@
       const t = r.tasks || [];
       return t.length ? t.map((x) => '#' + x.id + ' [' + x.status + '] ' + (x.title || x.goal)).join('\n') : '(无任务)';
     }
-    if (name === 'market.connect') {
+    if (name === 'skills.connect') {
       const h = r.hub;
       if (!h) return JSON.stringify(r).slice(0, 3000);
       const nApp = (h.apps || []).filter((a) => a.kind === 'app').length;
       const nSkill = (h.apps || []).length - nApp;
       const apps = (h.apps || []).map((a) => a.id + ' v' + a.version + (a.kind === 'skill' ? ' [技能]' : '') + ' ' + a.name + ' — ' + a.description).join('\n');
-      return '已连接 SkillHub「' + h.name + '」（分析出 ' + nApp + ' 个应用 + ' + nSkill + ' 个技能）：\n' + apps + '\n安装：/market install <id>（人审确认）';
+      return '已连接 SkillHub「' + h.name + '」（分析出 ' + nApp + ' 个应用 + ' + nSkill + ' 个技能）：\n' + apps + '\n安装：/skills install <id>（人审确认）';
     }
-    if (name === 'market.search') {
+    if (name === 'skills.search') {
       const apps = (r.apps || []);
       if (!apps.length) return '无匹配结果';
-      return apps.map((a) => a.id + ' v' + a.version + ' ' + a.name + ' — ' + a.description).join('\n') + '\n安装：/market install <id>（人审确认）';
+      return apps.map((a) => a.id + ' v' + a.version + ' ' + a.name + ' — ' + a.description).join('\n') + '\n安装：/skills install <id>（人审确认）';
     }
     if (name === 'dev.read') return String(r.content || '(空文件)').slice(0, 3000) + (r.path ? '\n[来源 ' + r.path + ']' : '');
     if (name === 'dev.status' || name === 'dev.diff') return String(r.output || '(无改动/无输出)');
@@ -3766,11 +3765,11 @@
     }
     // 收敛面板兼容：/view ops、/view pending、/view audit 统一映射到「自动化」面板（旧引用不失效）
     if (arg === 'ops' || arg === 'pending' || arg === 'audit') arg = 'automation';
-    if (arg === 'graph' || arg === 'board' || arg === 'automation' || arg === 'market' || arg === 'home' || arg === 'sessions' || arg === 'config' || arg === 'onboarding') {
+    if (arg === 'graph' || arg === 'board' || arg === 'automation' || arg === 'market' || arg === 'skills' || arg === 'home' || arg === 'sessions' || arg === 'config' || arg === 'onboarding') {
       const path = arg === 'config' ? '/config.html' : arg === 'onboarding' ? '/onboarding.html' : '/views/' + arg + '.html';
       const r = await fetch(path);
       if (!r.ok) throw new Error('内置视图加载失败: HTTP ' + r.status);
-      const titles = { graph: '知识图谱', board: '任务看板', automation: '自动化（控制 / 审核 / 运营数据）', market: '工作台', home: '功能首页', sessions: '历史会话', config: '设置', onboarding: '开始使用' };
+      const titles = { graph: '知识图谱', board: '任务看板', automation: '自动化（控制 / 审核 / 运营数据）', market: '工作台', skills: '技能（SkillHub 商店）', home: '功能首页', sessions: '历史会话', config: '设置', onboarding: '开始使用' };
       openView(titles[arg], await r.text(), null, { kind: 'builtin', arg });
       return;
     }
@@ -3795,13 +3794,31 @@
   })();
   renderSidebarApps(); // 启动渲染工作台子菜单（已安装应用前 3 个）
 
-  // ---------- 应用市场（阶段 2）：/market list | import <路径> | uninstall <id> | update <id> <路径> ----------
-  // ---------- SkillHub（阶段 4）：connect <url> | hubs | disconnect <name> | refresh <name> | catalog | install <id> ----------
-  async function marketCmd(args) {
-    const sub = (args && args[0]) || 'list';
+  // ---------- 技能（商店 + 注册表）：/skills connect|search|install|import|list|uninstall|update|hubs|disconnect|refresh|catalog ----------
+  // 无参 = 技能注册表列表（Agent 生成的技能提案经 /approve 后安装到 kb/skills/）
+  async function skillsCmd(args) {
+    if (!args || !args.length) {
+      const r = await api('/api/skills');
+      const sk = r.skills || [];
+      if (!sk.length) {
+        term.writeln('\x1b[90m技能库为空（侧边栏「🧩 技能」从 SkillHub 安装，或 Agent 生成的技能提案经 /approve 后入库）\x1b[0m');
+        return;
+      }
+      term.writeln('技能注册表（' + sk.length + ' 项）:');
+      for (const s of sk) {
+        term.writeln(
+          '  \x1b[35m' + s.title + '\x1b[0m' +
+          (s.trigger ? '  \x1b[90mtrigger: ' + s.trigger + '\x1b[0m' : '') +
+          '  \x1b[90m' + (s.desc || '') + '\x1b[0m'
+        );
+      }
+      term.writeln('\x1b[90m(提问命中 trigger 时技能正文自动注入)\x1b[0m');
+      return;
+    }
+    const sub = args[0];
     if (sub === 'connect') {
       const url = (args[1] || '').trim();
-      if (!url) { term.writeln('\x1b[33m用法：/market connect <hub-url>（默认 skillhub.cn 商店：https://skillhub.cn/install/skillhub.md）\n   git 仓库：git+https://github.com/user/skills-repo\n   GitHub zip：https://github.com/user/skills-repo/archive/refs/heads/main.zip\n   本地目录：local:C:/path/to/skills\n（skillhub.cn=API 检索商店；其他源=自动分析 md 文档生成目录；旧 skillhub.md 索引兼容）\x1b[0m'); return; }
+      if (!url) { term.writeln('\x1b[33m用法：/skills connect <hub-url>（默认 skillhub.cn 商店：https://skillhub.cn/install/skillhub.md）\n   git 仓库：git+https://github.com/user/skills-repo\n   GitHub zip：https://github.com/user/skills-repo/archive/refs/heads/main.zip\n   本地目录：local:C:/path/to/skills\n（skillhub.cn=API 检索商店；其他源=自动分析 md 文档生成目录；旧 skillhub.md 索引兼容）\x1b[0m'); return; }
       const r = await api('/api/hubs/connect', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url }),
@@ -3812,7 +3829,7 @@
       const kt = Object.keys(kinds).map((k) => kinds[k] + ' 个' + (k === 'app' ? '应用' : '技能')).join('、') || '0 个条目';
       term.writeln('\x1b[32m✓ 已连接 SkillHub: \x1b[0m' + h.name + '（分析出 ' + kt + '）');
       for (const a of h.apps) term.writeln('  \x1b[36m' + a.id + '\x1b[0m v' + a.version + (a.kind === 'skill' ? ' \x1b[90m[技能]\x1b[0m' : '') + '  ' + a.name + ' \x1b[90m' + a.description + '\x1b[0m');
-      term.writeln('安装：/market install <id>（人审确认）· /view market 查看目录');
+      term.writeln('安装：/skills install <id>（人审确认）· /view skills 查看目录');
       return;
     }
     if (sub === 'hubs') {
@@ -3824,12 +3841,12 @@
         const nSkill = h.apps.length - nApp;
         term.writeln('  \x1b[36m' + h.name + '\x1b[0m v' + h.version + ' · ' + nApp + ' 应用 + ' + nSkill + ' 技能 · ' + h.url);
       }
-      if (!hubs.length) term.writeln('  (无 —— /market connect <hub-url> 连接)');
+      if (!hubs.length) term.writeln('  (无 —— /skills connect <hub-url> 连接)');
       return;
     }
     if (sub === 'disconnect') {
       const name = (args[1] || '').trim();
-      if (!name) { term.writeln('\x1b[33m用法：/market disconnect <hub名>\x1b[0m'); return; }
+      if (!name) { term.writeln('\x1b[33m用法：/skills disconnect <hub名>\x1b[0m'); return; }
       // 断开可逆（随时可重连），免确认直接断开
       const r = await api('/api/hubs/disconnect', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -3840,7 +3857,7 @@
     }
     if (sub === 'refresh') {
       const name = (args[1] || '').trim();
-      if (!name) { term.writeln('\x1b[33m用法：/market refresh <hub名>\x1b[0m'); return; }
+      if (!name) { term.writeln('\x1b[33m用法：/skills refresh <hub名>\x1b[0m'); return; }
       const r = await api('/api/hubs/refresh', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name }),
@@ -3851,31 +3868,31 @@
     if (sub === 'catalog') {
       const a = await api('/api/market/catalog').catch(() => null);
       const apps = (a && a.apps) || [];
-      term.writeln('已连接 hub 目录（/market install <id> 安装）：');
+      term.writeln('已连接 hub 目录（/skills install <id> 安装）：');
       for (const app of apps) term.writeln('  \x1b[36m' + app.id + '\x1b[0m v' + app.version + (app.kind === 'skill' ? ' \x1b[90m[技能]\x1b[0m' : '') + '  ' + app.name + ' \x1b[90m[' + app.hub + ']\x1b[0m');
-      if (!apps.length) term.writeln('  (无 —— /market connect <hub-url> 连接第三方 SkillHub)');
+      if (!apps.length) term.writeln('  (无 —— /skills connect <hub-url> 连接第三方 SkillHub)');
       return;
     }
     if (sub === 'search') {
       const q = (args[1] || '').trim();
-      if (!q) { term.writeln('\x1b[33m用法：/market search <关键词>（检索 skillhub.cn 商店技能）\x1b[0m'); return; }
+      if (!q) { term.writeln('\x1b[33m用法：/skills search <关键词>（检索 skillhub.cn 商店技能）\x1b[0m'); return; }
       const r = await api('/api/hubs/search', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ q }),
       }).catch((e) => { term.writeln('\x1b[31m检索失败: ' + e.message + '\x1b[0m'); return null; });
       if (!r) return;
       const apps = (r.apps || []);
-      term.writeln('「' + q + '」搜索结果（/market install <id> 安装）：');
+      term.writeln('「' + q + '」搜索结果（/skills install <id> 安装）：');
       for (const app of apps) term.writeln('  \x1b[36m' + app.id + '\x1b[0m v' + app.version + '  ' + app.name + ' \x1b[90m' + app.description + '\x1b[0m');
       if (!apps.length) term.writeln('  (无匹配 —— 换个关键词试试)');
       return;
     }
     if (sub === 'install') {
       const id = (args[1] || '').trim();
-      if (!id) { term.writeln('\x1b[33m用法：/market install <id>（从已连接 hub 目录安装，人审确认）\x1b[0m'); return; }
+      if (!id) { term.writeln('\x1b[33m用法：/skills install <id>（从已连接 hub 目录安装，人审确认）\x1b[0m'); return; }
       const cat = await api('/api/market/catalog').catch(() => null);
       const entry = ((cat && cat.apps) || []).find((a) => a.id === id);
-      if (!entry) { term.writeln('\x1b[31m目录中找不到: \x1b[0m' + id + '（先 /market connect <hub-url>，/market catalog 看清单）'); return; }
+      if (!entry) { term.writeln('\x1b[31m目录中找不到: \x1b[0m' + id + '（先 /skills connect <hub-url>，/skills catalog 看清单）'); return; }
       // 1) dry_run（集合缓存直装 / source 下载校验并展示 manifest）→ 2) 人审确认 → 3) 落盘
       const installBody = entry.source ? { source: entry.source } : { hub: entry.hub, id: entry.id };
       const probe = await api('/api/market/install', {
@@ -3909,12 +3926,12 @@
       for (const app of (a && a.apps) || []) {
         term.writeln('  \x1b[36m' + app.id + '\x1b[0m v' + app.version + ' · 权限 [' + (app.permissions.join(', ') || '无') + ']  ' + app.name);
       }
-      if (!a || !a.apps || !a.apps.length) term.writeln('  (无 —— /market import <本地应用目录路径> 安装)');
+      if (!a || !a.apps || !a.apps.length) term.writeln('  (无 —— /skills import <本地应用目录路径> 安装)');
       return;
     }
     if (sub === 'import') {
       const path = args.slice(1).join(' ');
-      if (!path) { term.writeln('\x1b[33m用法：/market import <本地应用目录路径>\x1b[0m'); return; }
+      if (!path) { term.writeln('\x1b[33m用法：/skills import <本地应用目录路径>\x1b[0m'); return; }
       // 1) dry_run 校验并展示 manifest → 2) 人审确认 → 3) 落盘
       const probe = await api('/api/market/install', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -3943,7 +3960,7 @@
     }
     if (sub === 'uninstall') {
       const id = (args[1] || '').trim();
-      if (!id) { term.writeln('\x1b[33m用法：/market uninstall <id>\x1b[0m'); return; }
+      if (!id) { term.writeln('\x1b[33m用法：/skills uninstall <id>\x1b[0m'); return; }
       const ok = await confirm('确认卸载 ' + id + '？');
       if (!ok) { term.writeln('已取消'); return; }
       const r = await api('/api/market/uninstall', {
@@ -3956,7 +3973,7 @@
     if (sub === 'update') {
       const id = (args[1] || '').trim();
       const path = args.slice(2).join(' ');
-      if (!id || !path) { term.writeln('\x1b[33m用法：/market update <id> <本地新版本目录路径>\x1b[0m'); return; }
+      if (!id || !path) { term.writeln('\x1b[33m用法：/skills update <id> <本地新版本目录路径>\x1b[0m'); return; }
       const ok = await confirm('确认更新 ' + id + '？');
       if (!ok) { term.writeln('已取消'); return; }
       const r = await api('/api/market/update', {
@@ -3966,7 +3983,7 @@
       if (r) { term.writeln('\x1b[32m✓ 已更新: \x1b[0m' + r.app.id + ' v' + r.app.version); appsCache = null; refreshStatus(); }
       return;
     }
-    term.writeln('/market 子命令：\n  list                    已安装应用\n  connect <url>          连接第三方 SkillHub（如 skillhub.cn/install/skillhub.md）\n  hubs                    已连接 hub 列表\n  catalog                 已连接 hub 目录\n  install <id>            从目录安装（人审确认）\n  refresh <name>          刷新 hub 索引\n  disconnect <name>       断开 hub（已装应用不受影响）\n  import <路径>           从本地目录安装（人审确认，手动导入兜底）\n  uninstall <id>          卸载\n  update <id> <路径>       更新（本地新版本目录）');
+    term.writeln('/skills 子命令：\n  (无参)                 技能注册表列表\n  list                    已安装应用\n  connect <url>          连接第三方 SkillHub（默认 skillhub.cn/install/skillhub.md）\n  hubs                    已连接 hub 列表\n  catalog                 已连接 hub 目录\n  search <关键词>         检索 skillhub.cn 商店\n  install <id>            从目录安装（人审确认）\n  refresh <name>          刷新 hub 索引\n  disconnect <name>       断开 hub（已装应用不受影响）\n  import <路径>           从本地目录安装（人审确认，手动导入兜底）\n  uninstall <id>          卸载\n  update <id> <路径>       更新（本地新版本目录）');
   }
 
   // ---------- 命令面板 + 状态中心（Ctrl+K | /side | 速览按钮唤出；上部模糊搜索直达视图/命令/@文档，下部实时速览卡） ----------
@@ -3982,7 +3999,8 @@
     { k: '图谱', d: '知识图谱（类型化/局部图/关系探索）', run: '/view graph' },
     { k: '自动化', d: '自动化控制 + 审核 + 运营数据', run: '/view automation' },
     { k: '看板', d: '任务看板', run: '/view board' },
-    { k: '工作台', d: '我的应用 + 常用功能 + 应用市场', run: '/view market' },
+    { k: '技能', d: '技能商店：发现/检索/安装技能与应用（SkillHub）', run: '/view skills' },
+    { k: '工作台', d: '我的应用 + 任务入口', run: '/view market' },
   ];
   let sideTimer = null;   // 状态中心 8s 轮询（与状态行同源数据）
   let sideSel = -1;       // 候选选中下标
@@ -4150,25 +4168,6 @@
     } else {
       term.writeln('\x1b[90m无巩固提案（MEMORY 无重复行、无重复标题文档）\x1b[0m');
     }
-  }
-
-  // /skills：列出技能注册表（技能 = 程序性记忆，trigger 命中自动注入）
-  async function skillsCmd() {
-    const r = await api('/api/skills');
-    const sk = r.skills || [];
-    if (!sk.length) {
-      term.writeln('\x1b[90m技能库为空（Agent 生成的技能提案经 /approve 后安装到 kb/skills/）\x1b[0m');
-      return;
-    }
-    term.writeln('技能注册表（' + sk.length + ' 项）:');
-    for (const s of sk) {
-      term.writeln(
-        '  \x1b[35m' + s.title + '\x1b[0m' +
-        (s.trigger ? '  \x1b[90mtrigger: ' + s.trigger + '\x1b[0m' : '') +
-        '  \x1b[90m' + (s.desc || '') + '\x1b[0m'
-      );
-    }
-    term.writeln('\x1b[90m(提问命中 trigger 时技能正文自动注入)\x1b[0m');
   }
 
   // ---------- 记忆自组织（Phase 3-A：审计 / 补链接 / 补文档） ----------

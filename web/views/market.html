@@ -16,16 +16,13 @@
   h1 { font-size: 15px; color: var(--yellow); }
   .sp { flex: 1; }
   .meta { font-size: 11px; color: var(--dim); }
-  #hubcount { color: var(--purple); }
   button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
     border-radius: 7px; padding: 5px 14px; font-size: 12px; cursor: pointer; }
   button:hover { border-color: var(--blue); color: var(--blue); }
   button.primary { background: var(--green); color: var(--bg3); border-color: var(--green); font-weight: 600; }
   button.danger { background: var(--red); color: var(--bg3); border-color: var(--red); font-weight: 600; }
-  button:disabled { opacity: 0.4; cursor: default; }
   button.small { padding: 2px 8px; font-size: 11px; }
 
-  /* ---- 工作台视图 ---- */
   #wb { flex: 1; overflow: auto; padding: 14px 18px; }
   .wb-sec { margin-bottom: 18px; }
   .wb-sec-title { color: var(--dim); font-size: 12px; margin-bottom: 8px;
@@ -50,51 +47,6 @@
   .wb-status { display: flex; gap: 14px; flex-wrap: wrap; color: var(--dim); font-size: 11.5px;
     border-top: 1px solid var(--line); padding-top: 10px; }
   .wb-status b { color: var(--fg); }
-
-  /* ---- 市场视图（二级入口） ---- */
-  #mkt { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-  #mkt-back { display: flex; align-items: center; gap: 10px; padding: 8px 14px;
-    border-bottom: 1px solid var(--line); font-size: 11px; color: var(--dim); }
-  #main { flex: 1; display: flex; min-height: 0; }
-  .col { min-height: 0; }
-  #list-col { width: 260px; border-right: 1px solid var(--line); background: var(--panel);
-    display: flex; flex-direction: column; }
-  #tabs { display: flex; gap: 4px; padding: 8px 10px; }
-  .tab { flex: 1; background: transparent; border: 1px solid var(--line); border-radius: 6px;
-    padding: 4px 0; font-size: 12px; cursor: pointer; color: var(--dim); }
-  .tab.sel { background: var(--panel2); border-color: var(--blue); color: var(--blue); font-weight: 600; }
-  #search-bar { padding: 0 10px 6px; }
-  #search { width: 100%; background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
-    border-radius: 7px; padding: 6px 10px; font-size: 12px; outline: none; }
-  #search:focus { border-color: var(--blue); }
-  #search-hint { margin-top: 4px; font-size: 11px; color: var(--dim); min-height: 14px; }
-  #items { flex: 1; overflow: auto; padding: 0 10px 10px; }
-  #detail-col { flex: 1; overflow: auto; padding: 10px; }
-
-  .item { padding: 7px 10px; border-radius: 7px; cursor: pointer; margin-bottom: 4px; }
-  .item:hover { background: var(--panel2); }
-  .item.sel { background: var(--panel2); border: 1px solid var(--blue); }
-  /* 条目两行：第一行 name 弹性省略 + 徽标固定右侧；第二行 id·版本·来源 单行省略（窄列不换行不溢出） */
-  .item .n { display: flex; align-items: center; gap: 6px; }
-  .item .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-  .item .p { font-size: 10.5px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
-  .bdg { flex: none; font-size: 10px; line-height: 16px; padding: 0 7px; border-radius: 8px; border: 1px solid var(--line); }
-  .b-skill { color: var(--purple); }
-  .b-app { color: var(--blue); }
-  .b-inst { color: var(--green); border-color: var(--green); padding: 0 5px; }
-
-  #detail { padding: 14px; display: none; }
-  #detail h2 { font-size: 16px; margin-bottom: 4px; }
-  .meta { color: var(--dim); font-size: 12px; margin-bottom: 10px; }
-  .perms { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
-  .perm { background: var(--panel2); border: 1px solid var(--line); color: var(--blue);
-    border-radius: 10px; padding: 1px 10px; font-size: 11px; }
-  .desc { color: var(--fg); font-size: 12px; margin-bottom: 14px; }
-  .actions { display: flex; gap: 10px; align-items: center; }
-  .upd-hint { font-size: 11px; color: var(--dim); }
-  .empty { color: var(--dim); text-align: center; padding: 40px 10px; }
-  #hint { padding: 8px 14px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px; }
-  #hint code { color: var(--yellow); }
   .toast { position: fixed; bottom: 44px; left: 50%; transform: translateX(-50%);
     background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
     padding: 6px 14px; font-size: 12px; display: none; z-index: 12; }
@@ -109,20 +61,16 @@
   .ov-row { font-size: 12px; color: var(--dim); margin-bottom: 6px; word-break: break-all; }
   .ov-row b { color: var(--fg); }
   .ov-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
-  .ov-note { font-size: 11px; color: var(--dim); margin-top: 10px; }
 </style>
 </head>
 <body>
 <header>
-  <h1 id="wb-title">工作台</h1>
+  <h1>工作台</h1>
   <span id="wb-count" class="meta"></span>
-  <span id="hubcount" class="meta" title="已连接 SkillHub"></span>
-  <div class="sp"></div>
-  <button id="mkt-btn" title="连接 SkillHub / 浏览第三方目录 / 安装应用">🛒 应用市场</button>
-  <button id="refresh" style="display:none" title="刷新市场目录">刷新</button>
+  <span class="sp"></span>
+  <button id="to-skills" title="发现 / 安装 / 管理技能">🧩 技能</button>
 </header>
 
-<!-- 工作台视图（默认：我的应用 + 任务入口 + 状态速览） -->
 <div id="wb">
   <div class="wb-sec">
     <div class="wb-sec-title">我的应用 <span id="wb-appcount" class="meta"></span></div>
@@ -135,40 +83,6 @@
   <div class="wb-status" id="wb-status"></div>
 </div>
 
-<!-- 市场视图（二级入口：连接 hub / 目录 / 安装说明） -->
-<div id="mkt" style="display:none">
-  <div id="mkt-back">
-    <button id="mkt-back-btn">← 返回工作台</button>
-    <span id="count" class="meta"></span>
-    <span id="hubcount" class="meta" title="已连接 SkillHub"></span>
-    <span class="sp"></span>
-    <button id="connect">连接 hub</button>
-  </div>
-  <div id="main">
-    <div id="list-col" class="col">
-      <div id="tabs">
-        <button id="tab-catalog" class="tab">目录</button>
-        <button id="tab-installed" class="tab">已安装</button>
-      </div>
-      <div id="search-bar">
-        <input id="search" type="text" placeholder="🔍 检索 SkillHub 商店…" autocomplete="off">
-        <div id="search-hint" class="meta"></div>
-      </div>
-      <div id="items"></div>
-    </div>
-    <div id="detail-col" class="col">
-      <div id="detail">
-        <h2 id="d-name"></h2>
-        <div class="meta" id="d-meta"></div>
-        <div class="perms" id="d-perms"></div>
-        <div class="desc" id="d-desc"></div>
-        <div class="actions" id="d-actions"></div>
-      </div>
-      <div class="empty" id="empty"></div>
-    </div>
-  </div>
-  <div id="hint">连接 SkillHub：<code>连接 hub</code> 或终端 <code>/market connect &lt;url&gt;</code> · 支持 git 仓库 / GitHub zip / 本地目录（自动分析其中的 md 文档生成目录） · 安装走命令行（人审确认）：<code>/market install &lt;id&gt;</code> 或 <code>/market import &lt;路径&gt;</code> · 更新走 <code>/market update &lt;id&gt; &lt;路径&gt;</code> · 运行在宿主新标签打开</div>
-</div>
 <div id="toast" class="toast"></div>
 
 <!-- 软确认弹窗（替代原生 confirm） -->
@@ -184,12 +98,7 @@
 </div>
 
 <script>
-var hubs = [], catalog = [], apps = [];
-var catalogView = []; // 渲染用目录（已安装优先排序；与 data-i 索引保持一致）
-var loadedOnce = false; // 市场视图首次加载默认 Tab = 已安装（有已装应用时）
-var tab = 'catalog'; // 'catalog' | 'installed'（市场视图内）
-var sel = null; // { kind: 'cat' | 'inst', ...条目字段 }
-var view = 'wb'; // 'wb' 工作台 | 'mkt' 市场
+var apps = [];
 var wbStats = { documents: 0, links: 0, pending: 0, tasks: 0 };
 
 function $(id) { return document.getElementById(id); }
@@ -215,7 +124,7 @@ function renderWorkbench() {
   var box = $('wb-apps');
   $('wb-appcount').textContent = apps.length + ' 个';
   if (!apps.length) {
-    box.innerHTML = '<div class="wb-empty">还没有应用 —— 点右上角「🛒 应用市场」浏览目录或终端 <code>/market import &lt;路径&gt;</code> 导入</div>';
+    box.innerHTML = '<div class="wb-empty">还没有应用 —— 侧边栏「🧩 技能」发现/安装技能与应用，或终端 <code>/skills import &lt;路径&gt;</code> 导入</div>';
   } else {
     box.innerHTML = apps.map(function (a) {
       return '<div class="wb-card" data-id="' + esc(a.id) + '">' +
@@ -252,119 +161,9 @@ $('wb-quick').addEventListener('click', function (e) {
   var el = e.target.closest('[data-cmd]');
   if (el) window.parent.postMessage({ type: 'cmd', cmd: el.getAttribute('data-cmd') }, '*');
 });
-function showView(v) {
-  view = v;
-  $('wb').style.display = v === 'wb' ? 'block' : 'none';
-  $('mkt').style.display = v === 'mkt' ? 'flex' : 'none';
-  $('mkt-btn').style.display = v === 'wb' ? '' : 'none';
-  $('refresh').style.display = v === 'mkt' ? '' : 'none';
-  $('wb-title').textContent = v === 'wb' ? '工作台' : '应用市场';
-  if (v === 'mkt') loadMarket();
-  if (v === 'wb') load();
-}
-
-// ================= 市场视图 =================
-function permHtml(perms) {
-  return (perms && perms.length)
-    ? perms.map(function (p) { return '<span class="perm">' + esc(p) + '</span>'; }).join('')
-    : '<span class="perm" style="color:var(--dim)">无权限</span>';
-}
-function render() {
-  $('hubcount').textContent = hubs.length ? '⚡ ' + hubs.length + ' hub' : '';
-  $('count') && ($('count').textContent = (tab === 'catalog' ? catalog.length + ' 个可用' : apps.length + ' 个已安装'));
-  $('tab-catalog').classList.toggle('sel', tab === 'catalog');
-  $('tab-installed').classList.toggle('sel', tab === 'installed');
-  var sbar = $('search-bar');
-  if (sbar) sbar.style.display = tab === 'catalog' ? '' : 'none';
-  var items = $('items');
-  if (tab === 'catalog') {
-    // 已安装优先：目录里已装的应用排最前并标注（打开市场最关心自己装了什么）
-    var instIds = {};
-    apps.forEach(function (a) { instIds[a.id] = true; });
-    catalogView = catalog.slice().sort(function (a, b) {
-      return (instIds[a.id] ? 0 : 1) - (instIds[b.id] ? 0 : 1);
-    });
-    items.innerHTML = catalogView.map(function (a, i) {
-      var kindBadge = '<span class="bdg ' + (a.kind === 'skill' ? 'b-skill' : 'b-app') + '">' + (a.kind === 'skill' ? '技能' : '应用') + '</span>';
-      var instBadge = instIds[a.id] ? '<span class="bdg b-inst" title="已安装">✓</span>' : '';
-      // 搜索结果条目无 hub 字段 → 兜底 skillhub.cn（检索仅对 skillhub 商店生效）
-      return '<div class="item' + (sel && sel.kind === 'cat' && sel.id === a.id ? ' sel' : '') + '" data-i="' + i + '">' +
-        '<div class="n"><span class="nm" title="' + esc(a.name) + '">' + esc(a.name) + '</span>' + kindBadge + instBadge + '</div>' +
-        '<div class="p" title="' + esc(a.id) + '">' + esc(a.id) + (a.version ? ' · v' + esc(a.version) : '') + ' · [' + esc(a.hub || 'skillhub.cn') + ']</div></div>';
-    }).join('');
-  } else {
-    items.innerHTML = apps.map(function (a, i) {
-      var perms = (a.permissions || []).filter(Boolean);
-      return '<div class="item' + (sel && sel.kind === 'inst' && sel.id === a.id ? ' sel' : '') + '" data-i="' + i + '">' +
-        '<div class="n"><span class="nm" title="' + esc(a.name) + '">' + esc(a.name) + '</span>' +
-        (a.version ? '<span class="bdg" style="color:var(--dim)">v' + esc(a.version) + '</span>' : '') + '</div>' +
-        '<div class="p" title="' + esc(a.id) + '">' + esc(a.id) +
-        (perms.length ? ' · [' + esc(perms.join(',')) + ']' : '') +
-        (a.source_hub ? ' · [' + esc(a.source_hub) + ']' : '') + '</div></div>';
-    }).join('');
-  }
-  var empty = $('empty');
-  var has = tab === 'catalog' ? catalog.length : apps.length;
-  if (!has) {
-    empty.style.display = 'block';
-    empty.innerHTML = tab === 'catalog'
-      ? '未连接 SkillHub<br><br>点右上角 <code>连接 hub</code> 或终端 <code>/market connect &lt;url&gt;</code>'
-      : '无已安装应用<br><br>从「目录」Tab 安装，或终端 <code>/market import &lt;路径&gt;</code>';
-    $('detail').style.display = 'none';
-  } else {
-    empty.style.display = 'none';
-    if (sel) showDetail(sel); else $('detail').style.display = 'none';
-  }
-}
-function showDetail(s) {
-  sel = s;
-  $('detail').style.display = 'block';
-  $('d-name').textContent = s.name + '  v' + s.version;
-  var meta = 'id: ' + s.id;
-  if (s.entry) meta += ' · entry: ' + s.entry;
-  if (s.rel) meta += ' · 文件: ' + s.rel;
-  if (s.hub) meta += ' · 来源 ' + s.hub;
-  else if (s.source_hub) meta += ' · 来源 ' + s.source_hub;
-  else if (s.kind === 'inst') meta += ' · 来源 本地导入';
-  $('d-meta').textContent = meta;
-  $('d-perms').innerHTML = permHtml(s.permissions);
-  $('d-desc').textContent = s.description || '(无描述)';
-  var acts = $('d-actions');
-  if (s.kind === 'cat') {
-    // 目录条目只浏览：安装走命令行（第三方 hub 无稳定 API，安装需显式确认来源）
-    acts.innerHTML = '<span class="upd-hint">安装（人审确认）：<code>/market install ' + esc(s.id) + '</code>（应用或技能按内容自动识别）<br>兜底：<code>/market import &lt;路径&gt;</code> 手动导入</span>';
-  } else {
-    acts.innerHTML = '<button id="act-run" class="primary">运行</button>' +
-      '<button id="act-uninstall" class="danger">卸载</button>' +
-      '<span class="upd-hint">更新：/market update ' + esc(s.id) + ' &lt;路径&gt;</span>';
-    $('act-run').addEventListener('click', function () { runApp(s.id); });
-    $('act-uninstall').addEventListener('click', function () { uninstallApp(s.id, s.name); });
-  }
-  renderListSel();
-}
-function renderListSel() {
-  Array.prototype.forEach.call(document.querySelectorAll('#items .item'), function (el) {
-    el.classList.toggle('sel', sel && el.dataset.i && currentList()[+el.dataset.i] && currentList()[+el.dataset.i].id === sel.id);
-  });
-}
-function currentList() { return tab === 'catalog' ? catalogView : apps; }
-
-$('items').addEventListener('click', function (e) {
-  var el = e.target.closest('.item');
-  if (!el) return;
-  var i = +el.dataset.i;
-  var list = currentList();
-  if (!list[i]) return;
-  var a = list[i];
-  showDetail({ kind: tab === 'catalog' ? 'cat' : 'inst', id: a.id, name: a.name, version: a.version,
-    entry: a.entry, permissions: a.permissions, description: a.description, hub: a.hub, source_hub: a.source_hub, rel: a.rel });
+$('to-skills').addEventListener('click', function () {
+  window.parent.postMessage({ type: 'cmd', cmd: '/view skills' }, '*');
 });
-
-$('tab-catalog').addEventListener('click', function () { tab = 'catalog'; sel = null; render(); });
-$('tab-installed').addEventListener('click', function () { tab = 'installed'; sel = null; render(); });
-$('refresh').addEventListener('click', loadMarket);
-$('mkt-btn').addEventListener('click', function () { showView('mkt'); });
-$('mkt-back-btn').addEventListener('click', function () { showView('wb'); });
 
 // ---------- 运行 / 卸载 ----------
 function runApp(id) {
@@ -375,44 +174,9 @@ function uninstallApp(id, name) {
     if (!ok) return;
     hostApi('/api/market/uninstall', { method: 'POST', body: { id: id } }).then(function () {
       toast('✓ 已卸载 ' + id, true);
-      sel = null;
       return load();
     }).catch(function (e) { toast('卸载失败: ' + e.message, false); });
   });
-}
-
-// ---------- 连接 hub ----------
-$('connect') && $('connect').addEventListener('click', function () {
-  var url = prompt('输入 SkillHub 来源：\n· skillhub.cn 商店（默认，检索+榜单）https://skillhub.cn/install/skillhub.md\n· git 仓库  git+https://github.com/user/skills-repo\n· GitHub zip https://github.com/user/skills-repo/archive/refs/heads/main.zip\n· 本地目录  local:C:/path/to/skills', 'https://skillhub.cn/install/skillhub.md');
-  if (!url) return;
-  hostApi('/api/hubs/connect', { method: 'POST', body: { url: url.trim() } }).then(function (r) {
-    var kinds = {}; (r.hub.apps || []).forEach(function (a) { kinds[a.kind] = (kinds[a.kind] || 0) + 1; });
-    var kt = Object.keys(kinds).map(function (k) { return kinds[k] + ' 个' + (k === 'app' ? '应用' : '技能'); }).join('、') || '0 个条目';
-    toast('✓ 已连接 ' + r.hub.name + '（' + kt + '）', true);
-    tab = 'catalog'; sel = null;
-    return loadMarket();
-  }).catch(function (e) { toast('连接失败: ' + e.message, false); });
-});
-
-// ---------- 检索 SkillHub（skillhub.cn API） ----------
-var searchTimer = null;
-function bindSearch() {
-  var box = $('search');
-  if (!box) return;
-  box.addEventListener('input', function () {
-    clearTimeout(searchTimer);
-    var q = box.value.trim();
-    if (!q) { sel = null; return loadMarket(); }
-    searchTimer = setTimeout(function () {
-      hostApi('/api/hubs/search', { method: 'POST', body: { q: q } }).then(function (r) {
-        catalog = r.apps || [];
-        $('search-hint').textContent = '「' + q + '」搜索结果 ' + catalog.length + ' 条（/market install <id> 安装）';
-        sel = null;
-        render();
-      }).catch(function (e) { toast('检索失败: ' + e.message, false); });
-    }, 450);
-  });
-  box.addEventListener('keydown', function (e) { if (e.key === 'Enter') box.blur(); });
 }
 
 // ---------- 数据加载 ----------
@@ -431,29 +195,8 @@ async function load() {
     wbStats.pending = (rs[2].pending || []).length;
     wbStats.tasks = (rs[3].tasks || []).length;
     renderWorkbench();
-    if (view === 'mkt') render();
   } catch (e) {
     $('wb-apps').innerHTML = '<div class="wb-empty">加载失败: ' + esc(e.message) + '</div>';
-  }
-}
-async function loadMarket() {
-  try {
-    var rs = await Promise.all([
-      hostApi('/api/hubs').catch(function () { return { hubs: [] }; }),
-      hostApi('/api/market/catalog').catch(function () { return { apps: [] }; }),
-      hostApi('/api/apps').catch(function () { return { apps: [] }; }),
-    ]);
-    hubs = rs[0].hubs || [];
-    catalog = rs[1].apps || [];
-    apps = rs[2].apps || [];
-    // 优先显示已安装：市场视图首次打开且已有已装应用时，默认落在「已安装」Tab（之后跟随用户选择）
-    if (!loadedOnce) {
-      loadedOnce = true;
-      if (apps.length) { tab = 'installed'; sel = null; }
-    }
-    render();
-  } catch (e) {
-    $('items').innerHTML = '<div class="empty">加载失败: ' + esc(e.message) + '</div>';
   }
 }
 
@@ -479,7 +222,6 @@ document.addEventListener('keydown', function (e) {
 });
 
 load();
-bindSearch();
 </script>
 </body>
 </html>

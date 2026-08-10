@@ -120,7 +120,7 @@ var PANELS = [
   { ic: '🕸', n: '图谱', d: '知识库结构导航（文档/链接/孤立）', run: '/view graph' },
   { ic: '🔄', n: '自动化', d: '自动化控制 + 审核 + 运营数据', run: '/view automation', badge: 'review', btype: 'red' },
   { ic: '🗂', n: '看板', d: '任务看板（待办/进行中/完成）', run: '/view board' },
-  { ic: '🛒', n: '市场', d: '应用市场（SkillHub 管理端）', run: '/view market' },
+  { ic: '🧩', n: '技能', d: '技能商店：发现/检索/安装（SkillHub）', run: '/view skills' },
 ];
 // 命令类：prefill 预填终端输入行（补参后回车）；run 直接执行
 var CMDS = [
@@ -177,7 +177,7 @@ function render(st) {
   // 已装应用
   var apps = (st.apps && st.apps.apps) ? st.apps.apps : [];
   if (!apps.length) {
-    $('g-apps').innerHTML = '<div class="empty" style="grid-column:1/-1">无已安装应用<br>终端 <code>/market import &lt;路径&gt;</code> 导入 · <code>/market connect &lt;hub-url&gt;</code> 连接 SkillHub</div>';
+    $('g-apps').innerHTML = '<div class="empty" style="grid-column:1/-1">无已安装应用<br>侧边栏「🧩 技能」发现/安装 · 终端 <code>/skills import &lt;路径&gt;</code> 导入</div>';
   } else {
     $('g-apps').innerHTML = apps.map(function (a) {
       return '<div class="card app" data-run="/view ' + esc(a.id) + '">' +

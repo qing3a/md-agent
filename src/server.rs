@@ -238,15 +238,15 @@ fn tools_json() -> Value {
             "example": "{}"
         },
         {
-            "name": "market.connect",
-            "desc": "连接第三方 SkillHub：git 仓库 / GitHub zip / 本地目录（自动分析其中的 md 文档生成目录：SKILL.md 技能、app.json 应用），或 skillhub.cn（API 检索商店，默认 https://skillhub.cn/install/skillhub.md），或旧 skillhub.md 索引——用户要求安装/连接/添加应用商店、应用市场、SkillHub 时使用",
+            "name": "skills.connect",
+            "desc": "连接第三方 SkillHub：git 仓库 / GitHub zip / 本地目录（自动分析其中的 md 文档生成目录：SKILL.md 技能、app.json 应用），或 skillhub.cn（API 检索商店，默认 https://skillhub.cn/install/skillhub.md），或旧 skillhub.md 索引——用户要求安装/连接/添加应用商店、应用市场、SkillHub、技能商店时使用",
             "params": [
                 {"name": "hub_url", "type": "string", "required": true, "desc": "hub 来源，如 https://skillhub.cn/install/skillhub.md 或 git+https://github.com/user/skills-repo 或 https://github.com/user/skills-repo/archive/refs/heads/main.zip 或 local:C:/path/to/skills"}
             ],
             "example": "{\"hub_url\":\"https://skillhub.cn/install/skillhub.md\"}"
         },
         {
-            "name": "market.search",
+            "name": "skills.search",
             "desc": "检索 SkillHub 商店技能（skillhub.cn 的 search API）——用户要找/安装某个技能、不确定技能名时使用，返回匹配的技能清单（slug/名称/描述/下载量）",
             "params": [
                 {"name": "q", "type": "string", "required": true, "desc": "检索关键词（技能名/用途，中英文均可）"}
@@ -2661,7 +2661,7 @@ async fn market_install(State(s): State<AppState>, Json(b): Json<MarketInstallBo
             if !a.rel.is_empty() {
                 let col = match crate::hub::collection_root(&s.kb_root, &h) {
                     Some(c) => c,
-                    None => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "hub 集合缓存缺失——先 /market refresh 重新拉取" }))).into_response(),
+                    None => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "hub 集合缓存缺失——先 /skills refresh 重新拉取" }))).into_response(),
                 };
                 let loc = col.join(&a.rel);
                 if !loc.exists() {

@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>技能</title>
+<style>
+  :root { --bg:var(--bg); --panel:var(--chip); --panel2:var(--chip3); --line:var(--chip4);
+          --fg:var(--fg); --dim:var(--muted); --green:var(--ok); --red:var(--danger);
+          --yellow:var(--warn); --blue:var(--accent); --purple:var(--purple); }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg);
+    font: 13px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+    border-bottom: 1px solid var(--line); }
+  h1 { font-size: 15px; color: var(--yellow); }
+  .sp { flex: 1; }
+  .meta { font-size: 11px; color: var(--dim); }
+  #hubcount { color: var(--purple); }
+  button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 7px; padding: 5px 14px; font-size: 12px; cursor: pointer; }
+  button:hover { border-color: var(--blue); color: var(--blue); }
+  button.primary { background: var(--green); color: var(--bg3); border-color: var(--green); font-weight: 600; }
+  button.danger { background: var(--red); color: var(--bg3); border-color: var(--red); font-weight: 600; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.small { padding: 2px 8px; font-size: 11px; }
+
+  #main { flex: 1; display: flex; min-height: 0; }
+  .col { min-height: 0; }
+  #list-col { width: 260px; border-right: 1px solid var(--line); background: var(--panel);
+    display: flex; flex-direction: column; }
+  #tabs { display: flex; gap: 4px; padding: 8px 10px; }
+  .tab { flex: 1; background: transparent; border: 1px solid var(--line); border-radius: 6px;
+    padding: 4px 0; font-size: 12px; cursor: pointer; color: var(--dim); }
+  .tab.sel { background: var(--panel2); border-color: var(--blue); color: var(--blue); font-weight: 600; }
+  #search-bar { padding: 0 10px 6px; }
+  #search { width: 100%; background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 7px; padding: 6px 10px; font-size: 12px; outline: none; }
+  #search:focus { border-color: var(--blue); }
+  #search-hint { margin-top: 4px; font-size: 11px; color: var(--dim); min-height: 14px; }
+  #items { flex: 1; overflow: auto; padding: 0 10px 10px; }
+  #detail-col { flex: 1; overflow: auto; padding: 10px; }
+
+  .item { padding: 7px 10px; border-radius: 7px; cursor: pointer; margin-bottom: 4px; }
+  .item:hover { background: var(--panel2); }
+  .item.sel { background: var(--panel2); border: 1px solid var(--blue); }
+  /* 条目两行：第一行 name 弹性省略 + 徽标固定右侧；第二行 id·版本·来源 单行省略（窄列不换行不溢出） */
+  .item .n { display: flex; align-items: center; gap: 6px; }
+  .item .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  .item .p { font-size: 10.5px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
+  .bdg { flex: none; font-size: 10px; line-height: 16px; padding: 0 7px; border-radius: 8px; border: 1px solid var(--line); }
+  .b-skill { color: var(--purple); }
+  .b-app { color: var(--blue); }
+  .b-inst { color: var(--green); border-color: var(--green); padding: 0 5px; }
+
+  #detail { padding: 14px; display: none; }
+  #detail h2 { font-size: 16px; margin-bottom: 4px; }
+  .meta { color: var(--dim); font-size: 12px; margin-bottom: 10px; }
+  .perms { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+  .perm { background: var(--panel2); border: 1px solid var(--line); color: var(--blue);
+    border-radius: 10px; padding: 1px 10px; font-size: 11px; }
+  .desc { color: var(--fg); font-size: 12px; margin-bottom: 14px; }
+  .actions { display: flex; gap: 10px; align-items: center; }
+  .upd-hint { font-size: 11px; color: var(--dim); }
+  .empty { color: var(--dim); text-align: center; padding: 40px 10px; }
+  #hint { padding: 8px 14px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px; }
+  #hint code { color: var(--yellow); }
+  .toast { position: fixed; bottom: 44px; left: 50%; transform: translateX(-50%);
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 6px 14px; font-size: 12px; display: none; z-index: 12; }
+  .toast.ok { border-color: var(--green); color: var(--green); }
+  .toast.err { border-color: var(--red); color: var(--red); }
+  #overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 11;
+    display: flex; align-items: center; justify-content: center; }
+  #overlay.hidden { display: none; }
+  .ov-box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 18px; width: 440px; max-width: 92vw; max-height: 80vh; overflow: auto; }
+  .ov-box h3 { color: var(--yellow); font-size: 14px; margin-bottom: 10px; }
+  .ov-row { font-size: 12px; color: var(--dim); margin-bottom: 6px; word-break: break-all; }
+  .ov-row b { color: var(--fg); }
+  .ov-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
+  .ov-note { font-size: 11px; color: var(--dim); margin-top: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>技能</h1>
+  <span id="count" class="meta"></span>
+  <span id="hubcount" class="meta" title="已连接 SkillHub"></span>
+  <div class="sp"></div>
+  <button id="connect">连接 hub</button>
+  <button id="refresh" title="刷新目录">刷新</button>
+</header>
+<div id="main">
+  <div id="list-col" class="col">
+    <div id="tabs">
+      <button id="tab-catalog" class="tab">目录</button>
+      <button id="tab-installed" class="tab">已安装</button>
+    </div>
+    <div id="search-bar">
+      <input id="search" type="text" placeholder="🔍 检索 SkillHub 商店…" autocomplete="off">
+      <div id="search-hint" class="meta"></div>
+    </div>
+    <div id="items"></div>
+  </div>
+  <div id="detail-col" class="col">
+    <div id="detail">
+      <h2 id="d-name"></h2>
+      <div class="meta" id="d-meta"></div>
+      <div class="desc" id="d-desc"></div>
+      <div class="actions" id="d-actions"></div>
+    </div>
+    <div class="empty" id="empty"></div>
+  </div>
+</div>
+<div id="hint">连接 SkillHub：<code>连接 hub</code> 或终端 <code>/skills connect &lt;url&gt;</code> · 支持 skillhub.cn 商店（默认，检索+榜单）/ git 仓库 / GitHub zip / 本地目录（自动分析 md 文档） · 安装走命令行（人审确认）：<code>/skills install &lt;id&gt;</code> 或 <code>/skills import &lt;路径&gt;</code></div>
+<div id="toast" class="toast"></div>
+
+<script>
+var hubs = [], catalog = [], skills = [];
+var catalogView = []; // 渲染用目录（已安装优先排序；与 data-i 索引保持一致）
+var loadedOnce = false; // 首次加载默认 Tab = 已安装（有已装技能时）
+var tab = 'catalog'; // 'catalog' | 'installed'
+var sel = null; // { kind: 'cat' | 'inst', ...条目字段 }
+
+function $(id) { return document.getElementById(id); }
+function toast(msg, ok) {
+  var t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + (ok ? 'ok' : 'err');
+  t.style.display = 'block';
+  setTimeout(function () { t.style.display = 'none'; }, 2400);
+}
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+
+// ================= 渲染 =================
+function render() {
+  $('hubcount').textContent = hubs.length ? '⚡ ' + hubs.length + ' hub' : '';
+  $('count').textContent = (tab === 'catalog' ? catalog.length + ' 个可用' : skills.length + ' 个已安装');
+  $('tab-catalog').classList.toggle('sel', tab === 'catalog');
+  $('tab-installed').classList.toggle('sel', tab === 'installed');
+  var sbar = $('search-bar');
+  if (sbar) sbar.style.display = tab === 'catalog' ? '' : 'none';
+  var items = $('items');
+  if (tab === 'catalog') {
+    // 已安装优先：目录里已装的应用排最前并标注（打开市场最关心自己装了什么）
+    var instIds = {};
+    skills.forEach(function (s) { instIds[s.name.replace(/\.md$/, '')] = true; });
+    catalogView = catalog.slice().sort(function (a, b) {
+      return (instIds[a.id] ? 0 : 1) - (instIds[b.id] ? 0 : 1);
+    });
+    items.innerHTML = catalogView.map(function (a, i) {
+      var kindBadge = '<span class="bdg ' + (a.kind === 'skill' ? 'b-skill' : 'b-app') + '">' + (a.kind === 'skill' ? '技能' : '应用') + '</span>';
+      var instBadge = instIds[a.id] ? '<span class="bdg b-inst" title="已安装">✓</span>' : '';
+      // 搜索结果条目无 hub 字段 → 兜底 skillhub.cn（检索仅对 skillhub 商店生效）
+      return '<div class="item' + (sel && sel.kind === 'cat' && sel.id === a.id ? ' sel' : '') + '" data-i="' + i + '">' +
+        '<div class="n"><span class="nm" title="' + esc(a.name) + '">' + esc(a.name) + '</span>' + kindBadge + instBadge + '</div>' +
+        '<div class="p" title="' + esc(a.id) + '">' + esc(a.id) + (a.version ? ' · v' + esc(a.version) : '') + ' · [' + esc(a.hub || 'skillhub.cn') + ']</div></div>';
+    }).join('');
+  } else {
+    items.innerHTML = skills.map(function (s, i) {
+      var title = s.title || s.name;
+      return '<div class="item' + (sel && sel.kind === 'inst' && sel.name === s.name ? ' sel' : '') + '" data-i="' + i + '">' +
+        '<div class="n"><span class="nm" title="' + esc(title) + '">' + esc(title) + '</span>' +
+        '<span class="bdg b-skill">技能</span></div>' +
+        '<div class="p" title="' + esc(s.name) + '">' + esc(s.name) + (s.trigger ? ' · 触发: ' + esc(s.trigger) : '') + '</div></div>';
+    }).join('');
+  }
+  var empty = $('empty');
+  var has = tab === 'catalog' ? catalog.length : skills.length;
+  if (!has) {
+    empty.style.display = 'block';
+    empty.innerHTML = tab === 'catalog'
+      ? '未连接 SkillHub<br><br>点右上角 <code>连接 hub</code> 或终端 <code>/skills connect &lt;url&gt;</code>'
+      : '无已安装技能<br><br>从「目录」Tab 安装，或终端 <code>/skills import &lt;路径&gt;</code>';
+    $('detail').style.display = 'none';
+  } else {
+    empty.style.display = 'none';
+    if (sel) showDetail(sel); else $('detail').style.display = 'none';
+  }
+}
+function showDetail(s) {
+  sel = s;
+  $('detail').style.display = 'block';
+  $('d-name').textContent = (s.title || s.name) + '  v' + s.version;
+  var meta = 'id: ' + s.id;
+  if (s.entry) meta += ' · entry: ' + s.entry;
+  if (s.rel) meta += ' · 文件: ' + s.rel;
+  if (s.hub) meta += ' · 来源 ' + s.hub;
+  else if (s.kind === 'inst') meta += ' · 本地';
+  $('d-meta').textContent = meta;
+  $('d-desc').textContent = s.description || '(无描述)';
+  var acts = $('d-actions');
+  if (s.kind === 'cat') {
+    // 目录条目只浏览：安装走命令行（第三方 hub 无稳定 API，安装需显式确认来源）
+    acts.innerHTML = '<span class="upd-hint">安装（人审确认）：<code>/skills install ' + esc(s.id) + '</code>（应用或技能按内容自动识别）<br>兜底：<code>/skills import &lt;路径&gt;</code> 手动导入</span>';
+  } else {
+    acts.innerHTML = '<span class="upd-hint">已安装技能（trigger 命中自动注入 Agent）<br>卸载：删除 <code>kb/skills/' + esc(s.name) + '</code> 文件</span>';
+  }
+  renderListSel();
+}
+function renderListSel() {
+  Array.prototype.forEach.call(document.querySelectorAll('#items .item'), function (el) {
+    el.classList.toggle('sel', sel && el.dataset.i && currentList()[+el.dataset.i] && currentList()[+el.dataset.i].id === sel.id);
+  });
+}
+function currentList() { return tab === 'catalog' ? catalogView : skills; }
+
+$('items').addEventListener('click', function (e) {
+  var el = e.target.closest('.item');
+  if (!el) return;
+  var i = +el.dataset.i;
+  var list = currentList();
+  if (!list[i]) return;
+  var a = list[i];
+  if (tab === 'catalog') {
+    showDetail({ kind: 'cat', id: a.id, name: a.name, version: a.version,
+      entry: a.entry, permissions: a.permissions, description: a.description, hub: a.hub, rel: a.rel });
+  } else {
+    showDetail({ kind: 'inst', id: a.name, name: a.title || a.name, version: '0.0.0',
+      description: a.desc || '(无描述)', entry: '', permissions: [], rel: '', hub: null, sname: a.name });
+  }
+});
+
+$('tab-catalog').addEventListener('click', function () { tab = 'catalog'; sel = null; render(); });
+$('tab-installed').addEventListener('click', function () { tab = 'installed'; sel = null; render(); });
+$('refresh').addEventListener('click', load);
+
+// ---------- 连接 hub ----------
+$('connect').addEventListener('click', function () {
+  var url = prompt('输入 SkillHub 来源：\n· skillhub.cn 商店（默认，检索+榜单）https://skillhub.cn/install/skillhub.md\n· git 仓库  git+https://github.com/user/skills-repo\n· GitHub zip https://github.com/user/skills-repo/archive/refs/heads/main.zip\n· 本地目录  local:C:/path/to/skills', 'https://skillhub.cn/install/skillhub.md');
+  if (!url) return;
+  hostApi('/api/hubs/connect', { method: 'POST', body: { url: url.trim() } }).then(function (r) {
+    var kinds = {}; (r.hub.apps || []).forEach(function (a) { kinds[a.kind] = (kinds[a.kind] || 0) + 1; });
+    var kt = Object.keys(kinds).map(function (k) { return kinds[k] + ' 个' + (k === 'app' ? '应用' : '技能'); }).join('、') || '0 个条目';
+    toast('✓ 已连接 ' + r.hub.name + '（' + kt + '）', true);
+    tab = 'catalog'; sel = null;
+    return load();
+  }).catch(function (e) { toast('连接失败: ' + e.message, false); });
+});
+
+// ---------- 检索 SkillHub（skillhub.cn API） ----------
+var searchTimer = null;
+$('search').addEventListener('input', function () {
+  clearTimeout(searchTimer);
+  var q = this.value.trim();
+  if (!q) { sel = null; return load(); }
+  searchTimer = setTimeout(function () {
+    hostApi('/api/hubs/search', { method: 'POST', body: { q: q } }).then(function (r) {
+      catalog = r.apps || [];
+      $('search-hint').textContent = '「' + q + '」搜索结果 ' + catalog.length + ' 条（/skills install <id> 安装）';
+      sel = null;
+      render();
+    }).catch(function (e) { toast('检索失败: ' + e.message, false); });
+  }, 450);
+});
+
+// ---------- 数据加载 ----------
+async function load() {
+  try {
+    var rs = await Promise.all([
+      hostApi('/api/hubs').catch(function () { return { hubs: [] }; }),
+      hostApi('/api/market/catalog').catch(function () { return { apps: [] }; }),
+      hostApi('/api/skills').catch(function () { return { skills: [] }; }),
+    ]);
+    hubs = rs[0].hubs || [];
+    catalog = rs[1].apps || [];
+    skills = rs[2].skills || [];
+    // 优先显示已安装：首次打开且已有已装技能时，默认落在「已安装」Tab（之后跟随用户选择）
+    if (!loadedOnce) {
+      loadedOnce = true;
+      if (skills.length) { tab = 'installed'; sel = null; }
+    }
+    render();
+  } catch (e) {
+    $('items').innerHTML = '<div class="empty">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+load();
+</script>
+</body>
+</html>
