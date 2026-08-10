@@ -96,9 +96,10 @@ def main():
         r = api("/api/consolidate", "POST")
         created = [c for c in r.get("created", []) if "CONSOLIDATE.MEMORY" in c]
         ok("巩固器生成去重提案", len(created) >= 1)
-        if created:
-            prop = (kb / created[0]).read_text(encoding="utf-8")
-            ok("去重内容正确", prop.count("- A") == 1 and "- B" in prop)
+        # 2026-08-11 起巩固提案自动落地（git 自动提交即回滚通道）：pending 文件已被 auto_land 移除并替换 MEMORY.md——
+        # 断言改为验证落地后的 MEMORY.md 已去重（比读提案文件更强：验证生效而非仅生成）
+        mem = (kb / "MEMORY.md").read_text(encoding="utf-8")
+        ok("去重内容正确（自动落地）", mem.count("- A") == 1 and "- B" in mem)
 
         print("== 巩固器 v2 守卫 ==")
         try:
@@ -106,6 +107,54 @@ def main():
             ok("v2 未配置 LLM 应报错", False)
         except urllib.error.HTTPError as e:
             ok("v2 未配置 LLM 应报错", e.code == 400)
+
+        print("== Agent 回路（mock LLM）==")
+        # 起 mock LLM（scripts/mock_llm.py，OpenAI 兼容）→ 配置后端 → 验证 /api/agent 主回路 + 子回路
+        mock_port = 11435
+        mock_llm = pathlib.Path(__file__).resolve().parent / "mock_llm.py"
+        mock_proc = subprocess.Popen(
+            [sys.executable, str(mock_llm), str(mock_port)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            time.sleep(1.5)  # mock 服务就绪
+            cfg_new = {"kb_root": str(kb),
+                       "llm": {"endpoint": f"http://127.0.0.1:{mock_port}", "model": "mock", "api_key": "", "embedding": {"endpoint": "", "model": "", "api_key": ""}},
+                       "heartbeat": {"enabled": False, "interval_secs": 5}}
+            api("/api/config", "POST", cfg_new)
+
+            # 主回路：prompt 含「调用工具」→ mock 首轮返回 search 工具 JSON → 宿主执行（空库无命中）→ 回填 → 第二轮收敛回答
+            r = api("/api/agent", "POST", {"prompt": "调用工具 查一下 托盘 架构"})
+            ok("agent 主回路 ok", r.get("ok") is True)
+            ok("agent 主回路工具调用", r.get("tool_calls", 0) >= 1 and "search" in (r.get("tools_used") or []))
+            ok("agent 主回路回答", bool(r.get("answer")))
+
+            # 子 agent（spawn）：独立上下文 + 受限策略——同一条 mock 触发链应在子回路内走通
+            r2 = api("/api/agent", "POST", {"prompt": "调用工具 查一下 记忆 分片", "spawn": True})
+            ok("agent spawn 子回路 ok", r2.get("ok") is True)
+            ok("agent spawn 回答", bool(r2.get("answer")))
+
+            # 子 agent 越权守卫：非白名单工具（fetch=网络侧效应）→ 拒绝回填、不执行、收敛为回答
+            # mock 只模拟 search 工具，越权由 Rust 单测覆盖；此处验证未配置 LLM 时主回路守卫
+            api("/api/config", "POST", {"kb_root": str(kb),
+                                        "llm": {"endpoint": "", "model": "", "api_key": "", "embedding": {"endpoint": "", "model": "", "api_key": ""}},
+                                        "heartbeat": {"enabled": False, "interval_secs": 5}})
+            try:
+                api("/api/agent", "POST", {"prompt": "hi"})
+                ok("agent 未配置 LLM 应 400", False)
+            except urllib.error.HTTPError as e:
+                ok("agent 未配置 LLM 应 400", e.code == 400)
+        finally:
+            mock_proc.terminate()
+            try:
+                mock_proc.wait(timeout=5)
+            except Exception:
+                mock_proc.kill()
+
+        print("== 跨会话记忆 recall ==")
+        # M3：提问前记忆召回（只读）——MEMORY.md 已在巩固器段落写入内容
+        r = api("/api/memory/recall", "POST", {"q": "记忆", "k": 3})
+        ok("recall 返回 hits", "hits" in r and isinstance(r["hits"], list))
 
         print(f"\n结果: {passed} 通过, {failed} 失败")
         return 1 if failed else 0

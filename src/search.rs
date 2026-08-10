@@ -292,6 +292,106 @@ fn context_of(lines: &[&str], hit_line: u64, radius: usize, max_chars: usize) ->
     out.trim_end().to_string()
 }
 
+// ---------- 语义融合（Phase 4 M1：grep + 向量 RRF 混合检索） ----------
+
+/// 文件级 RRF 融合：grep 命中 + 语义命中按 reciprocal rank fusion 合并。
+/// - 两列表都出现的文件：融合分 = 1/(k+rank_grep) + 1/(k+rank_sem)，排最前；
+/// - 仅语义命中的文件：从 MD 原文取命中行文本/小节/上下文，补充进 hits；
+/// - 排序：融合分降序 → file → line；截断沿用每文件 TOP_PER_FILE / 全库 TOP_TOTAL。
+/// 语义命中 text 为空（vector.rs 不回填），本函数是唯一补全点，保证命中片段与 grep 同源。
+pub fn merge_semantic(
+    root: &Path,
+    mut r: SearchResult,
+    semantic: &[crate::vector::SemanticHit],
+    k: f64,
+) -> SearchResult {
+    if semantic.is_empty() {
+        return r;
+    }
+    // 两列表的文件级排名（首次出现位置，1 基）
+    let mut grep_rank: HashMap<String, usize> = HashMap::new();
+    for h in &r.hits {
+        let n = grep_rank.len() + 1;
+        grep_rank.entry(h.file.clone()).or_insert(n);
+    }
+    let mut sem_rank: HashMap<String, usize> = HashMap::new();
+    for h in semantic {
+        let n = sem_rank.len() + 1;
+        sem_rank.entry(h.file.clone()).or_insert(n);
+    }
+    let rrf = |file: &str| -> f64 {
+        let mut s = 0.0;
+        if let Some(rk) = grep_rank.get(file) {
+            s += 1.0 / (k + *rk as f64);
+        }
+        if let Some(rk) = sem_rank.get(file) {
+            s += 1.0 / (k + *rk as f64);
+        }
+        s
+    };
+    // ① 已有 grep 命中：融合分重写（簇提升/热度等原分被 RRF 替代，保证混合排序一致）
+    for h in &mut r.hits {
+        h.score = rrf(&h.file);
+    }
+    // ② 语义独有文件：取该文件最高分语义命中，从 MD 原文物化一条 Hit
+    let mut seen_files: HashSet<String> = r.hits.iter().map(|h| h.file.clone()).collect();
+    for sh in semantic {
+        if seen_files.contains(&sh.file) {
+            continue;
+        }
+        if let Some(h) = materialize_hit(root, sh, rrf(&sh.file)) {
+            r.hits.push(h);
+            seen_files.insert(sh.file.clone());
+        }
+    }
+    // ③ 重排 + 截断（与 rank_hits 同一截断语义）
+    r.hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.file.cmp(&b.file))
+            .then(a.line.cmp(&b.line))
+    });
+    let mut per_file: HashMap<String, usize> = HashMap::new();
+    let mut kept: Vec<Hit> = Vec::with_capacity(r.hits.len().min(TOP_TOTAL));
+    for h in r.hits.drain(..) {
+        let n = per_file.entry(h.file.clone()).or_insert(0);
+        if *n >= TOP_PER_FILE {
+            continue;
+        }
+        *n += 1;
+        kept.push(h);
+        if kept.len() >= TOP_TOTAL {
+            break;
+        }
+    }
+    r.hit_count = kept.len();
+    r.file_count = kept.iter().map(|h| h.file.as_str()).collect::<HashSet<_>>().len();
+    r.hits = kept;
+    r
+}
+
+/// 语义命中 → 物化为 Hit：读 MD 原文取行文本 + 小节 + 上下文（与 grep 命中同源）
+fn materialize_hit(root: &Path, sh: &crate::vector::SemanticHit, score: f64) -> Option<Hit> {
+    let p = root.join(&sh.file);
+    let content = std::fs::read_to_string(p).ok()?;
+    let lines: Vec<&str> = content.lines().collect();
+    let idx = (sh.line as usize)
+        .saturating_sub(1)
+        .min(lines.len().saturating_sub(1));
+    if lines.is_empty() {
+        return None;
+    }
+    Some(Hit {
+        file: sh.file.clone(),
+        line: sh.line,
+        text: lines[idx].trim_end().to_string(),
+        section: section_of(&lines, sh.line),
+        context: context_of(&lines, sh.line, 3, 600),
+        score,
+    })
+}
+
 // ---------- 记忆关联建议（记忆断链修复 B） ----------
 
 #[derive(Debug, Serialize)]
@@ -612,6 +712,91 @@ mod tests {
         // 智能大小写：大写查询命中（小写内容也命中）
         let out = search(&root, "RAG", "notes", false).unwrap();
         assert!(out.hit_count >= 1, "大写查询应命中小写内容");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // ---------- merge_semantic（Phase 4 M1：RRF 融合） ----------
+
+    fn semantic_hit(file: &str, line: u64, score: f64) -> crate::vector::SemanticHit {
+        crate::vector::SemanticHit {
+            file: file.to_string(),
+            line,
+            text: String::new(),
+            score,
+        }
+    }
+
+    #[test]
+    fn merge_empty_semantic_returns_unchanged() {
+        let root = tmp("mempty");
+        std::fs::write(root.join("notes/文档.md"), "# 文档\n记忆 内容\n").unwrap();
+        let r = search(&root, "记忆", "notes", false).unwrap();
+        let n = r.hits.len();
+        let merged = merge_semantic(&root, r, &[], 60.0);
+        assert_eq!(merged.hits.len(), n, "无语义命中时原样返回");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn merge_appends_semantic_only_file_from_md() {
+        let root = tmp("monly");
+        // grep 命中 a.md；语义独有 b.md（grep 未命中）→ 从 MD 原文物化
+        std::fs::write(root.join("notes/a.md"), "# 甲\n记忆 内容\n").unwrap();
+        std::fs::write(root.join("notes/b.md"), "# 乙\n## 语义小节\n完全不同的表达\n").unwrap();
+        let mut r = search(&root, "记忆", "notes", false).unwrap();
+        r.hits.truncate(1);
+        let merged = merge_semantic(
+            &root,
+            r,
+            &[semantic_hit("notes/b.md", 3, 0.9)],
+            60.0,
+        );
+        let files: Vec<&str> = merged.hits.iter().map(|h| h.file.as_str()).collect();
+        assert!(files.contains(&"notes/b.md"), "语义独有文件应补充: {files:?}");
+        let b = merged.hits.iter().find(|h| h.file == "notes/b.md").unwrap();
+        assert!(!b.text.is_empty(), "语义命中文本应从 MD 原文补全");
+        assert_eq!(b.section.as_deref(), Some("语义小节"), "小节取自原文");
+        assert!(b.score > 0.0);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn merge_ranks_shared_files_first() {
+        let root = tmp("mshare");
+        // 两文件都被 grep 命中；其中甲同时被语义命中 → 融合分更高
+        std::fs::write(root.join("notes/甲.md"), "# 甲\n记忆 内容 甲\n").unwrap();
+        std::fs::write(root.join("notes/乙.md"), "# 乙\n记忆 内容 乙\n").unwrap();
+        let r = search(&root, "记忆", "notes", false).unwrap();
+        // 手工把 grep 命中压平到每文件一条，语义只命中甲
+        let merged = merge_semantic(
+            &root,
+            r,
+            &[semantic_hit("notes/甲.md", 2, 0.95)],
+            60.0,
+        );
+        let first = merged.hits.iter().find(|h| h.file == "notes/甲.md").unwrap();
+        let second = merged.hits.iter().find(|h| h.file == "notes/乙.md").unwrap();
+        assert!(
+            first.score > second.score,
+            "双列表命中应排最前: {} > {}",
+            first.score,
+            second.score
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn merge_truncates_per_file_and_total() {
+        let root = tmp("mtrunc");
+        // 同一文件多条语义命中 → 只物化第一条；截断沿用 TOP_PER_FILE
+        std::fs::write(root.join("notes/a.md"), "# 甲\n行1\n行2\n行3\n行4\n行5\n").unwrap();
+        let mut r = search(&root, "不存在", "notes", false).unwrap();
+        r.hits.clear();
+        let sem: Vec<_> = (2..=5)
+            .map(|l| semantic_hit("notes/a.md", l, 0.8 - (l as f64) * 0.01))
+            .collect();
+        let merged = merge_semantic(&root, r, &sem, 60.0);
+        assert!(merged.hits.len() <= crate::search::TOP_PER_FILE, "每文件截断: {}", merged.hits.len());
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

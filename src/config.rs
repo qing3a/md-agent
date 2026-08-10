@@ -12,9 +12,34 @@ pub struct LlmConfig {
     pub model: String,
     /// 云端 API Key（Ollama 本地可不填）
     pub api_key: String,
+    /// 语义召回通道（可选）：OpenAI 兼容 /embeddings 端点；未配置则语义召回降级纯 grep
+    pub embedding: EmbeddingConfig,
 }
 
 impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            model: String::new(),
+            api_key: String::new(),
+            embedding: EmbeddingConfig::default(),
+        }
+    }
+}
+
+/// Embedding 配置（语义召回的向量来源，Phase 4 M1）：
+/// 留空 = 语义召回关闭，现有纯 grep 检索完全不变（零破坏）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EmbeddingConfig {
+    /// OpenAI 兼容 embeddings 基址（如 http://127.0.0.1:11434/v1 或 https://api.openai.com/v1）
+    pub endpoint: String,
+    /// embedding 模型名（如 bge-m3 / text-embedding-3-large）
+    pub model: String,
+    pub api_key: String,
+}
+
+impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
             endpoint: String::new(),

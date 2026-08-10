@@ -100,6 +100,69 @@ fn tools() -> Vec<McpTool> {
         },
     },
     McpTool {
+        name: "semantic_search",
+        desc: "语义检索：grep 关键词 + 向量语义双路召回（RRF 融合）——同义/近义表达也能命中。需宿主已配置 llm.embedding 并执行过 /api/embed/sync；未配置时自动降级为纯 grep（结果与 search 相同）",
+        schema: json!({
+            "type": "object",
+            "properties": {"q": {"type": "string", "description": "检索词或自然语言描述"}},
+            "required": ["q"]
+        }),
+        call: |a| {
+            let q = a.get("q").and_then(Value::as_str).unwrap_or("");
+            (
+                format!("/api/search?q={}&layer=all&ctx=1&semantic=1", urlencode(q)),
+                "GET",
+                None,
+            )
+        },
+    },
+    McpTool {
+        name: "agent.spawn",
+        desc: "派生受限子 Agent（独立上下文）：子 agent 只读知识库（search/read_l1/read_file/graph.*/risk.check/tasks/pending.list）+ 受限 .md 写，防递归防越权——把大任务拆给子 agent 调研后取回结论",
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "子任务指令"},
+                "max_turns": {"type": "integer", "description": "子循环轮次上限（默认 8，最大 16）"}
+            },
+            "required": ["prompt"]
+        }),
+        call: |a| {
+            let prompt = a.get("prompt").and_then(Value::as_str).unwrap_or("");
+            let max_turns = a.get("max_turns").and_then(Value::as_u64).unwrap_or(8);
+            (
+                "/api/agent".to_string(),
+                "POST",
+                Some(json!({
+                    "prompt": prompt,
+                    "spawn": true,
+                    "max_turns": max_turns
+                })),
+            )
+        },
+    },
+    McpTool {
+        name: "memory.recall",
+        desc: "跨会话记忆召回（只读）：grep 关键词 + 向量语义双路检索 MEMORY.md/会话归档/L2，返回 top 命中片段——开始回答跨会话问题时先查（提取会话收尾后的沉淀在此可查）",
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "q": {"type": "string", "description": "检索词或自然语言描述"},
+                "k": {"type": "integer", "description": "返回条数（默认 5，最大 20）"}
+            },
+            "required": ["q"]
+        }),
+        call: |a| {
+            let q = a.get("q").and_then(Value::as_str).unwrap_or("");
+            let k = a.get("k").and_then(Value::as_u64).unwrap_or(5);
+            (
+                "/api/memory/recall".to_string(),
+                "POST",
+                Some(json!({ "q": q, "k": k })),
+            )
+        },
+    },
+    McpTool {
         name: "graph.linked",
         desc: "查文档的出链（[[双链]] 指向谁，含悬空检测）",
         schema: json!({

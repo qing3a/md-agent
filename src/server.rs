@@ -47,6 +47,12 @@ pub async fn serve(
         .route("/api/skills/delete", post(skills_delete))
         .route("/api/consolidate", post(consolidate_handler))
         .route("/api/search", get(search_handler))
+        .route("/api/embed/sync", post(embed_sync))
+        .route("/api/embed/stats", get(embed_stats))
+        .route("/api/agent", post(agent_handler))
+        .route("/api/memory/recall", post(memory_recall))
+        .route("/api/memory/extract", post(memory_extract))
+        .route("/api/memory/dream", post(memory_dream))
         .route("/api/l1", get(l1_handler))
         .route("/api/l1/read", get(l1_read_handler))
         .route("/api/file", get(file_read))
@@ -393,6 +399,9 @@ struct SearchParams {
     /// 激活扩散增强（默认开：空/1/true/on/yes；expand=0 关闭——对比/降级通道）
     #[serde(default)]
     expand: String,
+    /// 语义召回（Phase 4 M1）：1/true/on 时叠加向量检索（embedding 未配置自动降级纯 grep）
+    #[serde(default)]
+    semantic: String,
 }
 
 fn default_layer() -> String {
@@ -401,6 +410,10 @@ fn default_layer() -> String {
 
 fn ctx_enabled(ctx: &str) -> bool {
     matches!(ctx, "1" | "true" | "on" | "yes")
+}
+
+fn semantic_enabled(s: &str) -> bool {
+    matches!(s, "1" | "true" | "on" | "yes")
 }
 
 async fn search_handler(
@@ -416,11 +429,468 @@ async fn search_handler(
         Ok(mut r) => {
             // R4 活动埋点：仅记命中数，不记 query 全文（防隐私）
             crate::activity::record(&root, "search", &format!("检索命中 {} 条", r.hit_count), json!({ "hits": r.hit_count }));
+            // 语义召回（Phase 4 M1）：semantic=1 且 embedding 已配置 → 向量检索 + RRF 融合；
+            // embedding 未配置/请求失败 → 静默降级纯 grep（现状），不破坏既有链路
+            if semantic_enabled(&p.semantic) {
+                let cfg = crate::config::load();
+                let ep = cfg.llm.embedding.endpoint;
+                let model = cfg.llm.embedding.model;
+                let key = cfg.llm.embedding.api_key;
+                if crate::embed::configured(&ep, &model) {
+                    match crate::embed::embed_texts(&ep, &model, &key, &[p.q.clone()]).await {
+                        Ok(mut qvs) => {
+                            if let Some(qv) = qvs.pop() {
+                                match crate::vector::semantic_search(&root, &qv, 10, Some(&model)) {
+                                    Ok(sem) => r = crate::search::merge_semantic(&root, r, &sem, 60.0),
+                                    Err(_) => {} // 向量库不存在/损坏 → 降级
+                                }
+                            }
+                        }
+                        Err(_) => {} // embed 请求失败 → 降级
+                    }
+                }
+            }
             // 激活扩散（2026-08-11 第二步）：簇提升重排 + 补充召回 related
             if expand && !r.hits.is_empty() {
                 expand_search(&root, &mut r);
             }
             Json(r).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+/// 重建向量索引（Phase 4 M1）：全库 .md → `##` 小节分块 → embedding → 全量重建向量表。
+/// embedding 未配置 → 400（配置指引）；请求失败 → 502（不落半截数据）。
+async fn embed_sync(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let cfg = crate::config::load();
+    let ep = cfg.llm.embedding.endpoint;
+    let model = cfg.llm.embedding.model;
+    let key = cfg.llm.embedding.api_key;
+    if !crate::embed::configured(&ep, &model) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "未配置 llm.embedding（endpoint/model）。语义召回为可选通道：设置后可 POST /api/embed/sync 建向量索引。"
+            })),
+        )
+            .into_response();
+    }
+    let _guard = st.sync_lock.lock().await; // 与 kb_sync/心跳共用互斥，防并发写
+    let chunks = crate::vector::collect_chunks(&root);
+    if chunks.is_empty() {
+        return Json(json!({ "ok": true, "chunks": 0, "files": 0, "model": model, "dim": 0 }))
+            .into_response();
+    }
+    // 分批 embed（每批 32，多数服务端单批限制），全量成功才落库
+    let mut vecs: Vec<Vec<f32>> = Vec::with_capacity(chunks.len());
+    for batch in chunks.chunks(32) {
+        let texts: Vec<String> = batch.iter().map(|c| c.text.clone()).collect();
+        match crate::embed::embed_texts(&ep, &model, &key, &texts).await {
+            Ok(v) => vecs.extend(v),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": format!("embedding 请求失败（{e}），未写入任何向量。") })),
+                )
+                    .into_response();
+            }
+        }
+    }
+    match crate::vector::store_embeddings(&root, &model, &chunks, &vecs) {
+        Ok(rep) => Json(json!({
+            "ok": true,
+            "chunks": rep.chunks,
+            "files": rep.files,
+            "model": rep.model,
+            "dim": rep.dim
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+/// 向量索引统计（chunk 数/覆盖文件/模型/维度）
+async fn embed_stats(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    match crate::vector::stats(&root) {
+        Ok(s) => Json(json!({ "stats": s })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+// ---------- Agent 回路（Phase 4 M2：Rust 侧 run_loop + 子 agent，LLM 端口 / 工具执行端口） ----------
+
+/// LlmPort 实现：接 crate::llm::chat（OpenAI 兼容非流式），解析软工具调用 JSON。
+struct AgentLlm {
+    endpoint: String,
+    model: String,
+    api_key: String,
+}
+
+impl crate::agent::LlmPort for AgentLlm {
+    fn call<'a>(
+        &'a self,
+        messages: &'a [crate::agent::AgentMessage],
+    ) -> futures_util::future::BoxFuture<'a, Result<crate::agent::LlmReply, String>> {
+        Box::pin(async move {
+            let msgs: Vec<Value> = messages
+                .iter()
+                .map(|m| json!({ "role": m.role, "content": m.content }))
+                .collect();
+            let body = json!({ "messages": msgs, "stream": false });
+            let v = crate::llm::chat(&self.endpoint, &self.model, &self.api_key, body).await?;
+            let full = v
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("message"))
+                .and_then(|m| m.get("content"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            // 软工具调用识别（与前端 detectToolInFull 同构）：正文中首个 JSON 对象含 "tool" 字段 → 工具轮
+            if let Some(j) = extract_json_from_text(&full) {
+                if let Some(name) = j.get("tool").and_then(Value::as_str) {
+                    if !name.trim().is_empty() {
+                        return Ok(crate::agent::LlmReply {
+                            answer: full.clone(),
+                            tool: Some(crate::agent::ToolCall {
+                                name: name.to_string(),
+                                args: j.get("args").cloned().unwrap_or(json!({})),
+                            }),
+                        });
+                    }
+                }
+            }
+            Ok(crate::agent::LlmReply {
+                answer: full,
+                tool: None,
+            })
+        })
+    }
+}
+
+/// ToolExecutor 实现：接现有 crate 函数（检索/L1/图谱/风控/任务/待审），结果格式与前端 runTool 对齐。
+struct AgentExec {
+    root: std::path::PathBuf,
+}
+
+impl crate::agent::ToolExecutor for AgentExec {
+    fn exec<'a>(
+        &'a self,
+        name: &'a str,
+        args: &'a Value,
+    ) -> futures_util::future::BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            let root = self.root.clone();
+            match name {
+                "search" | "memory_search" => {
+                    let q = args.get("q").and_then(Value::as_str).unwrap_or("");
+                    let layer = if name == "memory_search" {
+                        "all".to_string()
+                    } else {
+                        args.get("layer").and_then(Value::as_str).unwrap_or("notes").to_string()
+                    };
+                    let r = crate::search::search(&root, q, &layer, true)?;
+                    if r.hits.is_empty() {
+                        return Ok("(无命中)".to_string());
+                    }
+                    let lines: Vec<String> = r
+                        .hits
+                        .iter()
+                        .take(8)
+                        .map(|h| {
+                            let sec = h
+                                .section
+                                .as_deref()
+                                .map(|s| format!(" 小节:{s}"))
+                                .unwrap_or_default();
+                            let text = if !h.context.is_empty() {
+                                h.context.clone()
+                            } else {
+                                h.text.clone()
+                            };
+                            format!("[{}:{} {}] {}", h.file, h.line, sec, text.chars().take(200).collect::<String>())
+                        })
+                        .collect();
+                    Ok(lines.join("\n"))
+                }
+                "read_l1" => {
+                    let file = args.get("file").and_then(Value::as_str).unwrap_or("");
+                    let q = args.get("q").and_then(Value::as_str);
+                    let max = args.get("max_chars").and_then(Value::as_u64).unwrap_or(1200) as usize;
+                    let r = crate::kb::read_l1(&root, file, q, max)?;
+                    Ok(if r.mode == "section" {
+                        r.content
+                    } else if r.mode == "section_list" {
+                        format!(
+                            "未定位到含该定位词的 ## 小节。可用小节：\n{}",
+                            r.sections.join("\n- ")
+                        )
+                    } else {
+                        let mut s = r.content;
+                        if !r.sections.is_empty() {
+                            s.push_str(&format!("\n\n小节：\n- {}", r.sections.join("\n- ")));
+                        }
+                        s
+                    })
+                }
+                "read_file" => {
+                    let p = args.get("path").and_then(Value::as_str).unwrap_or("");
+                    let Some(pb) = crate::kb::resolve_in_kb(&root, p) else {
+                        return Err("文件不存在或超出 KB 范围".to_string());
+                    };
+                    let content = std::fs::read_to_string(&pb).map_err(|e| e.to_string())?;
+                    Ok(content.chars().take(2000).collect())
+                }
+                "graph.linked" => {
+                    let p = args.get("path").and_then(Value::as_str).unwrap_or("");
+                    let v = crate::graph::linked(&root, p)?;
+                    let lines: Vec<String> = v
+                        .iter()
+                        .map(|l| match &l.dst_path {
+                            Some(dp) => format!("[[目标]] {} → {dp}", l.dst),
+                            None => format!("[[目标]] {} (悬空)", l.dst),
+                        })
+                        .collect();
+                    Ok(if lines.is_empty() { "(无出链)".to_string() } else { lines.join("\n") })
+                }
+                "graph.backlinks" => {
+                    let p = args.get("path").and_then(Value::as_str).unwrap_or("");
+                    let v = crate::graph::backlinks(&root, p)?;
+                    Ok(if v.is_empty() { "(无入链)".to_string() } else { v.join("\n") })
+                }
+                "graph.paths" => {
+                    let from = args.get("from").and_then(Value::as_str).unwrap_or("");
+                    let to = args.get("to").and_then(Value::as_str).unwrap_or("");
+                    let chain = crate::graph::paths(&root, from, to, 6)?;
+                    if chain.is_empty() {
+                        return Ok("6 跳内未找到关联路径（两文档不连通）".to_string());
+                    }
+                    Ok(chain
+                        .iter()
+                        .map(|n| format!("[{}] {}", n.r#type, n.title))
+                        .collect::<Vec<_>>()
+                        .join(" → "))
+                }
+                "risk.check" => {
+                    let report = crate::risk::scan(&root);
+                    let items = report
+                        .items
+                        .iter()
+                        .take(20)
+                        .map(|i| format!("{} [{}]", i.label, i.path))
+                        .collect::<Vec<_>>();
+                    Ok(if items.is_empty() { "无风控预警".to_string() } else { items.join("\n") })
+                }
+                "tasks" => {
+                    let tasks = crate::task::list(&root)?;
+                    let lines: Vec<String> = tasks
+                        .iter()
+                        .map(|t| format!("#{} [{}] {}", t.id, t.status, t.goal))
+                        .collect();
+                    Ok(if lines.is_empty() { "(无任务)".to_string() } else { lines.join("\n") })
+                }
+                "pending.list" => {
+                    let pending = crate::kb::list_pending(&root);
+                    let lines: Vec<String> = pending
+                        .iter()
+                        .map(|i| {
+                            let kind = if i.kind.is_empty() {
+                                String::new()
+                            } else {
+                                format!("[{}] ", i.kind)
+                            };
+                            format!("{kind}{}（{}）", i.title, i.path)
+                        })
+                        .collect();
+                    Ok(if lines.is_empty() { "无待审提案".to_string() } else { lines.join("\n") })
+                }
+                other => Err(format!("未知工具: {other}")),
+            }
+        })
+    }
+}
+
+/// /api/agent：Rust 侧 Agent 回路（Phase 4 M2）。
+/// body: { prompt, messages?, seed?, max_turns?, spawn? }
+/// - 默认：主回路 run_loop（messages/prompt 作为上下文起点）；
+/// - spawn=true：受限子 agent（独立上下文 seed + prompt，防递归由 ToolPolicy 硬保证）。
+#[derive(Deserialize)]
+struct AgentBody {
+    /// 用户指令（追加为最后一条 user 消息）
+    #[serde(default)]
+    prompt: String,
+    /// 初始 messages（可选；缺省 = 只有 prompt）
+    #[serde(default)]
+    messages: Vec<Value>,
+    /// 子 agent 独立上下文 seed（spawn=true 时使用；父 agent 消息绝不透传）
+    #[serde(default)]
+    seed: Vec<Value>,
+    /// 轮次上限（默认 8）
+    #[serde(default)]
+    max_turns: Option<usize>,
+    /// spawn=true → 受限子 agent 循环
+    #[serde(default)]
+    spawn: bool,
+}
+
+async fn agent_handler(State(st): State<AppState>, headers: HeaderMap, Json(body): Json<AgentBody>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let cfg = crate::config::load();
+    if cfg.llm.endpoint.trim().is_empty() || cfg.llm.model.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "未配置 LLM（llm.endpoint / llm.model）。请先 POST /api/config 配置。" })),
+        )
+            .into_response();
+    }
+    let llm = AgentLlm {
+        endpoint: cfg.llm.endpoint.clone(),
+        model: cfg.llm.model.clone(),
+        api_key: cfg.llm.api_key.clone(),
+    };
+    let exec = AgentExec { root: root.clone() };
+    let max_turns = body.max_turns.unwrap_or(8).clamp(1, 16);
+
+    let to_msgs = |arr: &[Value]| -> Vec<crate::agent::AgentMessage> {
+        arr.iter()
+            .filter_map(|m| {
+                let role = m.get("role").and_then(Value::as_str).unwrap_or("user");
+                let content = m.get("content").and_then(Value::as_str).unwrap_or("");
+                if content.is_empty() {
+                    None
+                } else {
+                    Some(crate::agent::AgentMessage {
+                        role: role.to_string(),
+                        content: content.to_string(),
+                    })
+                }
+            })
+            .collect()
+    };
+
+    let result = if body.spawn {
+        let seed = to_msgs(&body.seed);
+        crate::agent::spawn_subagent(
+            &llm,
+            &exec,
+            &root,
+            crate::agent::SubagentSpec {
+                prompt: body.prompt.clone(),
+                seed,
+                max_turns,
+            },
+        )
+        .await
+    } else {
+        let mut messages = to_msgs(&body.messages);
+        if !body.prompt.trim().is_empty() {
+            messages.push(crate::agent::AgentMessage::user(body.prompt.clone()));
+        }
+        let policy = crate::agent::ToolPolicy::new(root.clone());
+        crate::agent::run_loop(&llm, &exec, &policy, messages, max_turns).await
+    };
+
+    match result {
+        Ok(r) => Json(json!({
+            "ok": true,
+            "answer": r.answer,
+            "tool_calls": r.tool_calls,
+            "tools_used": r.tools_used
+        }))
+        .into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+// ---------- 跨会话记忆（Phase 4 M3：recall / extract / dream） ----------
+
+/// POST /api/memory/recall：提问前记忆召回（grep + 可选语义双路，只读）。
+/// body: { q, k? } → { query, semantic, hits: [{file,line,section,text,score}] }
+#[derive(Deserialize)]
+struct MemoryRecallBody {
+    q: String,
+    #[serde(default)]
+    k: Option<usize>,
+}
+
+async fn memory_recall(State(st): State<AppState>, headers: HeaderMap, Json(b): Json<MemoryRecallBody>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let k = b.k.unwrap_or(5).clamp(1, 20);
+    match crate::memory::recall(&root, &b.q, k).await {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+/// POST /api/memory/extract：会话收尾提炼 → pending/MEMORY.* 提案（人审后合并进 MEMORY.md）。
+/// body: { qa, source? } → { pending?: string }（无可沉淀时 pending 缺省）
+#[derive(Deserialize)]
+struct MemoryExtractBody {
+    /// 会话「问题+回答」对文本（收尾时由前端汇总传入）
+    qa: String,
+    /// 会话来源标注（如 sessions/2026-08-11-xxx.md）
+    #[serde(default)]
+    source: String,
+}
+
+async fn memory_extract(State(st): State<AppState>, headers: HeaderMap, Json(b): Json<MemoryExtractBody>) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let source = if b.source.trim().is_empty() {
+        "session".to_string()
+    } else {
+        b.source.clone()
+    };
+    let _guard = st.sync_lock.lock().await; // 写 pending 与 approve 共用互斥
+    match crate::memory::extract_proposal(&root, &b.qa, &source).await {
+        Ok(Some(f)) => {
+            crate::activity::record(&root, "pending", &format!("会话提炼提案: {f}"), json!({}));
+            Json(json!({ "ok": true, "pending": f })).into_response()
+        }
+        Ok(None) => Json(json!({ "ok": true, "pending": serde_json::Value::Null })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+/// POST /api/memory/dream：后台巩固（LLM 分析 MEMORY.md → 改进版提案进 pending）。
+/// 手动触发（心跳空闲可复用同一端点）；返回提案路径列表。
+async fn memory_dream(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let _guard = st.sync_lock.lock().await; // 写 pending 与 approve 共用互斥
+    match crate::memory::dream_proposals(&root).await {
+        Ok(created) => {
+            for f in &created {
+                crate::activity::record(&root, "pending", &format!("记忆巩固提案: {f}"), json!({}));
+            }
+            Json(json!({ "ok": true, "created": created })).into_response()
         }
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     }

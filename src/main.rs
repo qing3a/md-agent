@@ -5,6 +5,8 @@
 
 mod config;
 mod consolidate;
+mod embed;
+mod agent;
 mod fetch;
 mod heartbeat;
 mod ingest;
@@ -14,6 +16,7 @@ mod kb;
 mod llm;
 mod market;
 mod mcp;
+mod memory;
 mod search;
 mod server;
 mod page;
@@ -21,6 +24,7 @@ mod risk;
 mod task;
 mod activity;
 mod projects;
+mod vector;
 
 use std::path::{Path, PathBuf};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
