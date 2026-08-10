@@ -1773,6 +1773,7 @@
     'read_l1': (a) => api('/api/l1/read?file=' + encodeURIComponent(a.file || '') + '&q=' + encodeURIComponent(a.q || '') + '&max=' + (a.max_chars || 1200)),
     'graph.linked': (a) => api('/api/graph/linked?path=' + encodeURIComponent(a.path || '')),
     'graph.backlinks': (a) => api('/api/graph/backlinks?path=' + encodeURIComponent(a.path || '')),
+    'graph.paths': (a) => api('/api/graph/paths?from=' + encodeURIComponent(a.from || '') + '&to=' + encodeURIComponent(a.to || '') + '&max_depth=6'),
     'risk.check': async () => {
       // 风控预警：律师案件时效/证据缺口/信息缺失（纯规则，零 token）
       const r = await api('/api/risk');
@@ -2034,11 +2035,45 @@
     t.appendCard(cardShell('c-tasks', h.head, h.rows), 'toolcard');
     t.endMsg();
   }
+  // 路径图谱卡（第三批）：A→B 最短关联路径链（类型色 chips + 箭头 + 定位），纯 HTML 重放安全
+  const PATH_TYPES = {
+    case: '#f38ba8', party: '#89b4fa', evidence: '#fab387', timeline: '#94e2d5', law: '#f9e2af',
+    candidate: '#89b4fa', position: '#cba6f7', company: '#a6e3a1', comm: '#eba0ac', skill: '#cba6f7',
+    memory: '#94e2d5', rule: '#f9e2af', index: '#7f849c', note: '#a6adc8', doc: '#7f849c',
+    dir: '#585b70', tag: '#b4befe',
+  };
+  async function renderPathCard(t, args) {
+    const from = (args && args.from) || '';
+    const to = (args && args.to) || '';
+    if (!from || !to) return;
+    let r;
+    try {
+      r = await api('/api/graph/paths?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to) + '&max_depth=6');
+    } catch (e) { return; }
+    const chain = r.path || [];
+    const chips = chain.map((n, i) => {
+      const color = PATH_TYPES[n.type] || '#7f849c';
+      const chip = '<span class="card-row" style="gap:4px">' +
+        '<button class="c-btn" data-act="locate" data-path="' + escHtml(n.path) + '" title="' + escHtml(n.path) + '">' +
+        '<span class="lg-dot" style="background:' + color + '"></span> ' + escHtml(n.title || n.path.split('/').pop()) + '</button></span>';
+      return (i > 0 ? '<span class="path-arrow">→</span>' : '') + chip;
+    }).join(' ');
+    const head = chain.length
+      ? '🔗 关联路径 · ' + (chain.length - 1) + ' 跳'
+      : '🔗 关联路径 · 未找到（6 跳内不连通）';
+    const rows = chain.length
+      ? '<div class="c-rows" style="flex-direction:row;flex-wrap:wrap;align-items:center">' + chips + '</div>'
+      : '<div class="c-empty">⚠ 6 跳内未找到关联路径（两文档不连通）</div>';
+    t.beginMsg('tool');
+    t.appendCard(cardShell('c-path', head, rows), 'toolcard');
+    t.endMsg();
+  }
   const CARD_RENDERERS = {
     'risk.check': renderRiskCard,
     'pending.list': renderPendingCard,
     'graph.linked': (t, a) => renderLinkCard(t, a, 'linked'),
     'graph.backlinks': (t, a) => renderLinkCard(t, a, 'backlinks'),
+    'graph.paths': renderPathCard,
     'tasks': renderTaskCard,
   };
   // 在工具行之后追加交互卡片（无渲染器/取数失败静默跳过，不打断回答）
@@ -2133,6 +2168,12 @@
       return (r.linked || []).map((l) => '[[目标]] ' + (l.dst || '') + (l.resolved ? ' → ' + l.dst_path : ' (悬空)')).join('\n') || '(无出链)';
     }
     if (name === 'graph.backlinks') return (r.backlinks || []).join('\n') || '(无入链)';
+    if (name === 'graph.paths') {
+      // 路径链文本：A → B → C（含类型与标题）
+      const chain = r.path || [];
+      if (!chain.length) return '6 跳内未找到关联路径（两文档不连通）';
+      return chain.map((n) => '[' + (n.type || 'doc') + '] ' + (n.title || n.path)).join(' → ');
+    }
     if (name === 'risk.check') return r; // TOOL_API 已格式化为文本清单（label + [path] 每行一条）
     if (name === 'fetch' || name === 'page') return '标题: ' + (r.title || '') + '\n' + String(r.text || '').slice(0, 2000); // 方向 4：3000→2000 摘要注入
     if (name === 'file') return String(r.content || '').slice(0, 2000); // 方向 4：3000→2000 摘要注入

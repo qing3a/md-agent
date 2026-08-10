@@ -186,6 +186,15 @@ fn tools_json() -> Value {
             "example": "{\"path\":\"notes/架构/托盘应用.md\"}"
         },
         {
+            "name": "graph.paths",
+            "desc": "查两篇文档之间的最短关联路径（双链关系链，最多 6 跳）——用户问两个文档/人/案件有什么关系、怎么关联时调用",
+            "params": [
+                {"name": "from", "type": "string", "required": true, "desc": "起点文档相对 KB 根路径"},
+                {"name": "to", "type": "string", "required": true, "desc": "终点文档相对 KB 根路径"}
+            ],
+            "example": "{\"from\":\"notes/案件A.md\",\"to\":\"notes/当事人B.md\"}"
+        },
+        {
             "name": "risk.check",
             "desc": "风控预警扫描（律师案件：诉讼时效到期/证据待补/案件信息缺失，纯规则零 LLM）——用户问案件风险/时效/缺什么证据时调用",
             "params": [],
