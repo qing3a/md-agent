@@ -708,7 +708,9 @@ const APP = {
                     <span class="text-[11px] font-semibold" style="color:${color}">匹配度 ${score}</span>
                     <span class="text-[10px] text-gray-400">（AI 评估）</span>
                     <button class="ml-auto text-[10px] px-2 py-0.5 rounded border" style="border-color:#c7d2fe;color:#6366f1"
-                        data-propose="${payload}" title="写入知识库待审队列，人工确认后入库">📝 存入知识库（待审）</button>
+                        data-propose="${payload}" title="写入主知识库待审队列，人工确认后入库">📝 存入主库（待审）</button>
+                    <button class="text-[10px] px-2 py-0.5 rounded border" style="border-color:#a7f3d0;color:#059669"
+                        data-spacenote="${payload}" title="写入本应用私有知识空间（可直接使用）">📂 存入应用知识</button>
                 </div>
                 <div class="text-[10px] text-gray-500 font-medium">💡 亮点</div>
                 <ul class="text-[10px] text-gray-600 pl-3 mb-1" style="list-style:disc">${list(d.strengths)}</ul>
@@ -734,6 +736,29 @@ const APP = {
                 body: { path: 'pending/猎头分析-' + Date.now() + '.md', content: content },
             });
             this.showToast('✓ 已进入待审队列（自动化面板审核后可入库）', 'success');
+        } catch (e) {
+            this.showToast('写入失败: ' + ((e && e.message) || e), 'error');
+        }
+    },
+    // 应用空间（Phase A）：私有知识直接写入 apps/<id>/notes/（应用专属 agent 可检索）
+    async saveSpaceNote(payload) {
+        let p = {};
+        try { p = JSON.parse(decodeURIComponent(payload)); } catch (e) { this.showToast('数据解析失败', 'error'); return; }
+        const d = p.data || {};
+        const stamp = new Date().toISOString().slice(0, 10);
+        const name = '匹配分析-' + stamp + '-' + (parseInt(d.score, 10) || 0) + '.md';
+        const content = '---\ntitle: 匹配分析 ' + stamp + '\ntags: [匹配分析]\nupdated: ' + stamp + '\n---\n\n# 匹配分析 ' + stamp + '\n\n' +
+            String(p.text || '') + '\n\n匹配度：' + (d.score || 0) + '\n\n' +
+            '## 亮点\n' + (d.strengths || []).map((x) => '- ' + x).join('\n') + '\n\n' +
+            '## 风险\n' + (d.risks || []).map((x) => '- ' + x).join('\n') + '\n\n' +
+            '## 建议\n' + (d.suggestions || []).map((x) => '- ' + x).join('\n') + '\n';
+        this.showToast('写入应用知识空间…', 'warn');
+        try {
+            await window.hostApi('/api/file', {
+                method: 'POST',
+                body: { path: 'apps/agent-demo/notes/' + name, content: content },
+            });
+            this.showToast('✓ 已存入应用知识空间（下次分析自动参考）', 'success');
         } catch (e) {
             this.showToast('写入失败: ' + ((e && e.message) || e), 'error');
         }
@@ -911,8 +936,9 @@ const APP = {
             };
             window.parent.postMessage({
                 type: 'agent:ask',
+                space: true, // 应用空间：agent 自动参考本应用 notes/ 私有知识（历史评估沉淀）
                 text: '我是猎头。请对候选人推荐给出分析评价（120 字内）：候选人 ' + c.name +
-                      '（' + c.current_title + '，' + c.years + '年经验）。可先检索知识库确认候选人信息，基于知识库回答。' +
+                      '（' + c.current_title + '，' + c.years + '年经验）。可先检索知识库与应用知识空间确认候选人信息，基于这些回答。' +
                       '回答末尾请用 <!-- md-agent-app-data -->{"score":0,"strengths":[],"risks":[],"suggestions":[]}<!-- / --> 输出结构化匹配评估（score=匹配度 0-100，strengths/risks/suggestions 各 2-3 条简短中文）。',
                 context: [
                     { title: '岗位需求', content: (pos ? ('岗位：' + pos.title + '\n' + (pos.requirements || '') + '\n' + (pos.desc || '')) : '') },
@@ -992,10 +1018,12 @@ APP.init().catch(function(e) {
 });
 
 // ---- Agent 通道事件（agent:ask 的流式/工具/错误回推） ----
-// 活动流委托：结构化评估卡「存入知识库（待审）」按钮
+// 活动流委托：结构化评估卡「存入主库（待审）」/「存入应用知识」按钮
 document.addEventListener('click', function (ev) {
     var btn = ev.target.closest('[data-propose]');
-    if (btn) { APP.proposeToKB(btn.getAttribute('data-propose')); }
+    if (btn) { APP.proposeToKB(btn.getAttribute('data-propose')); return; }
+    var btn2 = ev.target.closest('[data-spacenote]');
+    if (btn2) { APP.saveSpaceNote(btn2.getAttribute('data-spacenote')); }
 });
 window.addEventListener('message', function (ev) {
     var msg = ev.data;

@@ -31,10 +31,10 @@ pub fn fingerprint(root: &Path) -> Vec<(String, i64, u64)> {
     let walk = ignore::WalkBuilder::new(root)
         .hidden(false)
         // pending 待审 + sessions 会话快照（流水非知识）不参与指纹，避免其变更触发重建；
-        // projects/ 是项目制隔离区（各项目独立 mini-kb，有自己的图谱/活动库），不污染全局指纹
+        // projects/ 项目制隔离区、apps/ 应用空间（私有知识/代码）同样不污染全局指纹
         .filter_entry(|e| {
             let n = e.file_name();
-            n != "pending" && n != "sessions" && n != "projects"
+            n != "pending" && n != "sessions" && n != "projects" && n != "apps"
         })
         .build();
     for ent in walk.flatten() {

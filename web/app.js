@@ -2704,7 +2704,7 @@
   // ---------- App → Agent（agent:ask 执行体）：App 提问走 Agent 回路 ----------
   // 上下文 = 引导前缀 + 工具清单 + 问题 + 应用上下文（context，MCP Apps 式结构化片段，不拼进提问文本）；
   // 回答流式渲染到终端（可审计）+ 按行推回 App；工具调用事件同步推送；完成信号携带结构化 data（约定标记提取）
-  async function runAsApp(text, tab, context) {
+  async function runAsApp(text, tab, context, spaceHint) {
     const post = (m) => { try { tab.iframe.contentWindow.postMessage(m, '*'); } catch (e) { /* 视图已关 */ } };
     const t = beginExe(); // App 请求同样绑定当前会话（后台执行语义）
     // 终端显示 App 提问（用户气泡样式，可审计）
@@ -2735,7 +2735,7 @@
     });
     const messages = [
       { role: 'system', content: system },
-      { role: 'user', content: '问题：' + text + ctxFrag },
+      { role: 'user', content: '问题：' + text + ctxFrag + (spaceHint || '') },
     ];
     let full = '';
     let toolCount = 0;
@@ -3592,10 +3592,22 @@
       }
       const text = String(msg.text || '').slice(0, 2000);
       if (!text) { tab.iframe.contentWindow.postMessage({ type: 'agent:error', message: '空提问' }, '*'); return; }
+      // 应用空间（Phase A）：space 参数 → 注入应用 notes/ 摘要（应用私有知识；agent 可用 file 工具读详情）
+      let spaceHint = '';
+      if (msg.space && tab.appId) {
+        try {
+          const sn = await api('/api/apps/' + tab.appId + '/notes');
+          const items = sn.notes || [];
+          if (items.length) {
+            spaceHint = '\n\n[应用知识空间 apps/' + tab.appId + '/notes/]（应用私有知识，需要时用 file 工具读取详情）\n' +
+              items.map((x) => '- ' + x.file + '：' + (x.snippet || '')).join('\n').slice(0, 4000);
+          }
+        } catch (e) { /* 无 notes 或失败静默 */ }
+      }
       busy = true;
       setBusyUI();
       try {
-        await runAsApp(text, tab, msg.context);
+        await runAsApp(text, tab, msg.context, spaceHint);
       } catch (e) {
         tab.iframe.contentWindow.postMessage({ type: 'agent:error', message: (e && e.message) || String(e) }, '*');
       } finally {
@@ -3623,6 +3635,18 @@
       if (!Core.appCan(msg.path, msg.method || 'GET', tab.perms)) {
         tab.iframe.contentWindow.postMessage({ id: msg.id, ok: false, error: '权限不足：应用未声明「' + (perm || '该') + '」权限' }, '*');
         return;
+      }
+      // 应用空间（Phase A）：应用写文件限定自己目录（apps/<appId>/ 私有空间）或待审队列（pending/ 人审提案），防越权写主库/其他应用
+      if (msg.method === 'POST' && /^\/api\/file/.test(msg.path || '')) {
+        let wp = '';
+        try {
+          const bd = typeof msg.body === 'string' ? JSON.parse(msg.body) : (msg.body || {});
+          wp = String(bd.path || '');
+        } catch (e) { wp = ''; }
+        if (!(wp.startsWith('apps/' + tab.appId + '/') || wp.startsWith('pending/'))) {
+          tab.iframe.contentWindow.postMessage({ id: msg.id, ok: false, error: '应用只能写入自己的空间（apps/<id>/）或待审队列（pending/）' }, '*');
+          return;
+        }
       }
     }
     try {

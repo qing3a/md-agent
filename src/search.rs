@@ -76,8 +76,9 @@ pub fn search(root: &Path, query: &str, layer: &str, ctx: bool) -> Result<Search
                 .git_ignore(false)
                 .git_global(false)
                 .git_exclude(false);
-            // 项目制隔离区（projects/ 各项目独立 mini-kb）不参与全局检索：硬隔离由遍历范围保证
-            b.filter_entry(|e| e.file_name() != "projects");
+            // 项目制隔离区（projects/ 各项目独立 mini-kb）不参与全局检索：硬隔离由遍历范围保证；
+            // 应用空间（apps/ 各应用私有知识/代码）同理不参与全局检索
+            b.filter_entry(|e| e.file_name() != "projects" && e.file_name() != "apps");
             if let Some(md) = depth {
                 b.max_depth(Some(md));
             }
@@ -96,8 +97,12 @@ pub fn search(root: &Path, query: &str, layer: &str, ctx: bool) -> Result<Search
             }
             let path = entry.path();
             // 待审目录不参与检索（pending 待确认后才落地）；L0 会话快照（sessions/）是流水非知识，也不进检索。
-            // 注意：不能用绝对路径组件判断 "projects"——项目根自身就位于 kb_root/projects/ 下（隔离由上方 filter_entry 排除目录保证）
-            if path.components().any(|c| c.as_os_str() == "pending" || c.as_os_str() == "sessions") {
+            // 注意：不能用绝对路径组件判断 "projects"——项目内检索 root 位于 kb_root/projects/ 下（隔离由上方 filter_entry 排除目录保证）；
+            // apps 同理由 filter_entry 排除，组件判断为防御性冗余（无项目内场景）
+            if path.components().any(|c| {
+                let n = c.as_os_str();
+                n == "pending" || n == "sessions" || n == "apps"
+            }) {
                 continue;
             }
             if path.extension().and_then(|e| e.to_str()) != Some("md") {

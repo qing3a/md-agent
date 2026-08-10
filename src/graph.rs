@@ -151,8 +151,9 @@ fn collect_md_files(root: &Path) -> Vec<PathBuf> {
         .git_ignore(false)
         .git_global(false)
         .git_exclude(false)
-        // 项目制隔离区（projects/ 各项目独立 mini-kb、独立图谱库）不并入全局图谱
-        .filter_entry(|e| e.file_name() != "projects")
+        // 项目制隔离区（projects/ 各项目独立 mini-kb、独立图谱库）不并入全局图谱；
+        // 应用空间（apps/ 私有知识/代码）同理不并入
+        .filter_entry(|e| e.file_name() != "projects" && e.file_name() != "apps")
         .build();
     for entry in walker {
         let Ok(entry) = entry else { continue };
@@ -162,8 +163,12 @@ fn collect_md_files(root: &Path) -> Vec<PathBuf> {
         }
         let p = entry.path();
         // 待审目录不进图谱（Phase 3 前置：pending 待确认后才落地）；L0 会话快照（sessions/）是流水非知识，也不进图谱。
-        // 注意：不能用绝对路径组件判断 "projects"——项目根自身就位于 kb_root/projects/ 下（隔离由上方 filter_entry 排除目录保证）
-        if p.components().any(|c| c.as_os_str() == "pending" || c.as_os_str() == "sessions") {
+        // 注意：不能用绝对路径组件判断 "projects"——项目内图谱 root 位于 kb_root/projects/ 下（隔离由上方 filter_entry 排除目录保证）；
+        // apps 同理由 filter_entry 排除，组件判断为防御性冗余
+        if p.components().any(|c| {
+            let n = c.as_os_str();
+            n == "pending" || n == "sessions" || n == "apps"
+        }) {
             continue;
         }
         if p.extension().and_then(|e| e.to_str()) == Some("md") {

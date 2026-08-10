@@ -100,6 +100,7 @@ pub async fn serve(
         .route("/api/ingest", post(ingest_handler))
         .route("/api/apps", get(apps_list))
         .route("/api/apps/{id}/data", get(app_data_get).post(app_data_post))
+        .route("/api/apps/{id}/notes", get(app_notes_list))
         .route("/api/hubs", get(hubs_list))
         .route("/api/hubs/connect", post(hubs_connect))
         .route("/api/hubs/refresh", post(hubs_refresh))
@@ -2241,6 +2242,59 @@ async fn app_data_post(State(s): State<AppState>, AxumPath(id): AxumPath<String>
         Ok(p) => Json(json!({ "ok": true, "path": p.display().to_string() })).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     }
+}
+
+/// 应用空间（Phase A）：notes/ 知识层摘要（文件名 + 首行片段），供 agent:ask space 注入与面板展示
+async fn app_notes_list(State(s): State<AppState>, AxumPath(id): AxumPath<String>) -> Response {
+    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") || id.contains(':') {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "非法 app id" }))).into_response();
+    }
+    let notes_dir = s.kb_root.join("apps").join(&id).join("notes");
+    let mut notes: Vec<serde_json::Value> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&notes_dir) {
+        let mut files: Vec<std::path::PathBuf> = rd
+            .filter_map(|e| e.ok().map(|x| x.path()))
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+            .collect();
+        files.sort();
+        for f in files {
+            let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            let snippet = std::fs::read_to_string(&f)
+                .ok()
+                .map(|c| {
+                    // 跳过 frontmatter 块（--- ... ---）取正文首个非空行
+                    let mut in_fm = false;
+                    let mut first = true;
+                    c.lines()
+                        .filter_map(|l| {
+                            let t = l.trim();
+                            if first && t == "---" {
+                                first = false;
+                                in_fm = true;
+                                return None;
+                            }
+                            if in_fm {
+                                if t == "---" {
+                                    in_fm = false;
+                                }
+                                return None;
+                            }
+                            if t.is_empty() {
+                                return None;
+                            }
+                            Some(t)
+                        })
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(160)
+                        .collect::<String>()
+                })
+                .unwrap_or_default();
+            notes.push(json!({ "file": name, "snippet": snippet }));
+        }
+    }
+    Json(json!({ "id": id, "notes": notes })).into_response()
 }
 
 #[cfg(test)]
