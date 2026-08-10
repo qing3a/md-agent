@@ -1961,7 +1961,7 @@
       case '/config': await cfg(); break;
       case '/remember': await remember(rest); break;
       case '/digest': await digest(rest.join(' ')); break;
-      case '/clear': if (sessionLog.length && !sessionArchived) archiveSession(); if (currentAbort) { try { currentAbort.abort(); } catch (e) { /* 忽略 */ } currentAbort = null; } for (const k in exes) exes[k].done = true; activeExe = null; history = []; saveHistory(); Core.resetSectionCache(); sessionFile = null; sessionLog = []; sessionArchived = false; sessionTaskId = null; term.writeln('多轮记忆已清空（系统提示词分节缓存已重置）'); break;
+      case '/clear': if (sessionLog.length && !sessionArchived) archiveSession(); if (sessionLog.length) memoryExtract(); if (currentAbort) { try { currentAbort.abort(); } catch (e) { /* 忽略 */ } currentAbort = null; } for (const k in exes) exes[k].done = true; activeExe = null; history = []; saveHistory(); Core.resetSectionCache(); sessionFile = null; sessionLog = []; sessionArchived = false; sessionTaskId = null; term.writeln('多轮记忆已清空（系统提示词分节缓存已重置）'); break;
       case '/link-all': await linkAll(); break;
       case '/fetch': await fetchCmd(rest); break;
       case '/page': await pageCmd(rest); break;
@@ -2071,6 +2071,12 @@
     if (toolsCache) return toolsCache;
     try { toolsCache = await api('/api/tools'); } catch (e) { toolsCache = []; }
     return toolsCache;
+  }
+
+  // M4 后端回路开关：localStorage 'md-agent-backend-loop' === '1' 时主提问走 /api/agent
+  // （Rust 侧 run_loop + ToolPolicy + 子 agent）；默认关（保留前端流式回路与交互卡片）
+  function backendLoopEnabled() {
+    try { return localStorage.getItem('md-agent-backend-loop') === '1'; } catch (e) { return false; }
   }
 
   // 技能注册表（Phase 3-C Step 2：trigger 命中注入）
@@ -2190,6 +2196,26 @@
         }
       })
       .catch(() => {});
+  }
+
+  // M3 会话收尾记忆提炼（fire-and-forget，零阻塞）：/clear 时把会话 QA 交后端提炼成
+  // pending/MEMORY.* 提案（人审后合并进 MEMORY.md）；LLM 未配置/失败静默
+  function memoryExtract() {
+    if (!sessionLog.length) return;
+    try {
+      const qa = sessionLog
+        .map((s) => 'Q: ' + String(s.q || '').slice(0, 300) + '\nA: ' + String(s.a || '').slice(0, 800))
+        .join('\n\n');
+      fetch('/api/memory/extract', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ qa, source: sessionFile || 'session' }),
+      })
+        .then((r) => r.json())
+        .then((j) => {
+          if (j && j.ok && j.pending) term.writeln('\x1b[90m记忆提炼已自动沉淀（git 可回滚）\x1b[0m');
+        })
+        .catch(() => {});
+    } catch (e) { /* 忽略 */ }
   }
 
   // 经验闭环 C1（审视层）：触发信号 → 后端 LLM 审视 → 经验提案进待审（fire-and-forget，零 token 触发）
@@ -2932,14 +2958,32 @@
       today: localToday(),
     });
     const skillTail = Core.buildSkillTail(skillTxt);
+    // M3 跨会话记忆召回（只读）：提问前并行调 /api/memory/recall → 命中片段注入 userMsg。
+    // 与 L2 检索片段同一注入位（RECALL_TEXT）；失败静默降级（不影响主提问链路）
+    let recallTxt = '';
+    try {
+      const rc = await api('/api/memory/recall', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ q: question, k: 5 }),
+      });
+      const hits = (rc && rc.hits) || [];
+      if (hits.length) {
+        recallTxt = hits.map((h) =>
+          '[记忆 ' + h.file + ':' + h.line + (h.section ? ' 小节:' + h.section : '') + '] ' +
+          String(h.text || '').slice(0, 200)
+        ).join('\n');
+      }
+    } catch (e) { /* 忽略 */ }
     // 上下文组装 v2：有 LLM 配置 → userMsg 只含「问题」+ 技能 + @ 指定文档（检索片段不再预注入，由 LLM 显式调工具取用）；
     // 无 LLM 配置 → 降级注入启发式预检索片段
     const userMsg = llmConfigured
       ? ['问题：' + question]
           .concat(skillTail ? ['', skillTail] : [])
           .concat(atFrag.length ? ['', '指定文档（用户 @ 提及，据此回答）：'].concat(atFrag) : [])
+          .concat(recallTxt ? ['', '跨会话记忆（自动召回，据此回答）：', recallTxt] : [])
           .join('\n')
       : ['问题：' + question, '', '知识库检索片段（L2）：', frag || '(无片段)']
+          .concat(recallTxt ? ['', '跨会话记忆（自动召回，据此回答）：', recallTxt] : [])
           .concat(skillTail ? ['', skillTail] : [])
           .join('\n');
     const messages = [
@@ -2972,6 +3016,38 @@
       if (r2 && !r2.toolJson) t.writeln('\x1b[90m(已丢失历史与检索片段，基于最小上下文回答)\x1b[0m');
       return r2;
     };
+    // M4 后端回路模式（可选）：启用后主提问走 POST /api/agent——Rust 侧 run_loop + ToolPolicy
+    // 硬安全校验 + 子 agent 能力，工具执行在后端完成；非流式先行，前端只渲染结果。
+    // 默认关闭（保留前端流式回路 + 交互卡片完整渲染）；失败/未启用自动回退前端回路。
+    let backendAnswer = null;
+    if (backendLoopEnabled() && llmConfigured) {
+      try {
+        const resp = await api('/api/agent', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages, max_turns: MAX_TOOL }),
+        });
+        if (resp && resp.ok) {
+          backendAnswer = resp;
+          t.writeln('\x1b[90m(后端回路 · 工具调用 ' + (resp.tool_calls || 0) + ' 次: ' + ((resp.tools_used || []).join(', ') || '无') + ')\x1b[0m');
+        } else {
+          t.writeln('\x1b[33m(后端回路不可用，回退前端回路: ' + ((resp && resp.error) || '未知') + ')\x1b[0m');
+        }
+      } catch (e) {
+        t.writeln('\x1b[33m(后端回路失败，回退前端回路: ' + ((e && e.message) || e) + ')\x1b[0m');
+      }
+    }
+    if (backendAnswer) {
+      full = backendAnswer.answer;
+      reasoning = '';
+      reasoningStartAt = null;
+      firstContentAt = null;
+      lastUsage = null;
+      toolCount = backendAnswer.tool_calls || 0;
+      t.beginMsg('assistant');
+      t.writeln(renderMdFile(full));
+      t.endMsg();
+      enhanceRefs();
+    } else {
     for (;;) {
       t.writeln('\x1b[90m(' + (toolCount ? '继续' : '回答中') + (web ? '·联网' : '') + '...)\x1b[0m');
       const r = await llmOnceWithFresh(messages);
@@ -3029,6 +3105,7 @@
         break;
       }
     }
+    } // end else（前端流式回路）
     // 本次回答 token 用量（深度思考块已在 llmStreamOnce 内展示；无则静默跳过）
     if (lastUsage && lastUsage.total_tokens) {
       t.writeln('\x1b[90m本次输出 ' + lastUsage.total_tokens + ' tokens\x1b[0m');
