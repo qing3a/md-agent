@@ -133,6 +133,11 @@ pub fn parse_links(content: &str) -> Vec<String> {
     let mut out = Vec::new();
     for cap in link_re().captures_iter(content) {
         if let Some(m) = cap.get(1) {
+            // 反引号内（行内代码/``` 围栏）的 [[...]] 是语法示例，不解析为链接
+            // （2026-08-11：反引号成对计数——奇数次未闭合=在代码段内）
+            if content[..m.start()].matches('`').count() % 2 == 1 {
+                continue;
+            }
             let target = m.as_str().trim().split('|').next().unwrap_or("").trim();
             if !target.is_empty() {
                 out.push(target.to_string());
@@ -330,6 +335,21 @@ fn rule_edges_for(
     out
 }
 
+/// 图谱外目标兜底（2026-08-11）：documents 表无此文档但磁盘文件存在
+/// （apps/ 等被图谱排除的目录、系统文件引用）→ 有效链接不算悬空；返回相对 kb 根的路径
+fn resolve_on_disk(root: &Path, tgt: &str) -> Option<String> {
+    for cand in [tgt.trim().to_string(), format!("{}.md", tgt.trim())] {
+        if cand.contains("..") {
+            continue; // 防路径逃逸（links 来自用户正文）
+        }
+        let p = root.join(&cand);
+        if p.is_file() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
 /// 解析链接目标 → 文档相对路径（精确路径 > 文件名 stem 匹配）
 fn resolve_link(target: &str, all_paths: &[String], stem_index: &HashMap<String, Vec<String>>) -> Option<String> {    let t = target.trim().trim_start_matches("./").to_string();
     for cand in [t.clone(), format!("{t}.md")] {
@@ -487,7 +507,9 @@ pub fn sync_graph(root: &Path) -> Result<GraphSyncReport, String> {
             .prepare("INSERT INTO links (src, dst, dst_path) VALUES (?1, ?2, ?3)")
             .map_err(|e| format!("prepare links 失败: {e}"))?;
         for (src, tgt) in &link_rows {
-            let dst_path = resolve_link(tgt, &all_paths, &stem_index);
+            // 图谱外目标兜底（2026-08-11）：documents 无此文档但磁盘存在 → 不算悬空
+            let dst_path =
+                resolve_link(tgt, &all_paths, &stem_index).or_else(|| resolve_on_disk(&root, tgt));
             if dst_path.is_none() {
                 dangling += 1;
             }
@@ -1562,11 +1584,14 @@ mod tests {
 
     #[test]
     fn parse_links_skips_code_blocks_and_empty() {
-        // 代码块内的 [[链接]] 是已知噪声源：当前实现不排除（如实记录行为），
-        // 但空目标 / 无链接文本必须不产出
+        // 2026-08-11：反引号内（行内代码/``` 围栏）的 [[链接]] 是语法示例，不解析为链接
+        assert_eq!(parse_links("使用 `[[文件名]]` 建立链接"), Vec::<String>::new());
+        assert_eq!(parse_links("```\n[[代码块]]\n```"), Vec::<String>::new());
         assert_eq!(parse_links("无链接"), Vec::<String>::new());
         assert_eq!(parse_links("[[]]"), Vec::<String>::new());
         assert_eq!(parse_links("[[   ]]"), Vec::<String>::new());
+        // 正常链接不受影响（混排：反引号外照常解析）
+        assert_eq!(parse_links("见 [[正常链接]] 与 `[[示例]]`"), vec!["正常链接".to_string()]);
     }
 
     #[test]
@@ -1625,6 +1650,20 @@ mod tests {
         let rep = audit(&root).unwrap();
         assert!(rep.dangling.iter().any(|(src, _)| src == "notes/C.md"));
         assert!(rep.orphans.iter().any(|p| p == "notes/D.md"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn dangling_resolves_off_graph_and_code_ticks() {
+        let root = test_root("dangling-fix");
+        // apps/ 被图谱排除（collect_md_files filter_entry），但 [[apps/match/SKILL.md]] 磁盘存在 → 不算悬空
+        write(&root, "apps/match/SKILL.md", "# Match\n");
+        // 反引号内的 [[语法示例]] 不解析为链接
+        write(&root, "notes/A.md", "# A\n\n见 [[apps/match/SKILL.md]] 与 `[[示例]]`\n");
+        let report = sync_graph(&root).unwrap();
+        assert_eq!(report.dangling, 0, "磁盘存在的图谱外目标不算悬空");
+        assert_eq!(report.links, 1, "反引号内语法示例不解析");
+        assert_eq!(report.docs, 1, "apps/ 不进图谱");
         fs::remove_dir_all(&root).unwrap();
     }
 
