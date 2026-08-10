@@ -273,7 +273,7 @@
   function typeOn(t) { return typeFilter[t] !== false; }
 
   var state = { nodes: [], edges: [], byPath: {}, sel: null,
-    dirNodes: [], tagNodes: [], structEdges: [], tagEdges: [], dirByPath: {}, tagOf: {} };
+    dirNodes: [], tagNodes: [], structEdges: [], tagEdges: [], ruleEdges: [], dirByPath: {}, tagOf: {} };
   var hangMap = {}; // 含悬空链接的文档集合（P8：一次 O(E) 预计算，替代每节点 O(E) 的 hasHang 扫描）
   var gfilter = { orphans: false, hang: false };
   var searchHits = [];   // 当前搜索命中的 path 集合
@@ -393,6 +393,22 @@
       });
       chips.appendChild(c);
     });
+    // 规则边开关（模板自动建边，伪类型：无节点，只控边显隐）
+    var rc = document.createElement('span');
+    rc.className = 'lg-chip' + (typeOn('rule') ? '' : ' off');
+    rc.innerHTML = '<span class="lg-dot" style="background:' + cv.accent + '"></span>' +
+      '规则<span class="lg-n">' + state.ruleEdges.length + '</span>';
+    rc.title = '模板自动推导的关联（案件↔证据、候选人↔职位/公司等）';
+    rc.addEventListener('click', function () {
+      typeFilter.rule = typeFilter.rule === false ? undefined : false;
+      rc.classList.toggle('off', !typeOn('rule'));
+      recomputeHidden();
+      renderTree();
+      renderHealth();
+      buildFullGraph();
+      saveUiState();
+    });
+    chips.appendChild(rc);
   }
 
   // ================= 主画布：力导向图 =================
@@ -610,6 +626,14 @@
         }
       });
     }
+    if (typeOn('rule')) {
+      state.ruleEdges.forEach(function (e) {
+        if (haveN[e.src] && haveN[e.dst_path] && !haveE[e.src + '→' + e.dst_path]) {
+          haveE[e.src + '→' + e.dst_path] = 1;
+          extraE.push({ s: e.src, t: e.dst_path, type: 'rule' });
+        }
+      });
+    }
     if (extraE.length) gp.edges = gp.edges.concat(extraE);
   }
   function finalizeGraph(title) {
@@ -723,6 +747,10 @@
       } else if (e.type === 'tag') {
         gpCtx.strokeStyle = withAlpha(cv.purple, 1); gpCtx.lineWidth = 1;
         gpCtx.globalAlpha = act ? 0.7 : 0.3;
+      } else if (e.type === 'rule') {
+        // 模板自动建边：accent 蓝点线（推导关联，区别于作者引用）
+        gpCtx.strokeStyle = withAlpha(cv.accent, 1); gpCtx.setLineDash([2, 3]); gpCtx.lineWidth = 1;
+        gpCtx.globalAlpha = act ? 0.8 : 0.45;
       } else if (linked) {
         gpCtx.strokeStyle = withAlpha(cv.fg, 1); gpCtx.lineWidth = 1.6; gpCtx.globalAlpha = 0.95;
       } else {
@@ -1423,6 +1451,7 @@
     state.tagNodes = g.tag_nodes || [];
     state.structEdges = g.structure_edges || [];
     state.tagEdges = g.tag_edges || [];
+    state.ruleEdges = g.rule_edges || [];
     state.byPath = {};
     g.nodes.forEach(function (n) { state.byPath[n.path] = n; });
     state.dirByPath = {};

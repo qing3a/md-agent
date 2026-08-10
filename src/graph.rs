@@ -37,7 +37,15 @@ fn connect(root: &Path) -> Result<Connection, String> {
             PRIMARY KEY (src, dst)
          );
          CREATE INDEX IF NOT EXISTS idx_links_dst ON links(dst_path);
-         CREATE INDEX IF NOT EXISTS idx_docs_project ON documents(project);",
+         CREATE INDEX IF NOT EXISTS idx_docs_project ON documents(project);
+         -- 模板自动建边（2026-08-11）：项目空间笔记不写双链，sync 时按模板语义生成规则边
+         CREATE TABLE IF NOT EXISTS rule_links (
+            src      TEXT NOT NULL,
+            dst_path TEXT NOT NULL,
+            kind     TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (src, dst_path)
+         );
+         CREATE INDEX IF NOT EXISTS idx_rule_dst ON rule_links(dst_path);",
     )
     .map_err(|e| format!("初始化图谱库失败: {e}"))?;
     // 存量库迁移：旧 schema 无 type 列（CREATE TABLE IF NOT EXISTS 不会补列）→ 幂等 ADD COLUMN
@@ -116,9 +124,192 @@ pub fn parse_links(content: &str) -> Vec<String> {
     out
 }
 
+// ---------- 模板自动建边（2026-08-11） ----------
+// 项目空间笔记是模板/表格/字段式记录，不写 [[双链]]——sync 时按模板语义生成规则边：
+//  律师：case ↔ party/evidence/timeline/law 同项目全连（模板即关系定义，kind=case-rel）
+//  猎头：职位需求「客户公司」↔ 客户公司「公司名称」（kind=position-company）
+//        候选人表「现职位/公司」列 ↔ 职位名称/公司名称（kind=candidate-position / candidate-company）
+//        沟通记录「对象」列 ↔ 职位名称/公司名称（kind=comm-rel）
+// 文本匹配=包含匹配（去空白、短侧 ≥2 字符防误配）；无向边按路径排序保证方向稳定。
+
+/// 提取正文 `- 键：值` 字段值（中英文冒号均可）
+fn field_value(body: &str, key: &str) -> Option<String> {
+    for line in body.lines() {
+        let line = line.trim().trim_start_matches("- ");
+        if let Some(rest) = line.strip_prefix(key) {
+            let rest = rest.strip_prefix('：').or_else(|| rest.strip_prefix(':'));
+            if let Some(v) = rest {
+                let v = v.trim();
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 表格内容行解析：| 开头、跳过首个 | 行（模板首行=表头）与分隔行（全部 cell 为 -/空）；返回各单元格 trim 值
+fn table_rows(body: &str) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = Vec::new();
+    let mut first = true;
+    for line in body.lines() {
+        let t = line.trim();
+        if !t.starts_with('|') {
+            continue;
+        }
+        let is_sep = t
+            .trim_matches('|')
+            .split('|')
+            .all(|c| c.trim().is_empty() || c.trim().chars().all(|ch| ch == '-'));
+        if is_sep {
+            continue;
+        }
+        if first {
+            first = false;
+            continue;
+        }
+        out.push(t.trim_matches('|').split('|').map(|c| c.trim().to_string()).collect());
+    }
+    out
+}
+
+/// 去空白后包含匹配（短侧 ≥2 字符，防单字/空串误配）
+fn text_matches(a: &str, b: &str) -> bool {
+    let norm = |s: &str| -> String { s.chars().filter(|c| !c.is_whitespace()).collect() };
+    let (na, nb) = (norm(a), norm(b));
+    if na.is_empty() || nb.is_empty() {
+        return false;
+    }
+    let (short, long) = if na.len() <= nb.len() {
+        (na.as_str(), nb.as_str())
+    } else {
+        (nb.as_str(), na.as_str())
+    };
+    short.chars().count() >= 2 && long.contains(short)
+}
+
+/// 无向边统一 (min, max) 方向入集（seen 去重：同对节点一条边，kind 首个 wins）
+fn push_pair(
+    seen: &mut std::collections::HashSet<(String, String)>,
+    out: &mut Vec<(String, String, String)>,
+    a: &str,
+    b: &str,
+    kind: &str,
+) {
+    if a == b {
+        return;
+    }
+    let (s, d) = if a < b {
+        (a.to_string(), b.to_string())
+    } else {
+        (b.to_string(), a.to_string())
+    };
+    if seen.insert((s.clone(), d.clone())) {
+        out.push((s, d, kind.to_string()));
+    }
+}
+
+/// 生成模板规则边：返回 (src, dst_path, kind)，已排序（src < dst，路径升序）
+fn rule_edges_for(
+    docs: &[(String, String)],     // (path, type)
+    contents: &[(String, String)], // (path, 原文)
+) -> Vec<(String, String, String)> {
+    let content_map: HashMap<&str, &str> =
+        contents.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+    let mut by_project: HashMap<String, Vec<&(String, String)>> = HashMap::new();
+    for d in docs {
+        by_project.entry(project_of(&d.0)).or_default().push(d);
+    }
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    for group in by_project.values() {
+        // 律师：case ↔ party/evidence/timeline/law 同项目全连
+        let lawyer_types = ["party", "evidence", "timeline", "law"];
+        for d in group.iter().filter(|d| d.1 == "case") {
+            for o in group.iter().filter(|d| lawyer_types.contains(&d.1.as_str())) {
+                push_pair(&mut seen, &mut out, &d.0, &o.0, "case-rel");
+            }
+        }
+        // 猎头：字段/表格提取
+        let mut positions: Vec<(&str, String)> = Vec::new(); // (path, 职位名称)
+        let mut companies: Vec<(&str, String)> = Vec::new(); // (path, 公司名称)
+        let mut candidates: Vec<(&str, String)> = Vec::new(); // (path, 「现职位/公司」列拼接)
+        let mut comms: Vec<(&str, String)> = Vec::new(); // (path, 「对象」列拼接)
+        for d in group {
+            let Some(body) = content_map.get(d.0.as_str()) else { continue };
+            match d.1.as_str() {
+                "position" => {
+                    if let Some(v) = field_value(body, "职位名称") {
+                        positions.push((d.0.as_str(), v));
+                    }
+                }
+                "company" => {
+                    if let Some(v) = field_value(body, "公司名称") {
+                        companies.push((d.0.as_str(), v));
+                    }
+                }
+                "candidate" => {
+                    let cells: Vec<String> =
+                        table_rows(body).iter().filter_map(|r| r.get(1)).cloned().collect();
+                    if !cells.is_empty() {
+                        candidates.push((d.0.as_str(), cells.join(" ")));
+                    }
+                }
+                "comm" => {
+                    let cells: Vec<String> =
+                        table_rows(body).iter().filter_map(|r| r.get(1)).cloned().collect();
+                    if !cells.is_empty() {
+                        comms.push((d.0.as_str(), cells.join(" ")));
+                    }
+                }
+                _ => {}
+            }
+        }
+        // position ↔ company：职位需求「客户公司」字段 ↔ 客户公司「公司名称」字段
+        for (pp, _pname) in &positions {
+            let Some(cv) = field_value(content_map.get(*pp).unwrap_or(&""), "客户公司") else {
+                continue;
+            };
+            for (cp, cname) in &companies {
+                if text_matches(&cv, cname) {
+                    push_pair(&mut seen, &mut out, pp, cp, "position-company");
+                }
+            }
+        }
+        // candidate ↔ position / company
+        for (cp, cells) in &candidates {
+            for (pp, pname) in &positions {
+                if text_matches(cells, pname) {
+                    push_pair(&mut seen, &mut out, cp, pp, "candidate-position");
+                }
+            }
+            for (mp, mname) in &companies {
+                if text_matches(cells, mname) {
+                    push_pair(&mut seen, &mut out, cp, mp, "candidate-company");
+                }
+            }
+        }
+        // comm ↔ position / company：「对象」列
+        for (cp, cells) in &comms {
+            for (pp, pname) in &positions {
+                if text_matches(cells, pname) {
+                    push_pair(&mut seen, &mut out, cp, pp, "comm-rel");
+                }
+            }
+            for (mp, mname) in &companies {
+                if text_matches(cells, mname) {
+                    push_pair(&mut seen, &mut out, cp, mp, "comm-rel");
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// 解析链接目标 → 文档相对路径（精确路径 > 文件名 stem 匹配）
-fn resolve_link(target: &str, all_paths: &[String], stem_index: &HashMap<String, Vec<String>>) -> Option<String> {
-    let t = target.trim().trim_start_matches("./").to_string();
+fn resolve_link(target: &str, all_paths: &[String], stem_index: &HashMap<String, Vec<String>>) -> Option<String> {    let t = target.trim().trim_start_matches("./").to_string();
     for cand in [t.clone(), format!("{t}.md")] {
         if all_paths.iter().any(|p| *p == cand) {
             return Some(cand);
@@ -183,6 +374,7 @@ pub struct GraphSyncReport {
     pub docs: usize,
     pub links: usize,
     pub dangling: usize,
+    pub rule_links: usize,
     pub db: String,
 }
 
@@ -231,6 +423,8 @@ pub fn sync_graph(root: &Path) -> Result<GraphSyncReport, String> {
         .map_err(|e| format!("清空 documents 失败: {e}"))?;
     conn.execute("DELETE FROM links", [])
         .map_err(|e| format!("清空 links 失败: {e}"))?;
+    conn.execute("DELETE FROM rule_links", [])
+        .map_err(|e| format!("清空 rule_links 失败: {e}"))?;
 
     {
         let mut stmt = conn
@@ -280,10 +474,24 @@ pub fn sync_graph(root: &Path) -> Result<GraphSyncReport, String> {
         }
     }
 
+    // 模板规则边（内容已在手，零额外读盘）
+    let typed: Vec<(String, String)> = docs.iter().map(|d| (d.0.clone(), d.2.clone())).collect();
+    let rule_rows = rule_edges_for(&typed, &contents);
+    {
+        let mut stmt = conn
+            .prepare("INSERT INTO rule_links (src, dst_path, kind) VALUES (?1, ?2, ?3)")
+            .map_err(|e| format!("prepare rule_links 失败: {e}"))?;
+        for (s, d, k) in &rule_rows {
+            stmt.execute(params![s, d, k])
+                .map_err(|e| format!("插入规则边失败: {e}"))?;
+        }
+    }
+
     Ok(GraphSyncReport {
         docs: docs.len(),
         links: link_rows.len(),
         dangling,
+        rule_links: rule_rows.len(),
         db: DB_FILE.to_string(),
     })
 }
@@ -371,7 +579,8 @@ pub fn stats(root: &Path) -> Result<GraphStats, String> {
     let orphans = cnt(
         "SELECT COUNT(*) FROM documents d
          WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.src = d.path)
-           AND NOT EXISTS (SELECT 1 FROM links l WHERE l.dst_path = d.path)",
+           AND NOT EXISTS (SELECT 1 FROM links l WHERE l.dst_path = d.path)
+           AND NOT EXISTS (SELECT 1 FROM rule_links r WHERE r.src = d.path OR r.dst_path = d.path)",
     )?;
     let projects = cnt("SELECT COUNT(DISTINCT project) FROM documents")?;
     Ok(GraphStats {
@@ -445,6 +654,14 @@ pub struct EdgeInfo {
     pub dst_path: Option<String>,
 }
 
+/// 模板规则边（推导产物，非作者引用）：kind 标注规则来源（case-rel / position-company / candidate-* / comm-rel）
+#[derive(Debug, Serialize)]
+pub struct RuleEdge {
+    pub src: String,
+    pub dst_path: String,
+    pub kind: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct GraphData {
     pub nodes: Vec<NodeInfo>,
@@ -454,6 +671,8 @@ pub struct GraphData {
     pub tag_nodes: Vec<NodeInfo>,
     pub structure_edges: Vec<EdgeInfo>,
     pub tag_edges: Vec<EdgeInfo>,
+    // 模板自动建边（2026-08-11）：同 ref 语义隔离，独立数组
+    pub rule_edges: Vec<RuleEdge>,
 }
 
 /// 全量图谱数据（供 /view 可视化视图）
@@ -611,6 +830,25 @@ pub fn graph_data(root: &Path) -> Result<GraphData, String> {
         }
     }
 
+    // 模板规则边（读表，不重新解析文件）
+    let rule_edges: Vec<RuleEdge> = {
+        let mut stmt = conn
+            .prepare("SELECT src, dst_path, kind FROM rule_links ORDER BY src, dst_path")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(Result::ok)
+            .map(|(src, dst_path, kind)| RuleEdge { src, dst_path, kind })
+            .collect()
+    };
+
     Ok(GraphData {
         nodes,
         edges,
@@ -618,6 +856,7 @@ pub fn graph_data(root: &Path) -> Result<GraphData, String> {
         tag_nodes,
         structure_edges,
         tag_edges,
+        rule_edges,
     })
 }
 
@@ -905,6 +1144,7 @@ pub fn orphans(root: &Path) -> Result<Vec<String>, String> {
             "SELECT path FROM documents d
              WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.src = d.path)
                AND NOT EXISTS (SELECT 1 FROM links l WHERE l.dst_path = d.path)
+               AND NOT EXISTS (SELECT 1 FROM rule_links r WHERE r.src = d.path OR r.dst_path = d.path)
              ORDER BY path",
         )
         .map_err(|e| e.to_string())?;
@@ -1181,6 +1421,131 @@ mod tests {
         assert_eq!(data.nodes.len(), 3, "nodes 仅文档");
         fs::remove_dir_all(&root).unwrap();
     }
+
+    // ---------- 模板自动建边（2026-08-11） ----------
+
+    #[test]
+    fn rule_edges_lawyer_full_connect() {
+        let root = test_root("rule-lawyer");
+        let files = [
+            ("案件总览", "case"),
+            ("当事人与诉求", "party"),
+            ("证据清单", "evidence"),
+            ("时间线", "timeline"),
+            ("法律研究", "law"),
+        ];
+        for (name, typ) in files {
+            write(
+                &root,
+                &format!("notes/{name}.md"),
+                &format!("---\ntype: {typ}\n---\n# {name}\n\n内容\n"),
+            );
+        }
+        let rep = sync_graph(&root).unwrap();
+        assert_eq!(rep.rule_links, 4, "case 与其余 4 类型各一条");
+        let data = graph_data(&root).unwrap();
+        assert_eq!(data.rule_edges.len(), 4);
+        assert!(data.rule_edges.iter().all(|e| e.kind == "case-rel"));
+        // 方向稳定：src < dst；每条都连到 case
+        assert!(data.rule_edges.iter().all(|e| e.src < e.dst_path));
+        let case = "notes/案件总览.md";
+        assert!(data.rule_edges.iter().all(|e| e.src == case || e.dst_path == case));
+        // 规则边不进度数（ref 语义隔离）
+        assert!(data.nodes.iter().all(|n| n.in_degree == 0 && n.out_degree == 0));
+        // 孤立被规则边救活（audit + stats 同口径）
+        assert!(orphans(&root).unwrap().is_empty());
+        assert_eq!(stats(&root).unwrap().orphans, 0);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn rule_edges_headhunter_field_match() {
+        let root = test_root("rule-hunter");
+        write(
+            &root,
+            "notes/职位需求.md",
+            "---\ntype: position\n---\n# 职位需求\n\n## 基本信息\n- 职位名称：高级工程师\n- 客户公司：蓝海科技\n",
+        );
+        write(
+            &root,
+            "notes/客户公司.md",
+            "---\ntype: company\n---\n# 客户公司\n\n## 基本信息\n- 公司名称：蓝海科技\n",
+        );
+        write(
+            &root,
+            "notes/候选人.md",
+            "---\ntype: candidate\n---\n# 候选人\n\n| 候选人 | 现职位/公司 | 关键匹配点 |\n|---|---|---|\n| 张三 | 蓝海科技 高级工程师 | 匹配 |\n| 李四 | 云启数据 产品经理 | 一般 |\n",
+        );
+        write(
+            &root,
+            "notes/沟通记录.md",
+            "---\ntype: comm\n---\n# 沟通记录\n\n| 日期 | 对象 | 方式 | 要点 |\n|---|---|---|---|\n| 2026-08-01 | 蓝海科技 | 电话 | 推进 |\n",
+        );
+        let rep = sync_graph(&root).unwrap();
+        assert_eq!(
+            rep.rule_links, 4,
+            "position↔company、candidate↔position、candidate↔company、comm↔company"
+        );
+        let data = graph_data(&root).unwrap();
+        let kinds: Vec<&str> = data.rule_edges.iter().map(|e| e.kind.as_str()).collect();
+        assert!(kinds.contains(&"candidate-position"));
+        assert!(kinds.contains(&"candidate-company"));
+        assert!(kinds.contains(&"position-company"));
+        assert!(kinds.contains(&"comm-rel"));
+        // 李四行（云启数据/产品经理）无对应目标，不额外产生边
+        assert_eq!(data.rule_edges.len(), 4);
+        // comm 只匹配公司（对象=蓝海科技，职位名=高级工程师 不匹配）
+        assert_eq!(
+            data.rule_edges.iter().filter(|e| e.kind == "comm-rel").count(),
+            1
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn rule_edges_empty_template_none() {
+        let root = test_root("rule-empty");
+        // 真实模板原样（字段空、表格无内容行）→ 无规则边
+        write(
+            &root,
+            "notes/职位需求.md",
+            "---\ntype: position\n---\n# 职位需求\n\n## 基本信息\n- 职位名称：\n- 客户公司：\n",
+        );
+        write(
+            &root,
+            "notes/客户公司.md",
+            "---\ntype: company\n---\n# 客户公司\n\n## 基本信息\n- 公司名称：\n",
+        );
+        write(
+            &root,
+            "notes/候选人.md",
+            "---\ntype: candidate\n---\n# 候选人\n\n| 候选人 | 现职位/公司 | 关键匹配点 | 薪资期望 | 进展阶段 | 下一步 | 备注 |\n|---|---|---|---|---|---|---|\n|  |  |  |  |  |  |  |\n",
+        );
+        let rep = sync_graph(&root).unwrap();
+        assert_eq!(rep.rule_links, 0, "空模板字段/单元格为空，不产生规则边");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn rule_edges_do_not_pollute_ref_semantics() {
+        let root = test_root("rule-isolation");
+        // 律师项目：无双链，规则边救活孤立，但 ref 边仍为 0、悬空仍为 0
+        for (name, typ) in [("案件总览", "case"), ("证据清单", "evidence")] {
+            write(
+                &root,
+                &format!("notes/{name}.md"),
+                &format!("---\ntype: {typ}\n---\n# {name}\n\n内容\n"),
+            );
+        }
+        let rep = sync_graph(&root).unwrap();
+        assert_eq!(rep.links, 0);
+        assert_eq!(rep.dangling, 0);
+        assert_eq!(rep.rule_links, 1);
+        let data = graph_data(&root).unwrap();
+        assert_eq!(data.edges.len(), 0, "规则边不进 ref 边数组");
+        assert!(data.rule_edges.iter().any(|e| e.kind == "case-rel"));
+        fs::remove_dir_all(&root).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -1217,6 +1582,12 @@ mod migration_tests {
             .exists([])
             .unwrap();
         assert!(has, "迁移后应有 type 列");
+        let has_rule: bool = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='rule_links'")
+            .unwrap()
+            .exists([])
+            .unwrap();
+        assert!(has_rule, "迁移后应自动建 rule_links 表");
         drop(conn); // 释放库句柄（WAL 文件锁），否则 remove_dir_all 失败
         // sync 后旧数据也能入库（type 缺省 doc）
         let _ = sync_graph(&root).unwrap();
