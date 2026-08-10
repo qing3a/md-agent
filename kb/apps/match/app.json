@@ -1,11 +1,12 @@
 {
   "id": "match",
   "name": "相亲评估工作台",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "entry": "index.html",
   "permissions": [
     "llm",
-    "storage"
+    "storage",
+    "agent"
   ],
   "description": "候选人评估：三维评分 / 心理画像 / 红旗扫描，看板多视图跟进"
 }

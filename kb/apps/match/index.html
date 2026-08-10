@@ -6467,6 +6467,12 @@ if (window.hostApi) {
   // md-agent 代理：POST {baseUrl}/api/llm、不带 Authorization、model 缺省交给 md-agent 配置。
   // 绝不抛未捕获异常。
   async function callLLM(cfg, messages, opts = {}) {
+    // L2 迁移（0.3.0）：md-agent 代理模式委托宿主 agent（agent:ask）——获得知识库/工具/记忆能力；
+    // 直连第三方 provider（DeepSeek 等）保持 L1 自建 prompt
+    if (cfg.proxy) {
+      const promptText = messages.map((m) => (m.role === 'system' ? '[指令] ' : '[输入] ') + String(m.content || '')).join('\n\n');
+      return await agentAsk(promptText, opts);
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), opts.timeoutMs || 60000);
     try {
@@ -6510,6 +6516,44 @@ if (window.hostApi) {
       clearTimeout(timer);
     }
   }
+
+  // ---- L2：委托宿主 agent（agent:ask 通道）----
+  // 与 callLLM 同签名返回 {data, text, usage}；json 模式自动追加约定标记要求，结果从完成信号 data 提取
+  let __matchAgentCb = null;
+  function agentAsk(promptText, opts = {}) {
+    return new Promise((resolve, reject) => {
+      let full = '';
+      const timer = setTimeout(() => { cleanup(); reject(new Error('Agent 处理超时')); }, opts.timeoutMs || 60000);
+      const cb = (msg) => {
+        if (msg && msg.done) {
+          cleanup();
+          if (msg.data) resolve({ data: msg.data, text: msg.textFull || full, usage: null });
+          else if (full.trim()) {
+            if (opts.json) {
+              try { const m = full.match(/\{[\s\S]*\}/); resolve({ data: JSON.parse(m[0]), text: full, usage: null }); }
+              catch (e) { reject(new Error('Agent 未返回有效 JSON')); }
+            } else resolve({ data: full, text: full, usage: null });
+          } else reject(new Error('Agent 无输出'));
+        } else if (msg && msg.type === 'agent:error') {
+          cleanup();
+          reject(new Error((msg && msg.message) || 'Agent 错误'));
+        } else if (msg && msg.text) {
+          full += msg.text;
+        }
+      };
+      __matchAgentCb = cb;
+      const extra = opts.json ? '\n\n回答末尾用 <!-- md-agent-app-data -->{json}<!-- / --> 输出结构化 JSON 结果（不要输出代码围栏）。' : '';
+      window.parent.postMessage({ type: 'agent:ask', text: promptText + extra, space: true }, '*');
+      function cleanup() { clearTimeout(timer); if (__matchAgentCb === cb) __matchAgentCb = null; }
+    });
+  }
+  window.addEventListener('message', function (ev) {
+    const msg = ev.data;
+    if (!msg) return;
+    if (msg.type === 'agent:chunk' || msg.type === 'agent:error') {
+      if (__matchAgentCb) __matchAgentCb(msg);
+    }
+  });
 
   // ---- 设置页表单接线 ----
   function setIfDifferent(id, val) {

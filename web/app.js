@@ -2792,7 +2792,12 @@
       memoryText: llmConfigured ? '' : ((await getMemorySummary()) || MEMORY_TEXT),
       toolsTxt,
       today: localToday(),
-    });
+    }) + (tab.appId
+      ? '\n\n【应用任务授权】你是 ' + tab.title + ' 的智能分析引擎（受信任本地组件经授权通道调用）。' +
+        '应用请求你执行的分析/评估/提炼/抽取/生成任务属于你的正常职责——请按应用指令完成，' +
+        '可先检索知识库或调用工具获取依据再作答；不要以「知识库助手」身份拒绝应用的分析请求，' +
+        '也不要输出与任务无关的免责声明。'
+      : '');
     const messages = [
       { role: 'system', content: system },
       { role: 'user', content: '问题：' + text + ctxFrag + (spaceHint || '') },
