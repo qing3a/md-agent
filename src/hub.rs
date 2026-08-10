@@ -39,6 +39,9 @@ pub struct HubApp {
     /// 集合内相对路径（连接时分析得出；空 = 旧索引条目，走 source 下载）
     #[serde(default)]
     pub rel: String,
+    /// 类别（skillhub API 的 category 字段：ai-agent/office-efficiency/…；md 集合型 hub 为空）
+    #[serde(default)]
+    pub category: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,6 +205,7 @@ pub fn analyze_collection(root: &Path) -> Vec<HubApp> {
             description: m.description,
             kind: "app".to_string(),
             rel,
+            category: String::new(),
         });
     }
 
@@ -253,6 +257,7 @@ pub fn analyze_collection(root: &Path) -> Vec<HubApp> {
             description: fm_get(&fm, "description").unwrap_or_default(),
             kind,
             rel,
+            category: fm_get(&fm, "category").unwrap_or_default(),
         });
     }
 
@@ -690,6 +695,7 @@ fn skillhub_entry(s: &serde_json::Value) -> Option<(HubApp, u64)> {
             description,
             kind: "skill".to_string(),
             rel: String::new(),
+            category: g("category", "").unwrap_or_default(),
         },
         downloads,
     ))
@@ -1080,6 +1086,10 @@ name: h
         let (a2, dl2) = skillhub_entry(&search).unwrap();
         assert_eq!(a2.id, "excel-xlsx");
         assert_eq!(dl2, 0);
+        // category 提取（ai-agent / office-efficiency 等）
+        let c = serde_json::json!({"slug": "docx", "category": "office-efficiency", "name": "DOCX", "summary": "s"});
+        let (a3, _) = skillhub_entry(&c).unwrap();
+        assert_eq!(a3.category, "office-efficiency");
         // 缺 slug → 跳过
         assert!(skillhub_entry(&serde_json::json!({"name": "no-slug"})).is_none());
     }

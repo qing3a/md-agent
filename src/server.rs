@@ -2649,6 +2649,7 @@ async fn market_catalog(State(s): State<AppState>) -> Response {
                 "hub": h.name,
                 "kind": a.kind,
                 "rel": a.rel,
+                "category": a.category,
             }));
         }
     }
