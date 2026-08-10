@@ -983,10 +983,80 @@ pub struct AuditReport {
     pub no_out: Vec<String>,
     pub duplicates: Vec<(String, usize, String)>,
     pub mentions: Vec<Mention>,
+    // 智能审计（2026-08-11，L0 扩展）：分级 + 健康分 + 趋势
+    /// 旧孤立（mtime > 180 天且无任何关联）——归档候选
+    pub stale: Vec<String>,
+    /// 近重复：标题规范化（去空白/全角标点/小写）后相同的组（排除精确重复）
+    pub near_duplicates: Vec<(String, Vec<String>)>,
+    /// 空笔记：正文（去 frontmatter）< 50 字符
+    pub empty_notes: Vec<String>,
+    /// 超长笔记：正文 > 30000 字符
+    pub oversized: Vec<String>,
+    /// 健康分 0-100（100 - critical×8 - warning×3 - info×1）
+    pub score: u8,
+    /// 较上次健康分变化（+/-/0；无历史为 null）
+    pub trend: Option<i32>,
+    pub critical: usize,
+    pub warning: usize,
+    pub info: usize,
 }
 
 /// 提及未链接检测：正文出现其他文档的「文件名 stem / 标题」但未建 [[链接]]。
 /// 关键词策略：中文文件名直接用 stem；ASCII stem（如 MEMORY）用其标题（长度≥3 才用，控噪声）。
+
+// 智能审计（2026-08-11，L0）：分级权重与阈值（集中可调）
+pub const STALE_DAYS: i64 = 180;
+pub const EMPTY_CHARS: usize = 100;
+pub const OVERSIZED_CHARS: usize = 30000;
+pub const SCORE_CRITICAL: i32 = 8;
+pub const SCORE_WARNING: i32 = 3;
+pub const SCORE_INFO: i32 = 1;
+
+/// 标题规范化（近重复判定）：去空白/全角标点/小写
+fn norm_title(t: &str) -> String {
+    t.chars()
+        .filter(|c| {
+            !c.is_whitespace()
+                && !"，。！？、；：（）()【】[]《》「」\"'".contains(*c)
+        })
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// 审计历史（kb/.audit-history.json）：metrics 变化才写新条目（防心跳高频写盘），保留 10 条；
+/// 返回较上次健康分变化
+fn update_history(
+    root: &Path,
+    score: u8,
+    metrics: &std::collections::BTreeMap<String, usize>,
+) -> Option<i32> {
+    let path = root.join(".audit-history.json");
+    let hist: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let last = hist.last().cloned();
+    let trend = last.as_ref().and_then(|l| {
+        let prev = l["score"].as_u64().unwrap_or(score as u64) as i32;
+        Some(score as i32 - prev)
+    });
+    let mv = serde_json::to_value(metrics).unwrap_or_default();
+    if last.as_ref().map(|l| l["metrics"] == mv).unwrap_or(false) {
+        return trend; // 指标未变化：不写盘（心跳高频调用的写盘闸门）
+    }
+    let mut hist = hist;
+    hist.push(serde_json::json!({
+        "date": chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+        "score": score,
+        "metrics": metrics,
+    }));
+    if hist.len() > 10 {
+        hist.drain(0..hist.len() - 10);
+    }
+    let _ = std::fs::write(&path, serde_json::to_string(&hist).unwrap_or_default());
+    trend
+}
+
 pub fn audit(root: &Path) -> Result<AuditReport, String> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let conn = connect(&root)?;
@@ -1074,8 +1144,10 @@ pub fn audit(root: &Path) -> Result<AuditReport, String> {
         rows.filter_map(Result::ok).collect()
     };
 
-    // 提及未链接
+    // 提及未链接 + 空/超长笔记（同一遍读文件正文）
     let mut mentions: Vec<Mention> = Vec::new();
+    let mut empty_notes: Vec<String> = Vec::new();
+    let mut oversized: Vec<String> = Vec::new();
     {
         // 关键词表：other_path -> keyword
         let mut keywords: Vec<(String, String)> = Vec::new();
@@ -1094,13 +1166,20 @@ pub fn audit(root: &Path) -> Result<AuditReport, String> {
         }
         let mut seen: HashSet<(String, String)> = HashSet::new();
         for (src, _) in &docs {
+            let Ok(content) = std::fs::read_to_string(root.join(src)) else {
+                continue;
+            };
+            let (_, body) = crate::kb::parse_frontmatter(&content);
+            let body_len = body.chars().count();
+            if body_len < EMPTY_CHARS {
+                empty_notes.push(src.clone());
+            } else if body_len > OVERSIZED_CHARS {
+                oversized.push(src.clone());
+            }
             // 自动生成的 INDEX.md 不参与补链接建议（改动会被下次 /sync 覆盖）
             if src == "INDEX.md" {
                 continue;
             }
-            let Ok(content) = std::fs::read_to_string(root.join(src)) else {
-                continue;
-            };
             for (dst_path, kw) in &keywords {
                 if dst_path == src {
                     continue;
@@ -1121,7 +1200,76 @@ pub fn audit(root: &Path) -> Result<AuditReport, String> {
             }
         }
         mentions.sort_by(|a, b| a.src.cmp(&b.src).then(a.dst_path.cmp(&b.dst_path)));
+        empty_notes.sort();
+        oversized.sort();
     }
+
+    // 旧孤立（mtime > 180 天且无任何关联）——归档候选
+    let stale: Vec<String> = {
+        let cutoff = chrono::Local::now().timestamp() - STALE_DAYS * 86400;
+        let mut stmt = conn
+            .prepare(
+                "SELECT d.path FROM documents d
+                 WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.src = d.path)
+                   AND NOT EXISTS (SELECT 1 FROM links l WHERE l.dst_path = d.path)
+                   AND NOT EXISTS (SELECT 1 FROM rule_links r WHERE r.src = d.path OR r.dst_path = d.path)
+                   AND d.mtime > 0 AND d.mtime < ?1
+                 ORDER BY d.path",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![cutoff], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(Result::ok).collect()
+    };
+
+    // 近重复：标题规范化后同组（排除标题精确相同——那些进 duplicates）
+    let mut near_duplicates: Vec<(String, Vec<String>)> = Vec::new();
+    {
+        let mut groups: HashMap<String, Vec<(String, String)>> = HashMap::new(); // norm -> [(path, title)]
+        for (path, title) in &docs {
+            let t = title.trim();
+            if t.is_empty() {
+                continue;
+            }
+            let norm = norm_title(t);
+            if norm.is_empty() {
+                continue;
+            }
+            groups.entry(norm).or_default().push((path.clone(), title.clone()));
+        }
+        let mut g: Vec<(String, Vec<String>)> = groups
+            .into_iter()
+            .filter(|(_, v)| {
+                v.len() > 1
+                    && v.iter()
+                        .map(|(_, t)| t.as_str())
+                        .collect::<HashSet<_>>()
+                        .len()
+                        > 1
+            })
+            .map(|(_, v)| (v[0].1.clone(), v.into_iter().map(|(p, _)| p).collect()))
+            .collect();
+        g.sort();
+        near_duplicates = g;
+    }
+
+    // 分级 + 健康分 + 历史趋势
+    let critical = duplicates.len() + dangling.len();
+    let warning = orphans.len() + near_duplicates.len() + empty_notes.len();
+    let info = mentions.len() + no_out.len() + oversized.len() + stale.len();
+    let score = (100i32 - (critical as i32 * SCORE_CRITICAL + warning as i32 * SCORE_WARNING + info as i32 * SCORE_INFO))
+        .clamp(0, 100) as u8;
+    let mut metrics: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    metrics.insert("orphans".into(), orphans.len());
+    metrics.insert("dangling".into(), dangling.len());
+    metrics.insert("duplicates".into(), duplicates.len());
+    metrics.insert("mentions".into(), mentions.len());
+    metrics.insert("stale".into(), stale.len());
+    metrics.insert("near_duplicates".into(), near_duplicates.len());
+    metrics.insert("empty".into(), empty_notes.len());
+    metrics.insert("oversized".into(), oversized.len());
+    let trend = update_history(&root, score, &metrics);
 
     Ok(AuditReport {
         docs: docs.len(),
@@ -1134,6 +1282,15 @@ pub fn audit(root: &Path) -> Result<AuditReport, String> {
         no_out,
         duplicates,
         mentions,
+        stale,
+        near_duplicates,
+        empty_notes,
+        oversized,
+        score,
+        trend,
+        critical,
+        warning,
+        info,
     })
 }
 
@@ -1803,6 +1960,83 @@ mod tests {
         for (f, _, _) in &r.recalled {
             assert!(seen.insert(f), "重复召回 {f}");
         }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+
+    
+    // ---------- 智能审计（2026-08-11，L0 扩展） ----------
+
+    #[test]
+    fn audit_smart_rules_detect_stale_near_empty_oversized() {
+        let root = test_root("audit-smart");
+        // 近重复：标题规范化后相同（空格/全角差异）；正文加长避免误判空笔记
+        write(&root, "notes/知识图谱UI美化.md", &format!("# 知识图谱UI美化\n\n{}", "内容内容".repeat(100)));
+        write(&root, "notes/知识图谱 UI 美化.md", &format!("# 知识图谱 UI 美化\n\n{}", "内容内容".repeat(100)));
+        // 空笔记：正文 < 100 字符
+        write(&root, "notes/空笔记.md", "# 空\n\n无内容\n");
+        // 超长：> 30000 字符
+        let mut big = String::from("# 超长\n\n");
+        for _ in 0..2000 {
+            big.push_str("这是一段很长很长很长的重复内容，用于填充超长笔记的判定阈值测试。\n");
+        }
+        write(&root, "notes/超长笔记.md", &big);
+        // 正常笔记（有链接，避免全部成孤立拖分）
+        write(&root, "notes/正常笔记.md", &format!("# 正常\n\n这是正常笔记的正文，长度足够。[[知识图谱UI美化]] {}", "填充".repeat(60)));
+        sync_graph(&root).unwrap();
+
+        let rep = audit(&root).unwrap();
+        assert!(rep.near_duplicates.iter().any(|(t, paths)| {
+            t.contains("知识图谱") && paths.len() == 2
+        }), "近重复应命中规范化后同组：{:?}", rep.near_duplicates);
+        assert!(rep.empty_notes.contains(&"notes/空笔记.md".to_string()));
+        assert!(rep.oversized.contains(&"notes/超长笔记.md".to_string()));
+        // 分级：空笔记/近重复 = Warning；超长 = Info
+        assert!(rep.warning >= 2);
+        assert!(rep.info >= 1);
+        assert!(rep.score < 100, "有告警健康分应低于 100");
+        assert!(rep.score >= 75, "小问题健康分应仍高位: {}", rep.score);
+        // 历史趋势：连续两次 audit，第一次 trend=None（无历史），第二次 trend 有值
+        assert!(rep.trend.is_none() || rep.trend == Some(0), "首次无历史或持平: {:?}", rep.trend);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn audit_stale_detects_old_orphans() {
+        let root = test_root("audit-stale");
+        write(&root, "notes/旧文档.md", "# 旧文档\n\n内容\n");
+        sync_graph(&root).unwrap();
+        // 把 mtime 改到 200 天前（std::fs 时间戳设置）
+        let f = root.join("notes/旧文档.md");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(200 * 86400);
+        let _ = std::fs::File::options().write(true).open(&f).and_then(|fh| {
+            use std::os::windows::fs::FileTimesExt;
+            fh.set_times(std::fs::FileTimes::new().set_modified(old))
+        });
+        sync_graph(&root).unwrap(); // 重建以刷新 mtime
+        let rep = audit(&root).unwrap();
+        assert!(rep.stale.contains(&"notes/旧文档.md".to_string()), "旧孤立应进 stale");
+        assert!(rep.orphans.contains(&"notes/旧文档.md".to_string()));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn audit_history_tracks_trend() {
+        let root = test_root("audit-trend");
+        write(&root, "notes/A.md", "# A\n\n内容\n");
+        sync_graph(&root).unwrap();
+        let rep1 = audit(&root).unwrap();
+        // 首次：历史无条目或刚写入
+        let hist_path = root.join(".audit-history.json");
+        assert!(hist_path.exists() || rep1.trend.is_some(), "audit 应落盘历史");
+        let rep2 = audit(&root).unwrap();
+        assert_eq!(rep2.trend, Some(0), "指标未变趋势应持平");
+        // 新增一个空笔记 → 指标变化 → 健康分下降 + trend 为负
+        write(&root, "notes/B.md", "# B\n");
+        sync_graph(&root).unwrap();
+        let rep3 = audit(&root).unwrap();
+        assert!(rep3.score < rep2.score, "新增告警健康分应下降");
+        assert!(rep3.trend.unwrap_or(0) < 0, "趋势应为负: {:?}", rep3.trend);
         fs::remove_dir_all(&root).unwrap();
     }
 }

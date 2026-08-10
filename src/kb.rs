@@ -572,6 +572,13 @@ pub fn list_pending(root: &Path) -> Vec<PendingItem> {
 
 /// 批准待审：新笔记移动到目标路径；记忆条目合并进 MEMORY.md。
 /// 返回 (落地路径, 备注)。成功后由调用方重建 INDEX 与图谱。
+/// 待审自动落地（2026-08-11 人审收敛：派生产物无人审，git 自动提交即回滚通道）。
+/// 提案写入 pending 后立即落地——与 approve_pending 同一路由（MEMORY 合并/SKILL 移入/
+/// CONSOLIDATE 替换/EXPERIENCE 落盘/note rename），失败返回 Err 由调用方埋点追溯。
+pub fn auto_land(root: &Path, rel: &str) -> Result<(String, Option<String>), String> {
+    approve_pending(root, rel, None)
+}
+
 pub fn approve_pending(root: &Path, rel: &str, edited: Option<&str>) -> Result<(String, Option<String>), String> {
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     let pending_dir = root.join("pending");

@@ -121,6 +121,18 @@
   .card.done { opacity: 0.45; }
   .card.done .txt::after { content: ' ✓ 已应用'; color: var(--green); }
   .empty { color: var(--dim); font-size: 12px; padding: 4px 2px; }
+  /* 智能审计（2026-08-11）：健康分大数字 + 趋势 + 报告按钮 */
+  #stats { align-items: center; }
+  .score-big { font-size: 34px; font-weight: 700; color: var(--blue); line-height: 1; margin-right: 4px; }
+  .score-big span { font-size: 13px; font-weight: 400; color: var(--dim); }
+  .trend { font-size: 12px; margin-right: 6px; }
+  .trend.up { color: var(--green); } .trend.down { color: var(--red); }
+  .chip.crit { border-color: var(--red); } .chip.warn { border-color: var(--yellow); }
+  /* 系统事件台账（2026-08-11） */
+  #events-list .ev { display: flex; gap: 10px; align-items: baseline; font-size: 12px;
+    padding: 5px 2px; border-bottom: 1px dashed var(--line); }
+  #events-list .ev .ts { color: var(--dim); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #events-list .ev .txt { flex: 1; word-break: break-all; }
 
   /* ---- 栏目③ 运营数据 ---- */
   .sec { font-size: 13px; font-weight: 700; color: var(--blue); margin: 14px 0 8px;
@@ -191,10 +203,14 @@
     </div>
   </div>
 
-  <!-- 栏目② 审核（默认折叠） -->
+  <!-- 栏目② 审核（默认折叠）：提案已自动落地（人审收敛 2026-08-11） -->
   <div class="sec-fold closed" id="sec-review">
-    <button class="sec-head">📥 审核 <span class="hint">待审写回 + 健康审计</span><span class="chev">▼</span></button>
+    <button class="sec-head">📥 审核 <span class="hint">提案自动落地 · 健康审计</span><span class="chev">▼</span></button>
     <div class="sec-body">
+      <p class="desc" style="color:var(--dim);font-size:12px;line-height:1.7;margin-bottom:8px">
+        提案（经验/推理建议/巩固/技能）已<b>自动落地</b>（人审收敛：派生产物无人审，git 自动提交即回滚通道）。
+        以下清单仅剩特殊项（如代码提案 pending/code/ 待 /dev apply）。
+      </p>
       <div id="pending-main">
         <div class="col" id="list-col"><h2>待审清单（点击查看 / 勾选批量）</h2><div id="list"></div></div>
         <div class="col" id="ctx-col"><h2>目标文档上下文（绿色 = 将写入）</h2><div id="ctx"><div id="empty">选择左侧待审项查看写入位置</div></div></div>
@@ -253,6 +269,18 @@
     </div>
   </div>
 
+  <!-- 栏目⑤ 系统事件（错误台账 2026-08-11）：工具失败/写入失败/视图错误/摩擦信号 -->
+  <div class="sec-fold closed" id="sec-events">
+    <button class="sec-head">⚠️ 系统事件 <span class="hint">错误 / 摩擦信号台账（操作审计）</span><span class="chev">▼</span></button>
+    <div class="sec-body">
+      <p class="desc" style="color:var(--dim);font-size:12px;line-height:1.7;margin-bottom:8px">
+        系统错误与摩擦信号台账（<code>kind=sys</code>）：工具失败、dev 白名单拒绝、写入失败、视图脚本错误、用户纠错信号。
+        自动沉淀记录（<code>kind=pending</code>）见上方运营时间线。数据源 <code>/api/activity?kind=sys</code>。
+      </p>
+      <div id="events-list"><div class="empty">加载中…</div></div>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -280,6 +308,7 @@
     refresh().catch(() => {});
     auditRefresh().catch(() => {});
     loadRisk().catch(() => {});
+    eventsRefresh().catch(() => {});
     init();
   }
 
@@ -508,14 +537,30 @@
   async function auditRefresh() {
     var r = await api('/api/audit');
     var stats = $('stats');
+    // 智能审计（2026-08-11）：健康分 + 趋势 + 分级 + 报告按钮（旧字段兼容）
+    var sc = r.score !== undefined ? r.score : '—';
+    var tr = '';
+    if (r.trend !== undefined && r.trend !== null) {
+      var tc = r.trend > 0 ? 'up' : r.trend < 0 ? 'down' : '';
+      var ti = r.trend > 0 ? '▲ +' + r.trend : r.trend < 0 ? '▼ ' + r.trend : '＝ 0';
+      tr = '<span class="trend ' + tc + '">' + ti + '</span>';
+    }
     stats.innerHTML =
+      '<span class="score-big">' + sc + '<span>/100</span></span>' + tr +
+      '<span class="chip' + ((r.critical || 0) ? ' crit' : '') + '">Critical <b>' + (r.critical || 0) + '</b></span>' +
+      '<span class="chip' + ((r.warning || 0) ? ' warn' : '') + '">Warning <b>' + (r.warning || 0) + '</b></span>' +
+      '<span class="chip">Info <b>' + (r.info || 0) + '</b></span>' +
+      '<button class="ok" onclick="genAuditReport(this)">🧠 生成智能审计报告</button>' +
       '<span class="chip">文档 <b>' + r.docs + '</b></span>' +
       '<span class="chip">链接 <b>' + r.links + '</b></span>' +
       '<span class="chip' + (r.dangling.length ? ' warn' : '') + '">悬空 <b>' + r.dangling.length + '</b></span>' +
       '<span class="chip' + (r.orphans.length ? ' bad' : '') + '">孤立 <b>' + r.orphans.length + '</b></span>' +
       '<span class="chip' + (r.no_out.length ? ' warn' : '') + '">无出链 <b>' + r.no_out.length + '</b></span>' +
       '<span class="chip' + (r.duplicates.length ? ' warn' : '') + '">重复标题 <b>' + r.duplicates.length + '</b></span>' +
-      '<span class="chip' + (r.mentions.length ? ' warn' : '') + '">补链建议 <b>' + r.mentions.length + '</b></span>';
+      '<span class="chip' + (r.mentions.length ? ' warn' : '') + '">补链建议 <b>' + r.mentions.length + '</b></span>' +
+      '<span class="chip' + ((r.stale || []).length ? ' warn' : '') + '">陈旧 <b>' + (r.stale || []).length + '</b></span>' +
+      '<span class="chip' + ((r.near_duplicates || []).length ? ' warn' : '') + '">近重复 <b>' + (r.near_duplicates || []).length + '</b></span>' +
+      '<span class="chip' + ((r.empty_notes || []).length ? ' warn' : '') + '">空笔记 <b>' + (r.empty_notes || []).length + '</b></span>';
     var c = $('content');
     c.innerHTML = '';
 
@@ -582,6 +627,57 @@
       s5.appendChild(aCard('<span class="txt"><b>' + esc(d[0]) + '</b> ×' + d[1] + '<br><span style="color:var(--dim)">' + esc(d[2] || '') + '</span></span>'));
     });
     c.appendChild(s5);
+
+    // 智能审计新规则（2026-08-11）：陈旧 / 近重复 / 空笔记 / 超长
+    function smartSec(title, icon, items, render) {
+      var s = document.createElement('div');
+      s.className = 'a-sec';
+      s.innerHTML = '<h2>' + icon + ' ' + title + ' <span class="n">(' + items.length + ')</span></h2>';
+      if (!items.length) {
+        var e = document.createElement('div'); e.className = 'empty'; e.textContent = '无 ✓';
+        s.appendChild(e);
+      }
+      items.forEach(function (it) { s.appendChild(aCard(render(it))); });
+      c.appendChild(s);
+    }
+    smartSec('陈旧孤立（归档候选）', '🕰', r.stale || [], function (p) { return '<span class="txt" style="color:var(--yellow)">' + esc(p) + '</span>'; });
+    smartSec('近重复', '🔎', r.near_duplicates || [], function (d) {
+      return '<span class="txt"><b>' + esc(d[0]) + '</b><br><span style="color:var(--dim)">' + esc((d[1] || []).join(' | ')) + '</span></span>';
+    });
+    smartSec('空笔记', '📭', r.empty_notes || [], function (p) { return '<span class="txt">' + esc(p) + '</span>'; });
+    smartSec('超长笔记', '📦', r.oversized || [], function (p) { return '<span class="txt">' + esc(p) + '</span>'; });
+  }
+  // 智能审计报告（2026-08-11，L2）：规则 + LLM 复审 → 落盘 notes/审计/
+  window.genAuditReport = async function (btn) {
+    var old = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '生成中…（LLM 复审可能需要数十秒）';
+    try {
+      var r = await api('/api/audit/report', { method: 'POST', body: '{}' });
+      var msg = '✅ 报告已生成：' + r.path + '（健康分 ' + r.score + '/100' +
+        (r.trend !== null && r.trend !== undefined ? '，较上次 ' + (r.trend > 0 ? '+' : '') + r.trend : '') + '）' +
+        (r.llm ? '，LLM 复审 ' + (r.reviews || []).length + ' 组' : '，纯规则（未配置 LLM 或无需复审）');
+      alert(msg);
+    } catch (e) {
+      alert('生成失败: ' + e.message);
+    }
+    btn.disabled = false;
+    btn.textContent = old;
+  };
+  // 系统事件台账（2026-08-11）：kind=sys 错误/摩擦信号
+  async function eventsRefresh() {
+    var box = $('events-list');
+    var r = await api('/api/activity?kind=sys&limit=30').catch(function () { return { items: [] }; });
+    var items = (r && r.items) || [];
+    if (!items.length) {
+      box.innerHTML = '<div class="empty">暂无系统事件（工具失败/写入失败/视图错误/摩擦信号会记录在这里）</div>';
+      return;
+    }
+    box.innerHTML = items.map(function (it) {
+      var bad = /失败|拒绝|错误|异常/.test(it.text || '');
+      return '<div class="ev"><span class="ts">' + esc(String(it.ts || '').slice(11, 19)) + '</span>' +
+        '<span class="txt"' + (bad ? ' style="color:var(--red)"' : '') + '>' + esc(it.text || '') + '</span></div>';
+    }).join('');
   }
   window.applyLink = async function (btn, src, dst) {
     btn.disabled = true;

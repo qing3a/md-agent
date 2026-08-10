@@ -78,6 +78,7 @@ pub async fn serve(
         .route("/api/graph/tags", get(graph_tags))
         .route("/api/graph/projects", get(graph_projects))
         .route("/api/audit", get(audit_report))
+        .route("/api/audit/report", post(audit_report_gen))
         .route("/api/heartbeat", get(heartbeat_get))
         .route("/api/heartbeat", post(heartbeat_set))
         .route("/api/risk", get(risk_check))
@@ -566,12 +567,26 @@ async fn file_write(State(st): State<AppState>, headers: HeaderMap, Json(body): 
         }
     }
     match tokio::fs::write(&pb, body.content).await {
-        Ok(()) => Json(json!({ "ok": true, "path": body.path })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Ok(()) => {
+            // 人审收敛（2026-08-11）：写 pending/ 即提案（applySave 的 SKILL./DECISION./盲区等）→ 自动落地
+            let rel = pb.strip_prefix(&root).unwrap_or(&pb).to_string_lossy().replace('\\', "/");
+            if rel.starts_with("pending/") && rel.ends_with(".md") {
+                match crate::kb::auto_land(&root, &rel) {
+                    Ok((desc, _)) => crate::activity::record(&root, "pending", &format!("自动沉淀: {desc}"), json!({})),
+                    Err(e) => crate::activity::record(&root, "sys", &format!("自动沉淀失败 {rel}: {e}"), json!({})),
+                }
+            }
+            Json(json!({ "ok": true, "path": body.path })).into_response()
+        }
+        Err(e) => {
+            // 错误台账（2026-08-11）：写入失败进系统事件
+            crate::activity::record(&root, "sys", &format!("写入失败 {}: {e}", body.path), json!({}));
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -960,6 +975,11 @@ async fn analyze_hot_doc(root: &Path, rel: &str) {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(&dst, body_text);
+    // 人审收敛（2026-08-11）：推理建议自动落地（派生产物，git 自动提交即回滚）
+    match crate::kb::auto_land(&root, &ppath) {
+        Ok((desc, _)) => crate::activity::record(&root, "pending", &format!("自动沉淀: {desc}"), json!({})),
+        Err(e) => crate::activity::record(&root, "sys", &format!("自动沉淀失败 {ppath}: {e}"), json!({})),
+    }
 }
 
 /// 纯同步：给 src_rel 文档追加 [[dst_stem]] 双链（已存在则跳过）。返回 Ok(Some(link_line)) 或 Ok(None)。
@@ -1067,6 +1087,13 @@ async fn experience_propose(State(st): State<AppState>, headers: HeaderMap, Json
     if signal.is_empty() || context.is_empty() {
         return Json(json!({ "ok": false, "error": "缺 signal/context" })).into_response();
     }
+    // 错误台账（2026-08-11）：摩擦信号（用户纠错/工具失败）进系统事件，可追溯
+    crate::activity::record(
+        &root,
+        "sys",
+        &format!("摩擦信号 {signal}: {}", context.chars().take(120).collect::<String>()),
+        json!({}),
+    );
     // 防刷：同信号高频忽略（简单记录，不重复提案）
     let cfg = crate::config::load();
     if cfg.llm.endpoint.trim().is_empty() {
@@ -1151,6 +1178,11 @@ fn write_experience_proposal(root: &Path, signal: &str, context: &str, review: O
         let _ = std::fs::create_dir_all(parent);
     }
     if std::fs::write(&dst, body).is_ok() {
+        // 人审收敛（2026-08-11）：经验提案自动落地（git 自动提交即回滚）
+        match crate::kb::auto_land(root, &ppath) {
+            Ok((desc, _)) => crate::activity::record(root, "pending", &format!("自动沉淀: {desc}"), json!({})),
+            Err(e) => crate::activity::record(root, "sys", &format!("自动沉淀失败 {ppath}: {e}"), json!({})),
+        }
         Some(ppath)
     } else {
         None
@@ -1275,6 +1307,8 @@ async fn dev_patch(State(st): State<AppState>, Json(b): Json<DevPatchBody>) -> R
     for f in &files {
         let rel = f.path.trim().trim_start_matches(['/', '\\']);
         if !is_dev_allowed(rel) {
+            // 错误台账（2026-08-11）：dev 白名单拒绝进系统事件
+            crate::activity::record(&st.kb_root, "sys", &format!("dev.patch 拒绝: {} 不在白名单", f.path), json!({}));
             return (StatusCode::FORBIDDEN, Json(json!({ "error": format!("路径不在 dev 白名单内: {}", f.path) }))).into_response();
         }
     }
@@ -1597,6 +1631,101 @@ async fn audit_report(State(st): State<AppState>, headers: HeaderMap) -> Respons
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
+}
+
+/// 智能审计报告（2026-08-11，L2）：规则报告 + LLM 复审重点项（重复标题/近重复组）
+/// → 合成分级报告落盘 notes/审计/（可版本管理、与上次对比）。LLM 未配置自动降级纯规则。
+async fn audit_report_gen(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    if let Err(e) = ensure_graph(&root) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
+    }
+    let rep = match crate::graph::audit(&root) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    };
+    let now = chrono::Local::now();
+
+    // LLM 复审：重复标题/近重复组逐组判断（一次调用问全部组）
+    let mut reviews: Vec<Value> = Vec::new();
+    let mut llm_used = false;
+    let cfg = crate::config::load();
+    if !cfg.llm.endpoint.trim().is_empty() {
+        let mut items: Vec<Value> = Vec::new();
+        for (title, _count, paths) in &rep.duplicates {
+            items.push(json!({ "type": "重复标题", "title": title, "paths": paths.split('|').map(str::trim).collect::<Vec<_>>() }));
+        }
+        for (title, paths) in &rep.near_duplicates {
+            items.push(json!({ "type": "近重复", "title": title, "paths": paths }));
+        }
+        if !items.is_empty() {
+            let body = serde_json::json!({ "messages": [
+                { "role": "system", "content": "你是知识库审计复审器。判断每组文档是否真重复/该合并/有矛盾/该保留，只输出 JSON：{\"reviews\":[{\"item\":\"第 N 组\",\"verdict\":\"merge|keep|conflict|archive\",\"note\":\"≤60字理由\"}]}，组数与输入 items 一致。" },
+                { "role": "user", "content": serde_json::to_string(&json!({ "items": items })).unwrap_or_default() },
+            ]});
+            if let Ok(resp) = crate::llm::chat_responses(&cfg.llm.endpoint, &cfg.llm.model, &cfg.llm.api_key, &body).await {
+                let full = resp["choices"][0]["message"]["content"].as_str().unwrap_or("");
+                if let Some(v) = extract_json_from_text(full) {
+                    reviews = v["reviews"].as_array().cloned().unwrap_or_default();
+                    llm_used = true;
+                }
+            }
+        }
+    }
+
+    // 合成分级报告
+    let mut md = String::new();
+    md.push_str(&format!("# 智能审计报告 {}\n\n", now.format("%Y-%m-%d %H:%M")));
+    md.push_str(&format!("- 健康分：**{}**/100", rep.score));
+    if let Some(t) = rep.trend {
+        md.push_str(&format!("（较上次 {}）", if t > 0 { format!("+{t}") } else { t.to_string() }));
+    }
+    md.push_str(&format!("\n- 分级：Critical {} · Warning {} · Info {}", rep.critical, rep.warning, rep.info));
+    md.push_str(&format!("\n- LLM 复审：{}", if llm_used { "已执行" } else { "未执行（未配置或无需复审）" }));
+    md.push_str(&format!("\n- 文档 {} · 链接 {}\n", rep.docs, rep.links));
+    let section = |md: &mut String, title: &str, items: Vec<String>| {
+        if items.is_empty() { return; }
+        md.push_str(&format!("\n## {}\n", title));
+        for i in items { md.push_str(&format!("- {i}\n")); }
+    };
+    section(&mut md, "🔴 悬空链接", rep.dangling.iter().map(|(s, d)| format!("{s} → {d}")).collect());
+    section(&mut md, "🔴 重复标题", rep.duplicates.iter().map(|(t, c, p)| format!("「{t}」×{c}：{p}")).collect());
+    section(&mut md, "🟡 孤立文档", rep.orphans.clone());
+    section(&mut md, "🟡 近重复", rep.near_duplicates.iter().map(|(t, p)| format!("「{t}」：{}", p.join(" | "))).collect());
+    section(&mut md, "🟡 空笔记", rep.empty_notes.clone());
+    section(&mut md, "🟢 陈旧孤立（归档候选）", rep.stale.clone());
+    section(&mut md, "🟢 超长笔记", rep.oversized.clone());
+    section(&mut md, "🟢 无出链", rep.no_out.clone());
+    section(&mut md, "🟢 提及未链接", rep.mentions.iter().map(|m| format!("{} 提到 {}", m.src, m.dst_path)).collect());
+    if !reviews.is_empty() {
+        md.push_str("\n## 🤖 LLM 复审结论\n");
+        for r in &reviews {
+            md.push_str(&format!("- {}：**{}** — {}\n",
+                r["item"].as_str().unwrap_or("?"),
+                r["verdict"].as_str().unwrap_or("?"),
+                r["note"].as_str().unwrap_or("")));
+        }
+    }
+
+    let dir = root.join("notes/审计");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("建报告目录失败: {e}") }))).into_response();
+    }
+    let fname = format!("审计-{}.md", now.format("%Y-%m-%d-%H%M"));
+    if let Err(e) = std::fs::write(dir.join(&fname), md) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("写报告失败: {e}") }))).into_response();
+    }
+    crate::activity::record(&root, "pending", &format!("自动沉淀: 审计报告 {fname}"), json!({}));
+    Json(json!({
+        "ok": true, "path": format!("notes/审计/{fname}"),
+        "score": rep.score, "trend": rep.trend,
+        "critical": rep.critical, "warning": rep.warning, "info": rep.info,
+        "llm": llm_used, "reviews": reviews,
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -3047,6 +3176,9 @@ fn cache_breakers(entries: &[Value]) -> std::collections::HashMap<String, u64> {
 struct ActivityListParams {
     #[serde(default = "default_activity_limit")]
     limit: i64,
+    /// kind 过滤（sys=错误台账、pending=自动沉淀；空=全部）
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 fn default_activity_limit() -> i64 {
@@ -3058,7 +3190,7 @@ async fn activity_list(State(s): State<AppState>, headers: HeaderMap, Query(q): 
         Ok(r) => r,
         Err(r) => return r,
     };
-    match crate::activity::list(&root, q.limit) {
+    match crate::activity::list(&root, q.limit, q.kind.as_deref()) {
         Ok(v) => Json(v).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }

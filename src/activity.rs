@@ -47,14 +47,17 @@ fn meta_str_to_value(it: &mut Value) {
     }
 }
 
-/// 最近 N 条（倒序，时间线新→旧展示）
-pub fn list(root: &Path, limit: i64) -> Result<Value, String> {
+/// 最近 N 条（倒序，时间线新→旧展示）；kind 非空时只返回该类型（如 sys=错误台账、pending=自动沉淀）
+pub fn list(root: &Path, limit: i64, kind: Option<&str>) -> Result<Value, String> {
     let conn = open(root)?;
     let mut stmt = conn
-        .prepare("SELECT id, ts, kind, text, meta FROM activity ORDER BY id DESC LIMIT ?1")
+        .prepare(
+            "SELECT id, ts, kind, text, meta FROM activity
+             WHERE (?1 IS NULL OR kind = ?1) ORDER BY id DESC LIMIT ?2",
+        )
         .map_err(|e| format!("查询活动失败: {e}"))?;
     let rows = stmt
-        .query_map(params![limit], |r| {
+        .query_map(params![kind, limit], |r| {
             Ok(json!({
                 "id": r.get::<_, i64>(0)?,
                 "ts": r.get::<_, String>(1)?,

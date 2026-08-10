@@ -42,7 +42,12 @@ pub fn generate_proposals(root: &Path, audit: &AuditReport) -> std::io::Result<V
 > 巩固器 v1 规则：MEMORY.md 检测到 {dup} 行完全重复，已去重（只删重复行，内容无损）。人工可编辑后批准。\n\n{new_content}"
             );
             std::fs::write(root.join(&file), prop)?;
-            created.push(file);
+            created.push(file.clone());
+            // 人审收敛（2026-08-11）：巩固提案自动落地（git 自动提交即回滚通道）
+            match crate::kb::auto_land(root, &file) {
+                Ok((desc, _)) => crate::activity::record(root, "pending", &format!("自动沉淀: {desc}"), serde_json::json!({})),
+                Err(e) => crate::activity::record(root, "sys", &format!("自动沉淀失败 {file}: {e}"), serde_json::json!({})),
+            }
         }
     }
 
@@ -64,7 +69,12 @@ pub fn generate_proposals(root: &Path, audit: &AuditReport) -> std::io::Result<V
 > 巩固器 v1：检测到标题「{title}」重复 {count} 次（{paths}）。正文为第一篇原文，人工决定合并/去重后批准替换。\n\n{orig}"
             );
             std::fs::write(root.join(&file), prop)?;
-            created.push(file);
+            created.push(file.clone());
+            // 人审收敛（2026-08-11）：巩固提案自动落地（git 自动提交即回滚通道）
+            match crate::kb::auto_land(root, &file) {
+                Ok((desc, _)) => crate::activity::record(root, "pending", &format!("自动沉淀: {desc}"), serde_json::json!({})),
+                Err(e) => crate::activity::record(root, "sys", &format!("自动沉淀失败 {file}: {e}"), serde_json::json!({})),
+            }
         }
     }
 
@@ -93,12 +103,14 @@ mod tests {
     fn dedup_memory_lines() {
         let root = test_root("dedup");
         fs::write(root.join("MEMORY.md"), "# M\n\n## 2026-08-03\n- A\n- A\n- B\n").unwrap();
-        let audit = AuditReport { docs: 1, links: 0, dangling: vec![], orphans: vec![], no_out: vec![], duplicates: vec![], mentions: vec![] };
+        let audit = AuditReport { docs: 1, links: 0, dangling: vec![], orphans: vec![], no_out: vec![], duplicates: vec![], mentions: vec![], stale: vec![], near_duplicates: vec![], empty_notes: vec![], oversized: vec![], score: 100, trend: None, critical: 0, warning: 0, info: 0 };
         let created = generate_proposals(&root, &audit).unwrap();
         assert!(created.iter().any(|c| c.contains("CONSOLIDATE.MEMORY")));
-        let prop = fs::read_to_string(root.join(&created[0])).unwrap();
-        assert_eq!(prop.matches("- A").count(), 1); // 重复行只剩一条
-        assert!(prop.contains("- B"));
+        // 人审收敛（2026-08-11）：提案自动落地——pending 已消费，MEMORY.md 已去重
+        assert!(!root.join(&created[0]).exists(), "提案已自动落地（pending 清空）");
+        let mem = fs::read_to_string(root.join("MEMORY.md")).unwrap();
+        assert_eq!(mem.matches("- A").count(), 1); // 重复行只剩一条
+        assert!(mem.contains("- B"));
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -106,11 +118,14 @@ mod tests {
     fn dup_title_proposal() {
         let root = test_root("dup");
         fs::write(root.join("notes/a.md"), "# 重复主题\n\n内容A\n").unwrap();
-        let audit = AuditReport { docs: 2, links: 0, dangling: vec![], orphans: vec![], no_out: vec![], duplicates: vec![("重复主题".to_string(), 2, "notes/a.md | notes/b.md".to_string())], mentions: vec![] };
+        let audit = AuditReport { docs: 2, links: 0, dangling: vec![], orphans: vec![], no_out: vec![], duplicates: vec![("重复主题".to_string(), 2, "notes/a.md | notes/b.md".to_string())], mentions: vec![], stale: vec![], near_duplicates: vec![], empty_notes: vec![], oversized: vec![], score: 92, trend: None, critical: 1, warning: 0, info: 0 };
         let created = generate_proposals(&root, &audit).unwrap();
         assert!(created.iter().any(|c| c.contains("CONSOLIDATE.DUP")));
-        let prop = fs::read_to_string(root.join(&created[0])).unwrap();
-        assert!(prop.contains("重复 2 次") && prop.contains("内容A"));
+        // 人审收敛（2026-08-11）：提案自动落地——target 被替换为提案正文（原文内容保留）
+        assert!(!root.join(&created[0]).exists(), "提案已自动落地（pending 清空）");
+        let landed = fs::read_to_string(root.join("notes/a.md")).unwrap();
+        assert!(landed.contains("内容A"), "落地后保留原文内容");
+        assert!(landed.contains("重复"), "落地后含重复处理说明");
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -118,7 +133,7 @@ mod tests {
     fn no_proposal_when_clean() {
         let root = test_root("clean");
         fs::write(root.join("MEMORY.md"), "# M\n- A\n- B\n").unwrap();
-        let audit = AuditReport { docs: 1, links: 0, dangling: vec![], orphans: vec![], no_out: vec![], duplicates: vec![], mentions: vec![] };
+        let audit = AuditReport { docs: 1, links: 0, dangling: vec![], orphans: vec![], no_out: vec![], duplicates: vec![], mentions: vec![], stale: vec![], near_duplicates: vec![], empty_notes: vec![], oversized: vec![], score: 100, trend: None, critical: 0, warning: 0, info: 0 };
         let created = generate_proposals(&root, &audit).unwrap();
         assert!(created.is_empty());
         fs::remove_dir_all(&root).unwrap();
@@ -187,7 +202,12 @@ pub async fn generate_llm_proposals(
             first = parts[0]
         );
         std::fs::write(root.join(&file), prop).map_err(|e| format!("写入提案失败: {e}"))?;
-        created.push(file);
+        created.push(file.clone());
+        // 人审收敛（2026-08-11）：巩固提案自动落地（git 自动提交即回滚通道）
+        match crate::kb::auto_land(root, &file) {
+            Ok((desc, _)) => crate::activity::record(root, "pending", &format!("自动沉淀: {desc}"), serde_json::json!({})),
+            Err(e) => crate::activity::record(root, "sys", &format!("自动沉淀失败 {file}: {e}"), serde_json::json!({})),
+        }
     }
     Ok(created)
 }

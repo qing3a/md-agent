@@ -3825,6 +3825,8 @@
       if (!tab.err) {
         tab.err = msg.msg;
         term.writeln('\x1b[31m视图 [' + tab.title + '] 脚本错误: ' + (msg.msg || '') + '\x1b[0m');
+        // 错误台账（2026-08-11）：视图脚本错误进系统事件（kind=sys 可追溯）
+        api('/api/activity', { method: 'POST', body: { kind: 'sys', text: '视图错误 [' + (tab.title || '?') + ']: ' + String(msg.msg || '').slice(0, 200), meta: {} } }).catch(function () {});
       }
       return;
     }

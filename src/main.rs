@@ -64,6 +64,14 @@ fn main() {
         std::process::exit(1);
     }
 
+    // 人审收敛（2026-08-11）：存量待审提案启动时自动落地（git 自动提交即回滚通道）
+    for item in kb::list_pending(&kb_root) {
+        match kb::auto_land(&kb_root, &item.path) {
+            Ok((desc, _)) => eprintln!("自动沉淀: {desc}"),
+            Err(e) => eprintln!("自动沉淀失败 {}: {e}", item.path),
+        }
+    }
+
     let url = format!("http://127.0.0.1:{port}");
 
     // HTTP 服务线程
