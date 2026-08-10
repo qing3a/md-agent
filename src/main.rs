@@ -13,6 +13,7 @@ mod graph;
 mod kb;
 mod llm;
 mod market;
+mod mcp;
 mod search;
 mod server;
 mod page;
@@ -33,6 +34,7 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(8756);
     let mut no_tray = std::env::var("MD_AGENT_NO_TRAY").is_ok_and(|v| v == "1");
+    let mut mcp_mode = false;
 
     let mut args = std::env::args().skip(1).peekable();
     while let Some(a) = args.next() {
@@ -45,6 +47,8 @@ fn main() {
                 }
             }
             "--no-tray" => no_tray = true,
+            // MCP 薄壳模式：stdio JSON-RPC server（Claude Code / Harness / Cursor 一行配置接入）
+            "--mcp" => mcp_mode = true,
             "-h" | "--help" => {
                 print_help();
                 return;
@@ -84,6 +88,12 @@ fn main() {
 
     println!("md-agent 已启动: {url}   KB: {}", kb_root.display());
     println!("检索示例: {url}/api/search?q=检索&layer=all   重建索引: POST /api/kb/sync");
+
+    // MCP 薄壳模式：stdio JSON-RPC 主循环（阻塞；HTTP 服务线程已在上方启动）
+    if mcp_mode {
+        crate::mcp::run_stdio(port);
+        return;
+    }
 
     if no_tray {
         println!("[--no-tray] 开发模式，Ctrl+C 退出。");

@@ -18,7 +18,7 @@ grep = "0.3"
 regex = "1"
 ignore = "0.4"
 # LLM 代理（Ollama / OpenAI 兼容，走后端防 CORS 与密钥暴露）
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "blocking"] }
 futures-util = "0.3"
 # 知识图谱（SQLite 元数据 + 双向链接）
 rusqlite = { version = "0.32", features = ["bundled"] }
