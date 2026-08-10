@@ -32,13 +32,14 @@ fn tools() -> Vec<McpTool> {
     vec![
     McpTool {
         name: "search",
-        desc: "检索知识库 L2 内容层（全文 ripgrep，多关键词任一命中，返回命中片段与所属小节）",
+        desc: "检索知识库 L2 内容层（全文 ripgrep，多关键词任一命中，返回命中片段与所属小节；附 related 激活扩散联想文档）",
         schema: json!({
             "type": "object",
             "properties": {
                 "q": {"type": "string", "description": "检索关键词，空格分隔"},
                 "layer": {"type": "string", "description": "notes（默认）| all（含 L1 规范/记忆）"},
-                "ctx": {"type": "string", "description": "传 1 返回命中行前后上下文"}
+                "ctx": {"type": "string", "description": "传 1 返回命中行前后上下文"},
+                "expand": {"type": "string", "description": "激活扩散：0 关闭（默认开，沿图谱边联想 related 文档）"}
             },
             "required": ["q"]
         }),
@@ -46,12 +47,14 @@ fn tools() -> Vec<McpTool> {
             let q = a.get("q").and_then(Value::as_str).unwrap_or("");
             let layer = a.get("layer").and_then(Value::as_str).unwrap_or("notes");
             let ctx = a.get("ctx").and_then(Value::as_str).unwrap_or("");
+            let expand = a.get("expand").and_then(Value::as_str).unwrap_or("");
             (
                 format!(
-                    "/api/search?q={}&layer={}&ctx={}",
+                    "/api/search?q={}&layer={}&ctx={}&expand={}",
                     urlencode(q),
                     urlencode(layer),
-                    urlencode(ctx)
+                    urlencode(ctx),
+                    urlencode(expand)
                 ),
                 "GET",
                 None,
@@ -81,7 +84,7 @@ fn tools() -> Vec<McpTool> {
     },
     McpTool {
         name: "memory_search",
-        desc: "记忆检索：检索整个持久记忆系统（L1 规范/记忆/索引 + L2 内容层），返回 top 片段",
+        desc: "记忆检索：检索整个持久记忆系统（L1 规范/记忆/索引 + L2 内容层），返回 top 片段与 related 联想文档",
         schema: json!({
             "type": "object",
             "properties": {"q": {"type": "string", "description": "检索关键词，空格分隔"}},

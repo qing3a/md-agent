@@ -1137,6 +1137,130 @@ pub fn related(root: &Path, path: &str) -> Result<Vec<String>, String> {
     Ok(v)
 }
 
+// ---------- 激活扩散检索（2026-08-11，第二步） ----------
+// 搜索命中沿图谱边扩散 1-2 跳：引用边（作者双链）权 1.0、规则边（模板推导）权 0.8；
+// 标签/结构边不参与（目录与标签会糊掉扩散语义）。簇提升只加分不扣分。
+
+/// 扩散超参（集中便于 A/B 调参）
+pub const RULE_EDGE_W: f64 = 0.8;
+pub const HOP_DECAY: f64 = 0.5;
+pub const CLUSTER_BOOST: f64 = 0.3;
+pub const MAX_RECALL: usize = 10;
+
+#[derive(Debug, Default, Serialize)]
+pub struct SpreadResult {
+    /// 命中文件的簇提升分（key=文件路径，与原始分相加后重排）
+    pub boosted: HashMap<String, f64>,
+    /// 补充召回：未命中但被扩散到的邻居 (file, score, via 来源文件)，分降序截断
+    pub recalled: Vec<(String, f64, String)>,
+}
+
+/// 无向邻接表：引用边 1.0 + 规则边 0.8；标签/结构边不参与
+fn adjacency(conn: &Connection) -> Result<HashMap<String, Vec<(String, f64)>>, String> {
+    let mut adj: HashMap<String, Vec<(String, f64)>> = HashMap::new();
+    let mut add = |a: &str, b: &str, w: f64| {
+        if a != b {
+            adj.entry(a.to_string()).or_default().push((b.to_string(), w));
+            adj.entry(b.to_string()).or_default().push((a.to_string(), w));
+        }
+    };
+    let mut stmt = conn
+        .prepare("SELECT src, dst_path FROM links WHERE dst_path IS NOT NULL")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    for row in rows.flatten() {
+        add(&row.0, &row.1, 1.0);
+    }
+    let mut stmt = conn
+        .prepare("SELECT src, dst_path FROM rule_links")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    for row in rows.flatten() {
+        add(&row.0, &row.1, RULE_EDGE_W);
+    }
+    Ok(adj)
+}
+
+/// 激活扩散：seeds=(文件, 原始分) 命中集。返回簇提升分（命中集内重排用）与补充召回
+/// （未命中邻居，1 跳=seed 分×边权，2 跳再×0.5 跳衰减，去重取高分）
+pub fn spread_activation(root: &Path, seeds: &[(String, f64)]) -> Result<SpreadResult, String> {
+    let conn = connect(root)?;
+    let adj = adjacency(&conn)?;
+    let max_s = seeds.iter().fold(0.0f64, |m, s| m.max(s.1));
+    if max_s <= 0.0 {
+        return Ok(SpreadResult::default());
+    }
+    let norm: HashMap<&str, f64> = seeds.iter().map(|(f, s)| (f.as_str(), s / max_s)).collect();
+    let seed_set: HashSet<&str> = seeds.iter().map(|s| s.0.as_str()).collect();
+
+    let mut boosted: HashMap<String, f64> = HashMap::new();
+    let mut recalled_map: HashMap<String, (f64, String)> = HashMap::new(); // file -> (score, via)
+    for (f, _) in seeds {
+        let fscore = norm.get(f.as_str()).copied().unwrap_or(0.0);
+        let Some(neighbors) = adj.get(f.as_str()) else { continue };
+        for (n, w) in neighbors {
+            if let Some(ns) = norm.get(n.as_str()) {
+                // n 也是命中 → f 获得簇提升（有图背书的命中上浮）
+                *boosted.entry(f.clone()).or_insert(0.0) += ns * w * CLUSTER_BOOST;
+                continue;
+            }
+            if seed_set.contains(n.as_str()) {
+                continue;
+            }
+            // 1 跳召回
+            let s1 = fscore * w;
+            let e = recalled_map.entry(n.clone()).or_insert((0.0, f.clone()));
+            if s1 > e.0 {
+                *e = (s1, f.clone());
+            }
+            // 2 跳召回（经 n 中转，衰减 0.5）
+            if let Some(ns2) = adj.get(n.as_str()) {
+                for (m, w2) in ns2 {
+                    if m == n || seed_set.contains(m.as_str()) {
+                        continue;
+                    }
+                    let s2 = fscore * w * w2 * HOP_DECAY;
+                    let e2 = recalled_map.entry(m.clone()).or_insert((0.0, n.clone()));
+                    if s2 > e2.0 {
+                        *e2 = (s2, n.clone());
+                    }
+                }
+            }
+        }
+    }
+    let mut recalled: Vec<(String, f64, String)> = recalled_map
+        .into_iter()
+        .map(|(f, (s, v))| (f, s, v))
+        .collect();
+    recalled.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    recalled.truncate(MAX_RECALL);
+    Ok(SpreadResult { boosted, recalled })
+}
+
+/// 批量取文档元信息（激活扩散 related 填充）：path -> (title, summary)
+pub fn doc_meta(root: &Path, paths: &[String]) -> Result<HashMap<String, (String, String)>, String> {
+    let conn = connect(root)?;
+    let mut stmt = conn
+        .prepare("SELECT path, title, summary FROM documents WHERE path = ?1")
+        .map_err(|e| e.to_string())?;
+    let mut out = HashMap::new();
+    for p in paths {
+        let mut rows = stmt
+            .query_map(params![p], |r| Ok((r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+            .map_err(|e| e.to_string())?;
+        if let Some(row) = rows.next() {
+            if let Ok(m) = row {
+                out.insert(p.clone(), m);
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub fn orphans(root: &Path) -> Result<Vec<String>, String> {
     let conn = connect(root)?;
     let mut stmt = conn
@@ -1544,6 +1668,92 @@ mod tests {
         let data = graph_data(&root).unwrap();
         assert_eq!(data.edges.len(), 0, "规则边不进 ref 边数组");
         assert!(data.rule_edges.iter().any(|e| e.kind == "case-rel"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    // ---------- 激活扩散检索（2026-08-11，第二步） ----------
+
+    #[test]
+    fn spread_activation_recalls_rule_and_ref_neighbors() {
+        let root = test_root("spread-basic");
+        // 律师模板 5 文件（规则边 case↔其余 4）+ 研究笔记引用案件总览（引用边）
+        let files = [
+            ("案件总览", "case"),
+            ("当事人与诉求", "party"),
+            ("证据清单", "evidence"),
+            ("时间线", "timeline"),
+            ("法律研究", "law"),
+        ];
+        for (name, typ) in files {
+            write(
+                &root,
+                &format!("notes/{name}.md"),
+                &format!("---\ntype: {typ}\n---\n# {name}\n\n内容\n"),
+            );
+        }
+        write(&root, "notes/研究笔记.md", "# 研究笔记\n\n参见 [[案件总览]]\n");
+        sync_graph(&root).unwrap();
+
+        let case = "notes/案件总览.md".to_string();
+        let r = spread_activation(&root, &[(case.clone(), 1.0)]).unwrap();
+        // 4 条规则邻居（0.8）+ 研究笔记（引用 1.0）
+        assert_eq!(r.recalled.len(), 5);
+        // 引用边权 1.0 > 规则边 0.8：研究笔记排最前
+        assert_eq!(r.recalled[0].0, "notes/研究笔记.md");
+        assert!((r.recalled[0].1 - 1.0).abs() < 1e-9);
+        let ev = r.recalled.iter().find(|(f, _, _)| f == "notes/证据清单.md").unwrap();
+        assert!((ev.1 - 0.8).abs() < 1e-9, "规则边权重 0.8");
+        assert_eq!(ev.2, case, "via=种子文件");
+        // 无种子间互链 → 无簇提升
+        assert!(r.boosted.is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn spread_activation_two_hop_decay_and_cluster_boost() {
+        let root = test_root("spread-hops");
+        // 单向链 A→B→C（C 不反向连 A，保证 2 跳路径唯一）
+        write(&root, "notes/A.md", "# A\n\n[[B]]\n");
+        write(&root, "notes/B.md", "# B\n\n[[C]]\n");
+        write(&root, "notes/C.md", "# C\n");
+        sync_graph(&root).unwrap();
+
+        // 单种子 A：1 跳召回 B（1.0），2 跳召回 C（1.0×1.0×1.0×0.5=0.5，via=B）
+        let r = spread_activation(&root, &[("notes/A.md".into(), 1.0)]).unwrap();
+        assert_eq!(r.recalled.len(), 2);
+        let b = r.recalled.iter().find(|(f, _, _)| f == "notes/B.md").unwrap();
+        assert!((b.1 - 1.0).abs() < 1e-9);
+        let c = r.recalled.iter().find(|(f, _, _)| f == "notes/C.md").unwrap();
+        assert!((c.1 - 0.5).abs() < 1e-9, "2 跳衰减 0.5");
+        assert_eq!(c.2, "notes/B.md", "2 跳 via=中间节点");
+
+        // 种子 A+B 互链 → 簇提升（0.3 × 邻居归一化分 × 边权）
+        let r = spread_activation(&root, &[("notes/A.md".into(), 2.0), ("notes/B.md".into(), 1.0)]).unwrap();
+        assert!((r.boosted["notes/A.md"] - 0.3 * 0.5 * 1.0).abs() < 1e-9, "A 获 B 的簇提升");
+        assert!((r.boosted["notes/B.md"] - 0.3 * 1.0 * 1.0).abs() < 1e-9, "B 获 A 的簇提升");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn spread_activation_dedup_and_recall_limit() {
+        let root = test_root("spread-dedup");
+        // 星型：seed 0.md 连 15 个文件 → 1 跳召回 15 个，截断到 MAX_RECALL=10 且不重复
+        let mut star = String::from("# 0\n\n");
+        for i in 1..16 {
+            star.push_str(&format!("[[{}.md]] ", i));
+        }
+        write(&root, "notes/0.md", &star);
+        for i in 1..16 {
+            write(&root, &format!("notes/{}.md", i), &format!("# {}\n", i));
+        }
+        sync_graph(&root).unwrap();
+        let r = spread_activation(&root, &[("notes/0.md".into(), 1.0)]).unwrap();
+        assert_eq!(r.recalled.len(), MAX_RECALL, "截断到 MAX_RECALL");
+        // 去重：同节点只出现一次
+        let mut seen = std::collections::HashSet::new();
+        for (f, _, _) in &r.recalled {
+            assert!(seen.insert(f), "重复召回 {f}");
+        }
         fs::remove_dir_all(&root).unwrap();
     }
 }

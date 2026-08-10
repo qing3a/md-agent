@@ -23,6 +23,20 @@ pub struct Hit {
     pub score: f64,
 }
 
+/// 激活扩散补充召回项（2026-08-11，第二步）：未直接命中、但沿图谱边（引用/规则边）
+/// 扩散 1-2 跳联想出来的相关文档。title/summary 来自图谱 documents 表。
+#[derive(Debug, Clone, Serialize)]
+pub struct RelatedHit {
+    /// 相对 KB 根的路径（`/` 分隔）
+    pub file: String,
+    pub title: String,
+    pub summary: String,
+    /// 扩散分（种子归一化分 × 边权 × 跳衰减；分高在前）
+    pub score: f64,
+    /// 联想来源文件（"经 XX 联想"）
+    pub via: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SearchResult {
     pub query: String,
@@ -30,6 +44,8 @@ pub struct SearchResult {
     pub hit_count: usize,
     pub file_count: usize,
     pub hits: Vec<Hit>,
+    /// 激活扩散补充召回（expand 关时为空数组）
+    pub related: Vec<RelatedHit>,
 }
 
 /// 空白分隔的多关键词，任一命中；含大写字母则区分大小写
@@ -172,6 +188,7 @@ pub fn search(root: &Path, query: &str, layer: &str, ctx: bool) -> Result<Search
         hit_count,
         file_count,
         hits,
+        related: Vec::new(), // 激活扩散补充由 server 层填充
     })
 }
 

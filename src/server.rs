@@ -388,6 +388,9 @@ struct SearchParams {
     /// 1/true/on 时返回命中行前后上下文片段（Prompt 注入用）
     #[serde(default)]
     ctx: String,
+    /// 激活扩散增强（默认开：空/1/true/on/yes；expand=0 关闭——对比/降级通道）
+    #[serde(default)]
+    expand: String,
 }
 
 fn default_layer() -> String {
@@ -406,14 +409,54 @@ async fn search_handler(
         Ok(r) => r,
         Err(r) => return r,
     };
+    let expand = !matches!(p.expand.as_str(), "0" | "false" | "no" | "off");
     match crate::search::search(&root, &p.q, &p.layer, ctx_enabled(&p.ctx)) {
-        Ok(r) => {
+        Ok(mut r) => {
             // R4 活动埋点：仅记命中数，不记 query 全文（防隐私）
             crate::activity::record(&root, "search", &format!("检索命中 {} 条", r.hit_count), json!({ "hits": r.hit_count }));
+            // 激活扩散（2026-08-11 第二步）：簇提升重排 + 补充召回 related
+            if expand && !r.hits.is_empty() {
+                expand_search(&root, &mut r);
+            }
             Json(r).into_response()
         }
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     }
+}
+
+/// 激活扩散增强：命中集沿图谱边（引用 1.0/规则 0.8）扩散 1-2 跳。
+/// ① 簇提升：命中文件有命中邻居则加分（只加分不扣分）后重排；
+/// ② 补充召回：未命中邻居补进 related（title/summary 来自图谱 documents 表）。
+fn expand_search(root: &std::path::Path, r: &mut crate::search::SearchResult) {
+    if ensure_graph(root).is_err() {
+        return;
+    }
+    let seeds: Vec<(String, f64)> = r.hits.iter().map(|h| (h.file.clone(), h.score)).collect();
+    let Ok(spread) = crate::graph::spread_activation(root, &seeds) else { return };
+    for h in &mut r.hits {
+        if let Some(b) = spread.boosted.get(&h.file) {
+            h.score += *b;
+        }
+    }
+    r.hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    if spread.recalled.is_empty() {
+        return;
+    }
+    let paths: Vec<String> = spread.recalled.iter().map(|(f, _, _)| f.clone()).collect();
+    let Ok(meta) = crate::graph::doc_meta(root, &paths) else { return };
+    r.related = spread
+        .recalled
+        .into_iter()
+        .filter_map(|(f, s, via)| {
+            meta.get(&f).map(|(t, sm)| crate::search::RelatedHit {
+                file: f,
+                title: t.clone(),
+                summary: sm.clone(),
+                score: s,
+                via,
+            })
+        })
+        .collect();
 }
 
 async fn l1_handler(State(st): State<AppState>, headers: HeaderMap, Query(p): Query<L1Params>) -> Response {

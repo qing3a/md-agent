@@ -4408,6 +4408,16 @@
       }
       term.writeln('  \x1b[90m' + String(h.line).padStart(3) + '\x1b[0m  ' + h.text);
     }
+    // 激活扩散联想（2026-08-11 第二步）：沿图谱边扩散 1-2 跳的未命中相关文档
+    if (r.related && r.related.length) {
+      term.writeln('');
+      term.writeln('\x1b[90m── 相关文档（图谱联想） ──\x1b[0m');
+      for (const rel of r.related) {
+        const t = rel.title ? ' \x1b[1m' + rel.title + '\x1b[0m' : '';
+        const sm = rel.summary ? ' — \x1b[90m' + rel.summary + '\x1b[0m' : '';
+        term.writeln('\x1b[1;32m' + rel.file + '\x1b[0m' + t + sm + '  \x1b[90m(经 ' + rel.via + ')\x1b[0m');
+      }
+    }
     term.writeln('提示：输入 \x1b[1mopen ' + r.hits[0].file + '\x1b[0m 查看全文');
   }
 
