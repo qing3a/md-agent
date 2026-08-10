@@ -63,6 +63,11 @@
   .tab { flex: 1; background: transparent; border: 1px solid var(--line); border-radius: 6px;
     padding: 4px 0; font-size: 12px; cursor: pointer; color: var(--dim); }
   .tab.sel { background: var(--panel2); border-color: var(--blue); color: var(--blue); font-weight: 600; }
+  #search-bar { padding: 0 10px 6px; }
+  #search { width: 100%; background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 7px; padding: 6px 10px; font-size: 12px; outline: none; }
+  #search:focus { border-color: var(--blue); }
+  #search-hint { margin-top: 4px; font-size: 11px; color: var(--dim); min-height: 14px; }
   #items { flex: 1; overflow: auto; padding: 0 10px 10px; }
   #detail-col { flex: 1; overflow: auto; padding: 10px; }
 
@@ -140,6 +145,10 @@
       <div id="tabs">
         <button id="tab-catalog" class="tab">目录</button>
         <button id="tab-installed" class="tab">已安装</button>
+      </div>
+      <div id="search-bar">
+        <input id="search" type="text" placeholder="🔍 检索 SkillHub 商店…" autocomplete="off">
+        <div id="search-hint" class="meta"></div>
       </div>
       <div id="items"></div>
     </div>
@@ -261,6 +270,8 @@ function render() {
   $('count') && ($('count').textContent = (tab === 'catalog' ? catalog.length + ' 个可用' : apps.length + ' 个已安装'));
   $('tab-catalog').classList.toggle('sel', tab === 'catalog');
   $('tab-installed').classList.toggle('sel', tab === 'installed');
+  var sbar = $('search-bar');
+  if (sbar) sbar.style.display = tab === 'catalog' ? '' : 'none';
   var items = $('items');
   if (tab === 'catalog') {
     // 已安装优先：目录里已装的应用排最前并标注（打开市场最关心自己装了什么）
@@ -364,16 +375,37 @@ function uninstallApp(id, name) {
 
 // ---------- 连接 hub ----------
 $('connect') && $('connect').addEventListener('click', function () {
-  var url = prompt('输入 SkillHub 来源（自动分析其中的 md 文档）：\n· git 仓库  git+https://github.com/user/skills-repo\n· GitHub zip https://github.com/user/skills-repo/archive/refs/heads/main.zip\n· 本地目录  local:C:/path/to/skills', '');
+  var url = prompt('输入 SkillHub 来源：\n· skillhub.cn 商店（默认，检索+榜单）https://skillhub.cn/install/skillhub.md\n· git 仓库  git+https://github.com/user/skills-repo\n· GitHub zip https://github.com/user/skills-repo/archive/refs/heads/main.zip\n· 本地目录  local:C:/path/to/skills', 'https://skillhub.cn/install/skillhub.md');
   if (!url) return;
   hostApi('/api/hubs/connect', { method: 'POST', body: { url: url.trim() } }).then(function (r) {
     var kinds = {}; (r.hub.apps || []).forEach(function (a) { kinds[a.kind] = (kinds[a.kind] || 0) + 1; });
     var kt = Object.keys(kinds).map(function (k) { return kinds[k] + ' 个' + (k === 'app' ? '应用' : '技能'); }).join('、') || '0 个条目';
-    toast('✓ 已连接 ' + r.hub.name + '（分析出 ' + kt + '）', true);
+    toast('✓ 已连接 ' + r.hub.name + '（' + kt + '）', true);
     tab = 'catalog'; sel = null;
     return loadMarket();
   }).catch(function (e) { toast('连接失败: ' + e.message, false); });
 });
+
+// ---------- 检索 SkillHub（skillhub.cn API） ----------
+var searchTimer = null;
+function bindSearch() {
+  var box = $('search');
+  if (!box) return;
+  box.addEventListener('input', function () {
+    clearTimeout(searchTimer);
+    var q = box.value.trim();
+    if (!q) { sel = null; return loadMarket(); }
+    searchTimer = setTimeout(function () {
+      hostApi('/api/hubs/search', { method: 'POST', body: { q: q } }).then(function (r) {
+        catalog = r.apps || [];
+        $('search-hint').textContent = '「' + q + '」搜索结果 ' + catalog.length + ' 条（/market install <id> 安装）';
+        sel = null;
+        render();
+      }).catch(function (e) { toast('检索失败: ' + e.message, false); });
+    }, 450);
+  });
+  box.addEventListener('keydown', function (e) { if (e.key === 'Enter') box.blur(); });
+}
 
 // ---------- 数据加载 ----------
 async function load() {
@@ -439,6 +471,7 @@ document.addEventListener('keydown', function (e) {
 });
 
 load();
+bindSearch();
 </script>
 </body>
 </html>

@@ -105,6 +105,7 @@ pub async fn serve(
         .route("/api/hubs/connect", post(hubs_connect))
         .route("/api/hubs/refresh", post(hubs_refresh))
         .route("/api/hubs/disconnect", post(hubs_disconnect))
+        .route("/api/hubs/search", post(hubs_search))
         .route("/api/market/catalog", get(market_catalog))
         .route("/api/market/install", post(market_install))
         .route("/api/market/uninstall", post(market_uninstall))
@@ -238,11 +239,19 @@ fn tools_json() -> Value {
         },
         {
             "name": "market.connect",
-            "desc": "连接第三方 SkillHub：git 仓库 / GitHub zip / 本地目录（自动分析其中的 md 文档生成目录：SKILL.md 技能、app.json 应用），或旧 skillhub.md 索引——用户要求安装/连接/添加应用商店、应用市场、SkillHub 时使用",
+            "desc": "连接第三方 SkillHub：git 仓库 / GitHub zip / 本地目录（自动分析其中的 md 文档生成目录：SKILL.md 技能、app.json 应用），或 skillhub.cn（API 检索商店，默认 https://skillhub.cn/install/skillhub.md），或旧 skillhub.md 索引——用户要求安装/连接/添加应用商店、应用市场、SkillHub 时使用",
             "params": [
-                {"name": "hub_url", "type": "string", "required": true, "desc": "hub 来源，如 git+https://github.com/user/skills-repo 或 https://github.com/user/skills-repo/archive/refs/heads/main.zip 或 local:C:/path/to/skills"}
+                {"name": "hub_url", "type": "string", "required": true, "desc": "hub 来源，如 https://skillhub.cn/install/skillhub.md 或 git+https://github.com/user/skills-repo 或 https://github.com/user/skills-repo/archive/refs/heads/main.zip 或 local:C:/path/to/skills"}
             ],
-            "example": "{\"hub_url\":\"git+https://github.com/anthropics/skills\"}"
+            "example": "{\"hub_url\":\"https://skillhub.cn/install/skillhub.md\"}"
+        },
+        {
+            "name": "market.search",
+            "desc": "检索 SkillHub 商店技能（skillhub.cn 的 search API）——用户要找/安装某个技能、不确定技能名时使用，返回匹配的技能清单（slug/名称/描述/下载量）",
+            "params": [
+                {"name": "q", "type": "string", "required": true, "desc": "检索关键词（技能名/用途，中英文均可）"}
+            ],
+            "example": "{\"q\":\"word 文档\"}"
         },
         {
             "name": "dev.read",
@@ -2542,7 +2551,7 @@ fn temp_root(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("md-agent-srv-{}-{}", name, std::process::id()))
 }
 
-// ---------- SkillHub（阶段 4）：hub 注册表 + 目录 ----------
+// ---------- SkillHub（阶段 4）：hub 注册表 + 目录 + 检索 ----------
 #[derive(Deserialize)]
 struct HubUrlBody {
     url: String,
@@ -2551,6 +2560,11 @@ struct HubUrlBody {
 #[derive(Deserialize)]
 struct HubNameBody {
     name: String,
+}
+
+#[derive(Deserialize)]
+struct HubSearchBody {
+    q: String,
 }
 
 async fn hubs_list(State(s): State<AppState>) -> Response {
@@ -2575,6 +2589,18 @@ async fn hubs_disconnect(State(s): State<AppState>, Json(b): Json<HubNameBody>) 
     match crate::hub::disconnect_hub(&s.kb_root, &b.name) {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+/// 检索 SkillHub（API 型 hub 的 search 端点；md 集合型 hub 无检索能力时返回空）
+async fn hubs_search(State(_s): State<AppState>, Json(b): Json<HubSearchBody>) -> Response {
+    let q = b.q.trim();
+    if q.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺检索词 q" }))).into_response();
+    }
+    match crate::hub::search_skillhub(q).await {
+        Ok(apps) => Json(json!({ "apps": apps })).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
     }
 }
 
@@ -2624,38 +2650,48 @@ async fn market_install(State(s): State<AppState>, Json(b): Json<MarketInstallBo
 
     // 通道 1（新模式）：集合缓存直装——hub 条目带 rel（连接时分析得出），
     // 从本地缓存的文档集合直接取文件，零下载、零网络。
+    // rel 为空的条目（skillhub API / 旧索引）→ 记录其 source，走通道 2 下载。
+    let mut hub_src: Option<String> = None;
     if let (Some(hub_name), Some(id)) = (hub.as_deref(), b.id.as_deref()) {
-        let mut found: Option<(crate::hub::HubInfo, crate::hub::HubApp)> = None;
         for h in crate::hub::list_hubs(&s.kb_root) {
-            if h.name == hub_name {
-                let app = h.apps.iter().find(|a| a.id == id).cloned();
-                if let Some(a) = app {
-                    found = Some((h, a));
-                    break;
+            if h.name != hub_name {
+                continue;
+            }
+            let Some(a) = h.apps.iter().find(|a| a.id == id) else { continue };
+            if !a.rel.is_empty() {
+                let col = match crate::hub::collection_root(&s.kb_root, &h) {
+                    Some(c) => c,
+                    None => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "hub 集合缓存缺失——先 /market refresh 重新拉取" }))).into_response(),
+                };
+                let loc = col.join(&a.rel);
+                if !loc.exists() {
+                    return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("集合内找不到条目文件: {}", a.rel) }))).into_response();
+                }
+                return match install_from_loc(&s.kb_root, &loc, dry, hub.as_deref()) {
+                    Ok(v) => Json(v).into_response(),
+                    Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+                };
+            }
+            hub_src = Some(a.source.clone());
+            break;
+        }
+        // 注册表内无此 id（条目来自检索结果而非榜单）→ skillhub API 型 hub 按 id 补查拿 source
+        if hub_src.is_none() && hub_name.contains("skillhub.cn") {
+            if let Ok(apps) = crate::hub::search_skillhub(id).await {
+                if let Some(a) = apps.into_iter().find(|a| a.id == id) {
+                    hub_src = Some(a.source);
                 }
             }
         }
-        if let Some((h, a)) = found {
-            if a.rel.is_empty() {
-                return (StatusCode::BAD_REQUEST, Json(json!({ "error": "该条目为旧索引声明（带 source），请用 /market import <路径> 导入" }))).into_response();
-            }
-            let col = match crate::hub::collection_root(&s.kb_root, &h) {
-                Some(c) => c,
-                None => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "hub 集合缓存缺失——先 /market refresh 重新拉取" }))).into_response(),
-            };
-            let loc = col.join(&a.rel);
-            if !loc.exists() {
-                return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("集合内找不到条目文件: {}", a.rel) }))).into_response();
-            }
-            return match install_from_loc(&s.kb_root, &loc, dry, hub.as_deref()) {
-                Ok(v) => Json(v).into_response(),
-                Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
-            };
-        }
     }
 
-    // 通道 2（旧索引条目）：source（git/zip/裸 md/local）→ 下载到临时目录 → 按包内容识别
-    if let Some(src) = b.source.as_deref().filter(|s| !s.is_empty()) {
+    // 通道 2（skillhub API 条目 / 旧索引条目）：source（download?slug= zip / git / 裸 md）→ 下载 → 按内容识别
+    if let Some(src) = b
+        .source
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or(hub_src.as_deref())
+    {
         let tmp = std::env::temp_dir().join(format!("md-agent-dl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         match crate::hub::download_app(src, &tmp).await {

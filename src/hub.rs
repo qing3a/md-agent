@@ -53,6 +53,15 @@ fn file_safe(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
+/// PowerShell 可执行（服务从 MSYS/其他 PATH 启动时裸 powershell 可能找不到，Windows 用全路径）
+fn powershell_exe() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+    } else {
+        "powershell"
+    }
+}
+
 fn valid_app_id(id: &str) -> bool {
     file_safe(id)
 }
@@ -461,12 +470,18 @@ fn persist_hub(root: &Path, h: &HubInfo) -> Result<(), String> {
     std::fs::write(dir.join(format!("{}.json", h.name)), json).map_err(|e| e.to_string())
 }
 
-/// 连接 hub：按来源类型分发（git 仓库 clone / GitHub zip 解压 / 本地目录引用 / md 索引或单技能），
-/// 扫描分析集合生成目录，持久化注册表。集合缓存在 kb/hubs/<name>/，安装时直接取文件。
+/// 连接 hub：按来源类型分发（git 仓库 clone / GitHub zip 解压 / 本地目录引用 / md 索引或单技能 /
+/// skillhub API 型），扫描分析集合生成目录，持久化注册表。集合缓存在 kb/hubs/<name>/，安装时直接取文件。
 pub async fn connect_hub(root: &Path, url: &str) -> Result<HubInfo, String> {
     let u = url.trim();
     if !valid_hub_url(u) {
         return Err("hub 来源仅支持：git+https 仓库 / https zip / https md / local: 目录".to_string());
+    }
+
+    // skillhub API 型：URL 含 skillhub.cn（install/skillhub.md 引导文档或 api.skillhub.cn 直连）
+    // —— 无文档集合可分析，目录 = showcase 榜单 API 合并，安装走 download?slug= zip 下载
+    if u.contains("skillhub.cn") {
+        return connect_skillhub_api(root, u).await;
     }
 
     // 本地路径：目录 → 集合分析引用；md 文件 → 读内容走索引/单技能通道
@@ -546,7 +561,7 @@ pub async fn connect_hub(root: &Path, url: &str) -> Result<HubInfo, String> {
             zip_path.display(),
             out.display()
         );
-        let status = std::process::Command::new("powershell")
+        let status = std::process::Command::new(powershell_exe())
             .args(["-NoProfile", "-Command", &ps])
             .status()
             .map_err(|e| format!("powershell 解压失败: {e}"))?;
@@ -585,6 +600,124 @@ async fn connect_md(root: &Path, url: &str, name_src: &str, text: &str) -> Resul
     let h = HubInfo { name, url: url.to_string(), version: "0".to_string(), apps };
     persist_hub(root, &h)?;
     Ok(h)
+}
+
+// ==================== skillhub API 型 hub（检索/榜单/下载 API） ====================
+
+const SKILLHUB_API: &str = "https://api.skillhub.cn/api/v1";
+const SKILLHUB_DOWNLOAD: &str = "https://api.skillhub.cn/api/v1/download?slug=";
+const SKILLHUB_SHOWCASE: [&str; 5] = ["hot", "featured", "newest", "recommended", "trending"];
+const SKILLHUB_MAX_ITEMS: usize = 120;
+
+/// 是否为 skillhub download URL（download_app 当 zip 处理）
+pub fn is_skillhub_download(s: &str) -> bool {
+    s.starts_with(SKILLHUB_DOWNLOAD)
+}
+
+/// skillhub 检索：/api/v1/search?q= → 归一化 HubApp 列表（id=slug，source=下载 URL）
+pub async fn search_skillhub(q: &str) -> Result<Vec<HubApp>, String> {
+    let url = format!("{SKILLHUB_API}/search?q={}", urlencode(q.trim()));
+    let text = fetch_text(&url).await?;
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("检索响应解析失败: {e}"))?;
+    let results = v.get("results").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+    Ok(results.iter().filter_map(skillhub_entry).map(|(a, _)| a).collect())
+}
+
+/// 榜单 API → 合并去重（slug 去重、downloads 降序、取前 SKILLHUB_MAX_ITEMS）
+async fn skillhub_showcase() -> Result<Vec<HubApp>, String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<(HubApp, u64)> = Vec::new();
+    for section in SKILLHUB_SHOWCASE {
+        let url = format!("{SKILLHUB_API}/showcase/{section}");
+        let text = match fetch_text(&url).await {
+            Ok(t) => t,
+            Err(_) => continue, // 单榜失败不影响其他榜
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        let skills = v
+            .get("skills")
+            .or_else(|| v.get("results"))
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for s in skills {
+            if let Some((app, dl)) = skillhub_entry(&s) {
+                if seen.insert(app.id.clone()) {
+                    out.push((app, dl));
+                }
+            }
+        }
+    }
+    // downloads 降序（热门在前），限量
+    out.sort_by(|a, b| b.1.cmp(&a.1));
+    Ok(out.into_iter().take(SKILLHUB_MAX_ITEMS).map(|(a, _)| a).collect())
+}
+
+/// skillhub 条目 → (HubApp, downloads)（兼容 search/showcase 两套字段命名：camelCase / snake_case）
+fn skillhub_entry(s: &serde_json::Value) -> Option<(HubApp, u64)> {
+    let g = |k1: &str, k2: &str| -> Option<String> {
+        s.get(k1)
+            .or_else(|| s.get(k2))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    };
+    let slug = g("slug", "publicSlug")?;
+    if slug.is_empty() {
+        return None;
+    }
+    let name = g("displayName", "name").unwrap_or_else(|| slug.clone());
+    let version = g("version", "").unwrap_or_else(|| "0.0.0".to_string());
+    let desc = g("summary", "")
+        .or_else(|| g("description_zh", ""))
+        .or_else(|| g("description", ""));
+    let downloads = s
+        .get("downloads")
+        .or_else(|| s.get("installs"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let mut description = desc.unwrap_or_default();
+    if downloads > 0 {
+        description = format!("⬇ {downloads} · {description}");
+    }
+    Some((
+        HubApp {
+            id: slug.clone(),
+            name,
+            version,
+            entry: String::new(),
+            permissions: Vec::new(),
+            source: format!("{SKILLHUB_DOWNLOAD}{}", urlencode(&slug)),
+            description,
+            kind: "skill".to_string(),
+            rel: String::new(),
+        },
+        downloads,
+    ))
+}
+
+/// 连接 skillhub API 型 hub：拉五榜合并 → 注册表（rel 空、source=下载 URL）
+async fn connect_skillhub_api(root: &Path, url: &str) -> Result<HubInfo, String> {
+    let apps = skillhub_showcase().await?;
+    let h = HubInfo {
+        name: "skillhub.cn".to_string(),
+        url: url.to_string(),
+        version: "0".to_string(),
+        apps,
+    };
+    persist_hub(root, &h)?;
+    Ok(h)
+}
+
+/// 百分号编码（URL 查询参数安全；只编码非 ascii 与保留字符）
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// 已连接 hub 列表（读 kb/hubs/*.json）
@@ -668,7 +801,9 @@ pub async fn download_app(source: &str, tmp_root: &Path) -> Result<PathBuf, Stri
         }
         return Ok(target);
     }
-    if valid_source(s) && s.ends_with(".zip") {
+    // zip 包（https zip / skillhub download?slug= API——Content-Type 为 zip 但 URL 不带 .zip）
+    if valid_source(s) && (s.ends_with(".zip") || is_skillhub_download(s)) {
+        std::fs::create_dir_all(tmp_root).map_err(|e| e.to_string())?;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(90))
             .user_agent("md-agent/0.1 (skillhub client)")
@@ -687,7 +822,7 @@ pub async fn download_app(source: &str, tmp_root: &Path) -> Result<PathBuf, Stri
             zip_path.display(),
             out.display()
         );
-        let status = std::process::Command::new("powershell")
+        let status = std::process::Command::new(powershell_exe())
             .args(["-NoProfile", "-Command", &ps])
             .status()
             .map_err(|e| format!("powershell 解压失败: {e}"))?;
@@ -921,6 +1056,38 @@ name: h
         assert_eq!(infer_name("https://github.com/anthropics/skills/archive/refs/heads/main.zip"), "skills");
         assert_eq!(infer_name("git+https://github.com/wshobson/agents.git"), "agents");
         assert_eq!(infer_name("C:/users/x/skills"), "skills");
+    }
+
+    #[test]
+    fn skillhub_entry_normalizes_both_field_styles() {
+        // showcase 风格（snake_case）
+        let showcase = serde_json::json!({
+            "slug": "docx", "name": "DOCX", "displayName": "DOCX 创建、编辑与分析",
+            "version": "1.0.0", "downloads": 2729,
+            "summary": "当用户想要创建 Word 文档时使用"
+        });
+        let (a, dl) = skillhub_entry(&showcase).unwrap();
+        assert_eq!(a.id, "docx");
+        assert_eq!(a.name, "DOCX 创建、编辑与分析");
+        assert_eq!(a.version, "1.0.0");
+        assert_eq!(dl, 2729);
+        assert!(a.source.contains("download?slug=docx"));
+        assert!(a.description.contains("2729"), "下载量应进描述: {}", a.description);
+        assert_eq!(a.kind, "skill");
+        assert!(a.rel.is_empty(), "API 条目无 rel（走 source 下载）");
+        // search 风格（slug/publicSlug 兼容）＋ 缺 downloads
+        let search = serde_json::json!({"slug": "excel-xlsx", "name": "Excel / XLSX", "version": "0.0.0", "summary": "s"});
+        let (a2, dl2) = skillhub_entry(&search).unwrap();
+        assert_eq!(a2.id, "excel-xlsx");
+        assert_eq!(dl2, 0);
+        // 缺 slug → 跳过
+        assert!(skillhub_entry(&serde_json::json!({"name": "no-slug"})).is_none());
+    }
+
+    #[test]
+    fn skillhub_download_url_detection() {
+        assert!(is_skillhub_download("https://api.skillhub.cn/api/v1/download?slug=docx"));
+        assert!(!is_skillhub_download("https://example.com/pkg.zip"));
     }
 
     #[test]

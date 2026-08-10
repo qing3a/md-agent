@@ -1815,6 +1815,10 @@
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url: a.hub_url || '' }),
     }),
+    'market.search': (a) => api('/api/hubs/search', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ q: a.q || '' }),
+    }),
     // C0 dev 工具链（自我开发执行层：让 agent 读自己代码）
     'dev.read': (a) => api('/api/dev/read?path=' + encodeURIComponent(a.path || '')),
     'dev.status': () => api('/api/dev/status'),
@@ -2207,6 +2211,11 @@
       const nSkill = (h.apps || []).length - nApp;
       const apps = (h.apps || []).map((a) => a.id + ' v' + a.version + (a.kind === 'skill' ? ' [技能]' : '') + ' ' + a.name + ' — ' + a.description).join('\n');
       return '已连接 SkillHub「' + h.name + '」（分析出 ' + nApp + ' 个应用 + ' + nSkill + ' 个技能）：\n' + apps + '\n安装：/market install <id>（人审确认）';
+    }
+    if (name === 'market.search') {
+      const apps = (r.apps || []);
+      if (!apps.length) return '无匹配结果';
+      return apps.map((a) => a.id + ' v' + a.version + ' ' + a.name + ' — ' + a.description).join('\n') + '\n安装：/market install <id>（人审确认）';
     }
     if (name === 'dev.read') return String(r.content || '(空文件)').slice(0, 3000) + (r.path ? '\n[来源 ' + r.path + ']' : '');
     if (name === 'dev.status' || name === 'dev.diff') return String(r.output || '(无改动/无输出)');
@@ -3792,7 +3801,7 @@
     const sub = (args && args[0]) || 'list';
     if (sub === 'connect') {
       const url = (args[1] || '').trim();
-      if (!url) { term.writeln('\x1b[33m用法：/market connect <hub-url>\n   git 仓库：git+https://github.com/user/skills-repo\n   GitHub zip：https://github.com/user/skills-repo/archive/refs/heads/main.zip\n   本地目录：local:C:/path/to/skills\n（自动分析其中的 md 文档生成目录；旧 skillhub.md 索引仍兼容）\x1b[0m'); return; }
+      if (!url) { term.writeln('\x1b[33m用法：/market connect <hub-url>（默认 skillhub.cn 商店：https://skillhub.cn/install/skillhub.md）\n   git 仓库：git+https://github.com/user/skills-repo\n   GitHub zip：https://github.com/user/skills-repo/archive/refs/heads/main.zip\n   本地目录：local:C:/path/to/skills\n（skillhub.cn=API 检索商店；其他源=自动分析 md 文档生成目录；旧 skillhub.md 索引兼容）\x1b[0m'); return; }
       const r = await api('/api/hubs/connect', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url }),
@@ -3845,6 +3854,20 @@
       term.writeln('已连接 hub 目录（/market install <id> 安装）：');
       for (const app of apps) term.writeln('  \x1b[36m' + app.id + '\x1b[0m v' + app.version + (app.kind === 'skill' ? ' \x1b[90m[技能]\x1b[0m' : '') + '  ' + app.name + ' \x1b[90m[' + app.hub + ']\x1b[0m');
       if (!apps.length) term.writeln('  (无 —— /market connect <hub-url> 连接第三方 SkillHub)');
+      return;
+    }
+    if (sub === 'search') {
+      const q = (args[1] || '').trim();
+      if (!q) { term.writeln('\x1b[33m用法：/market search <关键词>（检索 skillhub.cn 商店技能）\x1b[0m'); return; }
+      const r = await api('/api/hubs/search', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ q }),
+      }).catch((e) => { term.writeln('\x1b[31m检索失败: ' + e.message + '\x1b[0m'); return null; });
+      if (!r) return;
+      const apps = (r.apps || []);
+      term.writeln('「' + q + '」搜索结果（/market install <id> 安装）：');
+      for (const app of apps) term.writeln('  \x1b[36m' + app.id + '\x1b[0m v' + app.version + '  ' + app.name + ' \x1b[90m' + app.description + '\x1b[0m');
+      if (!apps.length) term.writeln('  (无匹配 —— 换个关键词试试)');
       return;
     }
     if (sub === 'install') {
