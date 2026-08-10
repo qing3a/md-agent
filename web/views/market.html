@@ -154,7 +154,7 @@
       <div class="empty" id="empty"></div>
     </div>
   </div>
-  <div id="hint">连接 SkillHub：<code>连接 hub</code> 或终端 <code>/market connect &lt;url&gt;</code> · 安装走命令行（人审确认）：<code>/market install &lt;id&gt;</code> 或 <code>/market import &lt;路径&gt;</code> · 更新走 <code>/market update &lt;id&gt; &lt;路径&gt;</code> · 运行在宿主新标签打开</div>
+  <div id="hint">连接 SkillHub：<code>连接 hub</code> 或终端 <code>/market connect &lt;url&gt;</code> · 支持 git 仓库 / GitHub zip / 本地目录（自动分析其中的 md 文档生成目录） · 安装走命令行（人审确认）：<code>/market install &lt;id&gt;</code> 或 <code>/market import &lt;路径&gt;</code> · 更新走 <code>/market update &lt;id&gt; &lt;路径&gt;</code> · 运行在宿主新标签打开</div>
 </div>
 <div id="toast" class="toast"></div>
 
@@ -301,7 +301,9 @@ function showDetail(s) {
   sel = s;
   $('detail').style.display = 'block';
   $('d-name').textContent = s.name + '  v' + s.version;
-  var meta = 'id: ' + s.id + ' · entry: ' + (s.entry || 'index.html');
+  var meta = 'id: ' + s.id;
+  if (s.entry) meta += ' · entry: ' + s.entry;
+  if (s.rel) meta += ' · 文件: ' + s.rel;
   if (s.hub) meta += ' · 来源 ' + s.hub;
   else if (s.source_hub) meta += ' · 来源 ' + s.source_hub;
   else if (s.kind === 'inst') meta += ' · 来源 本地导入';
@@ -336,7 +338,7 @@ $('items').addEventListener('click', function (e) {
   if (!list[i]) return;
   var a = list[i];
   showDetail({ kind: tab === 'catalog' ? 'cat' : 'inst', id: a.id, name: a.name, version: a.version,
-    entry: a.entry, permissions: a.permissions, description: a.description, hub: a.hub, source_hub: a.source_hub });
+    entry: a.entry, permissions: a.permissions, description: a.description, hub: a.hub, source_hub: a.source_hub, rel: a.rel });
 });
 
 $('tab-catalog').addEventListener('click', function () { tab = 'catalog'; sel = null; render(); });
@@ -362,10 +364,12 @@ function uninstallApp(id, name) {
 
 // ---------- 连接 hub ----------
 $('connect') && $('connect').addEventListener('click', function () {
-  var url = prompt('输入 SkillHub 索引 URL：', 'https://skillhub.cn/install/skillhub.md');
+  var url = prompt('输入 SkillHub 来源（自动分析其中的 md 文档）：\n· git 仓库  git+https://github.com/user/skills-repo\n· GitHub zip https://github.com/user/skills-repo/archive/refs/heads/main.zip\n· 本地目录  local:C:/path/to/skills', '');
   if (!url) return;
   hostApi('/api/hubs/connect', { method: 'POST', body: { url: url.trim() } }).then(function (r) {
-    toast('✓ 已连接 ' + r.hub.name + '（' + r.hub.apps.length + ' 个应用）', true);
+    var kinds = {}; (r.hub.apps || []).forEach(function (a) { kinds[a.kind] = (kinds[a.kind] || 0) + 1; });
+    var kt = Object.keys(kinds).map(function (k) { return kinds[k] + ' 个' + (k === 'app' ? '应用' : '技能'); }).join('、') || '0 个条目';
+    toast('✓ 已连接 ' + r.hub.name + '（分析出 ' + kt + '）', true);
     tab = 'catalog'; sel = null;
     return loadMarket();
   }).catch(function (e) { toast('连接失败: ' + e.message, false); });

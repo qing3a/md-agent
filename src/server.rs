@@ -238,11 +238,11 @@ fn tools_json() -> Value {
         },
         {
             "name": "market.connect",
-            "desc": "连接第三方 SkillHub 商店（应用市场索引）：拉取并校验 hub 索引后入库，返回 hub 名与可用应用清单——用户要求安装/连接/添加应用商店、应用市场、SkillHub 时使用",
+            "desc": "连接第三方 SkillHub：git 仓库 / GitHub zip / 本地目录（自动分析其中的 md 文档生成目录：SKILL.md 技能、app.json 应用），或旧 skillhub.md 索引——用户要求安装/连接/添加应用商店、应用市场、SkillHub 时使用",
             "params": [
-                {"name": "hub_url", "type": "string", "required": true, "desc": "hub 索引 URL，如 https://skillhub.cn/install/skillhub.md"}
+                {"name": "hub_url", "type": "string", "required": true, "desc": "hub 来源，如 git+https://github.com/user/skills-repo 或 https://github.com/user/skills-repo/archive/refs/heads/main.zip 或 local:C:/path/to/skills"}
             ],
-            "example": "{\"hub_url\":\"https://skillhub.cn/install/skillhub.md\"}"
+            "example": "{\"hub_url\":\"git+https://github.com/anthropics/skills\"}"
         },
         {
             "name": "dev.read",
@@ -2594,6 +2594,7 @@ async fn market_catalog(State(s): State<AppState>) -> Response {
                 "source": a.source,
                 "hub": h.name,
                 "kind": a.kind,
+                "rel": a.rel,
             }));
         }
     }
@@ -2618,34 +2619,48 @@ struct MarketUninstallBody {
 }
 
 async fn market_install(State(s): State<AppState>, Json(b): Json<MarketInstallBody>) -> Response {
-    // hub 条目安装：source（git/zip/裸 md/local）→ 下载到临时目录 → 按包内容识别（app→kb/apps/，skill→kb/skills/）
+    let dry = b.dry_run.unwrap_or(false);
+    let hub = b.hub.clone();
+
+    // 通道 1（新模式）：集合缓存直装——hub 条目带 rel（连接时分析得出），
+    // 从本地缓存的文档集合直接取文件，零下载、零网络。
+    if let (Some(hub_name), Some(id)) = (hub.as_deref(), b.id.as_deref()) {
+        let mut found: Option<(crate::hub::HubInfo, crate::hub::HubApp)> = None;
+        for h in crate::hub::list_hubs(&s.kb_root) {
+            if h.name == hub_name {
+                let app = h.apps.iter().find(|a| a.id == id).cloned();
+                if let Some(a) = app {
+                    found = Some((h, a));
+                    break;
+                }
+            }
+        }
+        if let Some((h, a)) = found {
+            if a.rel.is_empty() {
+                return (StatusCode::BAD_REQUEST, Json(json!({ "error": "该条目为旧索引声明（带 source），请用 /market import <路径> 导入" }))).into_response();
+            }
+            let col = match crate::hub::collection_root(&s.kb_root, &h) {
+                Some(c) => c,
+                None => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "hub 集合缓存缺失——先 /market refresh 重新拉取" }))).into_response(),
+            };
+            let loc = col.join(&a.rel);
+            if !loc.exists() {
+                return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("集合内找不到条目文件: {}", a.rel) }))).into_response();
+            }
+            return match install_from_loc(&s.kb_root, &loc, dry, hub.as_deref()) {
+                Ok(v) => Json(v).into_response(),
+                Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+            };
+        }
+    }
+
+    // 通道 2（旧索引条目）：source（git/zip/裸 md/local）→ 下载到临时目录 → 按包内容识别
     if let Some(src) = b.source.as_deref().filter(|s| !s.is_empty()) {
-        let dry = b.dry_run.unwrap_or(false);
-        let hub = b.hub.clone();
         let tmp = std::env::temp_dir().join(format!("md-agent-dl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         match crate::hub::download_app(src, &tmp).await {
             Ok(loc) => {
-                let r = if dry {
-                    crate::market::probe_bundle(&loc)
-                        .map(|(kind, info)| json!({ "ok": true, "dry_run": true, "kind": kind, "app": info }))
-                } else {
-                    crate::market::install_bundle(&s.kb_root, &loc).map(|(kind, id)| {
-                        let app = if kind == "app" {
-                            crate::market::read_manifest(&s.kb_root.join("apps").join(&id))
-                                .map(|m| json!(m))
-                                .unwrap_or(json!({ "id": id }))
-                        } else {
-                            json!({ "id": id, "name": id, "version": "0.0.0" })
-                        };
-                        if kind == "app" {
-                            if let Some(h) = hub.as_deref().filter(|h| !h.is_empty()) {
-                                record_source_hub(&s.kb_root, &id, h);
-                            }
-                        }
-                        json!({ "ok": true, "kind": kind, "id": id, "app": app })
-                    })
-                };
+                let r = install_from_loc(&s.kb_root, &loc, dry, hub.as_deref());
                 let _ = std::fs::remove_dir_all(&tmp);
                 match r {
                     Ok(v) => Json(v).into_response(),
@@ -2655,24 +2670,40 @@ async fn market_install(State(s): State<AppState>, Json(b): Json<MarketInstallBo
             Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("下载失败: {e}") }))).into_response(),
         }
     } else {
-        // 本地路径通道（手动导入兜底）：path（应用目录 / 技能目录 / 裸 SKILL.md 文件）
+        // 通道 3（手动导入兜底）：path（应用目录 / 技能目录 / 裸 SKILL.md 文件）
         let path = b.path.unwrap_or_default();
         if path.trim().is_empty() {
             return (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺 path（本地路径）或 source（hub 条目）" }))).into_response();
         }
         let loc = std::path::PathBuf::from(&path);
-        let r = if b.dry_run.unwrap_or(false) {
-            crate::market::probe_bundle(&loc)
-                .map(|(kind, info)| json!({ "ok": true, "dry_run": true, "kind": kind, "app": info }))
-        } else {
-            crate::market::install_bundle(&s.kb_root, &loc)
-                .map(|(kind, id)| json!({ "ok": true, "kind": kind, "id": id, "app": json!({ "id": id }) }))
-        };
-        match r {
+        match install_from_loc(&s.kb_root, &loc, dry, hub.as_deref()) {
             Ok(v) => Json(v).into_response(),
             Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
         }
     }
+}
+
+/// 本地包安装（dry_run 只校验返回 manifest；落盘走 install_bundle 按内容识别 app/skill）
+fn install_from_loc(root: &std::path::Path, loc: &std::path::Path, dry: bool, hub: Option<&str>) -> Result<Value, String> {
+    if dry {
+        return crate::market::probe_bundle(loc)
+            .map(|(kind, info)| json!({ "ok": true, "dry_run": true, "kind": kind, "app": info }));
+    }
+    crate::market::install_bundle(root, loc).map(|(kind, id)| {
+        let app = if kind == "app" {
+            crate::market::read_manifest(&root.join("apps").join(&id))
+                .map(|m| json!(m))
+                .unwrap_or(json!({ "id": id }))
+        } else {
+            json!({ "id": id, "name": id, "version": "0.0.0" })
+        };
+        if kind == "app" {
+            if let Some(h) = hub.filter(|h| !h.is_empty()) {
+                record_source_hub(root, &id, h);
+            }
+        }
+        json!({ "ok": true, "kind": kind, "id": id, "app": app })
+    })
 }
 
 /// 记录来源 hub：安装落盘后把 hub 名写回 kb/apps/<id>/app.json 的 source_hub 字段（幂等，失败静默）

@@ -84,9 +84,10 @@ pub fn update_local(root: &Path, id: &str, src: &str) -> Result<AppInfo, String>
     install_local(root, src)
 }
 
-/// 技能 frontmatter 提取（title 用于 kb/skills/ 落盘文件名）
+/// 技能 frontmatter 提取（title/name 都认——真实 SkillHub 用 name，本地惯例用 title；用于 kb/skills/ 落盘文件名）
 fn skill_title(content: &str) -> Option<String> {
     let mut in_fm = false;
+    let mut title: Option<String> = None;
     for line in content.lines() {
         let l = line.trim();
         if l == "---" {
@@ -95,13 +96,14 @@ fn skill_title(content: &str) -> Option<String> {
         }
         if in_fm {
             if let Some((k, v)) = l.split_once(':') {
-                if k.trim() == "title" {
-                    return Some(v.trim().to_string());
+                let k = k.trim();
+                if (k == "title" || k == "name") && title.is_none() {
+                    title = Some(v.trim().to_string());
                 }
             }
         }
     }
-    None
+    title
 }
 
 fn sanitize_filename(s: &str) -> String {
@@ -268,5 +270,13 @@ mod tests {
         assert_eq!(k2, "skill");
         assert_eq!(v2["id"], "裸技能");
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn skill_title_accepts_name_field() {
+        // 真实 SkillHub（anthropics/skills）frontmatter 用 name 而非 title
+        assert_eq!(skill_title("---\nname: docx\ndescription: x\n---\n# DOCX\n").as_deref(), Some("docx"));
+        assert_eq!(skill_title("---\ntitle: 本地技能\n---\n").as_deref(), Some("本地技能"));
+        assert_eq!(skill_title("# 无 frontmatter\n"), None);
     }
 }
