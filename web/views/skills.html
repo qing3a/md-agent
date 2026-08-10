@@ -53,10 +53,27 @@
   .b-inst { color: var(--green); border-color: var(--green); padding: 0 5px; }
 
   /* 分组标题（右列按 category 分组） */
-  .grp { display: flex; align-items: center; gap: 6px; margin: 10px 4px 5px;
+  .grp { display: flex; align-items: center; gap: 6px; margin: 10px 2px 8px;
     font-size: 11.5px; color: var(--yellow); font-weight: 600; }
   .grp::after { content: ''; flex: 1; height: 1px; background: var(--line); }
   .grp .cnt { color: var(--dim); font-weight: 400; font-size: 10.5px; }
+
+  /* 右列商店卡片网格（替代紧凑列表；分组内流式布局） */
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
+  .card { display: flex; flex-direction: column; gap: 6px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 10px; padding: 12px; cursor: pointer;
+    transition: border-color .15s; }
+  .card:hover { border-color: var(--blue); }
+  .card.sel { border-color: var(--blue); background: var(--panel2); }
+  .card .cn { display: flex; align-items: center; gap: 6px; }
+  .card .cnm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-weight: 600; font-size: 13px; }
+  .card .cd { font-size: 11px; color: var(--dim); display: -webkit-box; -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical; overflow: hidden; min-height: 32px; word-break: break-all; }
+  .card .cf { font-size: 10.5px; color: var(--dim); display: flex; gap: 8px; flex-wrap: wrap;
+    border-top: 1px solid var(--line); padding-top: 7px; }
+  .card .cf .dl { color: var(--yellow); }
+  .card .cf .ca { color: var(--purple); }
 
   .empty { color: var(--dim); text-align: center; padding: 30px 10px; font-size: 12px; }
   .empty code { color: var(--yellow); }
@@ -195,8 +212,21 @@ function itemHtml(a, i, kind) {
     '<div class="n"><span class="nm" title="' + esc(a.name) + '">' + esc(a.name) + '</span>' + kindBadge + '</div>' +
     '<div class="p" title="' + esc(a.id) + '">' + esc(a.id) +
     (a.version ? ' · v' + esc(a.version) : '') +
-    (a.trigger ? ' · 触发: ' + esc(a.trigger) : '') +
-    (a.source ? '' : '') + '</div></div>';
+    (a.trigger ? ' · 触发: ' + esc(a.trigger) : '') + '</div></div>';
+}
+// 右列商店卡片：名称 + 描述两行截断 + 底部元信息（下载量/类别/版本）
+function cardHtml(a, i) {
+  var downloads = a.description ? (a.description.match(/⬇ (\d+)/) || [])[1] : null;
+  var desc = downloads ? a.description.replace(/⬇ \d+ · /, '') : (a.description || a.desc || '');
+  return '<div class="card' + (sel && sel.list === 'store' && sel.id === a.id ? ' sel' : '') + '" data-i="' + i + '" data-list="store">' +
+    '<div class="cn"><span class="cnm" title="' + esc(a.name) + '">' + esc(a.name) + '</span>' +
+    '<span class="bdg ' + (a.kind === 'app' ? 'b-app' : 'b-skill') + '">' + (a.kind === 'app' ? '应用' : '技能') + '</span></div>' +
+    '<div class="cd" title="' + esc(desc) + '">' + esc(desc || '(无描述)') + '</div>' +
+    '<div class="cf">' +
+    (downloads ? '<span class="dl">⬇ ' + esc(downloads) + '</span>' : '') +
+    (a.category ? '<span class="ca">' + esc(catLabel(a.category)) + '</span>' : '') +
+    (a.version ? '<span>v' + esc(a.version) + '</span>' : '') +
+    '</div></div>';
 }
 function render() {
   $('hubcount').textContent = hubs.length ? '⚡ ' + hubs.length + ' hub' : '';
@@ -208,7 +238,7 @@ function render() {
   $('inst-items').innerHTML = installed.length
     ? installed.map(function (a, i) { return itemHtml(a, i, 'inst'); }).join('')
     : '<div class="empty">无已装技能<br>右侧商店浏览，<code>/skills install &lt;id&gt;</code> 安装</div>';
-  // 右列：未安装商店（按 category 分组）
+  // 右列：未安装商店（按 category 分组，卡片网格）
   var html = '';
   if (!store.length) {
     html = searching
@@ -226,7 +256,9 @@ function render() {
     var idx = 0;
     order.forEach(function (c) {
       html += '<div class="grp">' + esc(catLabel(c)) + '<span class="cnt">' + groups[c].length + '</span></div>';
-      groups[c].forEach(function (a) { html += itemHtml(a, idx++, 'store'); });
+      html += '<div class="cards">';
+      groups[c].forEach(function (a) { html += cardHtml(a, idx++); });
+      html += '</div>';
     });
   }
   $('store-items').innerHTML = html;
@@ -262,7 +294,7 @@ $('inst-items').addEventListener('click', function (e) {
   if (installed[i]) showDetail(Object.assign({ list: 'inst' }, installed[i]));
 });
 $('store-items').addEventListener('click', function (e) {
-  var el = e.target.closest('.item');
+  var el = e.target.closest('.card');
   if (!el) return;
   var i = +el.dataset.i;
   var flat = [];
