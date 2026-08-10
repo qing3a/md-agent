@@ -134,10 +134,12 @@ Phase 1-2  ✅ 底座 + 终端 + LLM 代理 + Agent 回路 + 知识图谱
 Phase 3    ✅ 自组织工作流：审计/补链/巩固/技能/任务引擎/应用平台（人审闭环贯穿）
 Phase 3-C  ✅ Harness 深化：工具注册表 + Agent Loop + 记忆组装器（C 半步评测 input -47%/cache 74%）+ Skills + App 系统 + SkillHub 接入
 Phase A    ✅ 应用×Agent 协作（context/JSON 回推/提提案）+ 应用空间 + AI 升级应用代码 + MCP server 出口
-Phase 4    ▶ 可选：MCP 客户端（接第三方工具）/ 兼容标准 MCP App 渲染 / WASM 计算后端
+Phase 4    ✅ 三短板补齐：语义召回（embed.rs/vector.rs，grep+向量 RRF k=60）+ 子 Agent（agent.rs run_loop/ToolPolicy/spawn，/api/agent + MCP agent.spawn）+ 跨会话记忆（memory.rs recall/extract/dream，提问自动召回 + 收尾提炼，写回全走 pending 人审）
+Phase 4    ▶ 剩余可选项：MCP 客户端（接第三方工具）/ 兼容标准 MCP App 渲染 / WASM 计算后端 / 向量 ANN 索引 / /api/agent SSE 流式化
 ```
 
-设计决策（App≠MCP App、统一 iframe 双源复用、SkillHub 信任分级、工具调用走宿主代理、自组织必须带人审等）与已知短板（无语义召回、无子 agent、多轮记忆仅会话内等）见 git 历史与代码注释。
+设计决策（App≠MCP App、统一 iframe 双源复用、SkillHub 信任分级、工具调用走宿主代理、自组织必须带人审等）见 git 历史与代码注释。
+原已知短板（无语义召回、无子 agent、多轮记忆仅会话内）已在 Phase 4 补齐：语义召回为可选通道（llm.embedding 未配置自动降级纯 grep，零破坏）；子 agent 由 ToolPolicy 硬白名单防越权/防递归；跨会话记忆的 extract/dream 产物一律进 pending 人审后落地（recall 只读）。
 
 ## 目录
 

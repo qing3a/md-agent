@@ -748,6 +748,9 @@ struct AgentBody {
     /// spawn=true → 受限子 agent 循环
     #[serde(default)]
     spawn: bool,
+    /// stream=true → SSE 流式输出（AgentEvent：ToolStart/ToolResult/Answer，逐事件推送）
+    #[serde(default)]
+    stream: bool,
 }
 
 async fn agent_handler(State(st): State<AppState>, headers: HeaderMap, Json(body): Json<AgentBody>) -> Response {
@@ -771,22 +774,10 @@ async fn agent_handler(State(st): State<AppState>, headers: HeaderMap, Json(body
     let exec = AgentExec { root: root.clone() };
     let max_turns = body.max_turns.unwrap_or(8).clamp(1, 16);
 
-    let to_msgs = |arr: &[Value]| -> Vec<crate::agent::AgentMessage> {
-        arr.iter()
-            .filter_map(|m| {
-                let role = m.get("role").and_then(Value::as_str).unwrap_or("user");
-                let content = m.get("content").and_then(Value::as_str).unwrap_or("");
-                if content.is_empty() {
-                    None
-                } else {
-                    Some(crate::agent::AgentMessage {
-                        role: role.to_string(),
-                        content: content.to_string(),
-                    })
-                }
-            })
-            .collect()
-    };
+    // stream=true → SSE 流式：后台任务跑回路，AgentEvent 经 mpsc 推送；结束时发 done 事件
+    if body.stream {
+        return agent_stream(&root, &llm, &exec, &body, max_turns).await;
+    }
 
     let result = if body.spawn {
         let seed = to_msgs(&body.seed);
@@ -820,6 +811,116 @@ async fn agent_handler(State(st): State<AppState>, headers: HeaderMap, Json(body
         .into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
     }
+}
+
+/// body 中的 Value 消息数组 → AgentMessage（空 content 过滤；role 缺省 user）
+fn to_msgs(arr: &[Value]) -> Vec<crate::agent::AgentMessage> {
+    arr.iter()
+        .filter_map(|m| {
+            let role = m.get("role").and_then(Value::as_str).unwrap_or("user");
+            let content = m.get("content").and_then(Value::as_str).unwrap_or("");
+            if content.is_empty() {
+                None
+            } else {
+                Some(crate::agent::AgentMessage {
+                    role: role.to_string(),
+                    content: content.to_string(),
+                })
+            }
+        })
+        .collect()
+}
+
+/// /api/agent stream=true：SSE 逐事件推送 AgentEvent（ToolStart/ToolResult/Answer）+ 收尾 done。
+/// 事件负载 = `data: {json}\n\n`；前端后端回路按事件渲染工具行/回答。
+async fn agent_stream(
+    root: &Path,
+    llm: &AgentLlm,
+    exec: &AgentExec,
+    body: &AgentBody,
+    max_turns: usize,
+) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures_util::stream::{Stream, StreamExt};
+    use std::convert::Infallible;
+    use std::pin::Pin;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<crate::agent::AgentEvent>(16);
+    let llm2 = AgentLlm {
+        endpoint: llm.endpoint.clone(),
+        model: llm.model.clone(),
+        api_key: llm.api_key.clone(),
+    };
+    let exec2 = AgentExec { root: root.to_path_buf() };
+    let prompt = body.prompt.clone();
+    let messages = to_msgs(&body.messages);
+    let seed = to_msgs(&body.seed);
+    let spawn = body.spawn;
+    let root2 = root.to_path_buf();
+    // 事件回调持有 tx 的克隆；原始 tx 保留给收尾 done/error 事件（blocking_send 是 &self）
+    let tx_events = tx.clone();
+
+    tokio::spawn(async move {
+        let mut on_event = move |ev: crate::agent::AgentEvent| {
+            let _ = tx_events.blocking_send(ev);
+        };
+        let res = if spawn {
+            crate::agent::spawn_subagent_streaming(
+                &llm2,
+                &exec2,
+                &root2,
+                crate::agent::SubagentSpec {
+                    prompt: prompt.clone(),
+                    seed,
+                    max_turns,
+                },
+                &mut on_event,
+            )
+            .await
+        } else {
+            let mut msgs = messages;
+            if !prompt.trim().is_empty() {
+                msgs.push(crate::agent::AgentMessage::user(prompt.clone()));
+            }
+            let policy = crate::agent::ToolPolicy::new(root2.clone());
+            crate::agent::run_loop_streaming(&llm2, &exec2, &policy, msgs, max_turns, &mut on_event).await
+        };
+        let _ = match res {
+            Ok(r) => tx.blocking_send(crate::agent::AgentEvent::ToolResult {
+                name: "__done".to_string(),
+                ok: true,
+                result: serde_json::json!({
+                    "tool_calls": r.tool_calls,
+                    "tools_used": r.tools_used
+                })
+                .to_string(),
+            }),
+            Err(e) => tx.blocking_send(crate::agent::AgentEvent::ToolResult {
+                name: "__error".to_string(),
+                ok: false,
+                result: e,
+            }),
+        };
+    });
+
+    let stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> = Box::pin(
+        async_stream_fn(rx).map(|ev| {
+            let s = serde_json::to_string(&ev).unwrap_or_else(|_| "{}".to_string());
+            Ok(Event::default().data(s))
+        }),
+    );
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// mpsc Receiver → Stream（axum Sse 消费，持有所有权）；Receiver 关闭时流结束
+fn async_stream_fn(
+    mut rx: tokio::sync::mpsc::Receiver<crate::agent::AgentEvent>,
+) -> impl futures_util::Stream<Item = crate::agent::AgentEvent> + Send {
+    futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|ev| (ev, rx))
+    })
 }
 
 // ---------- 跨会话记忆（Phase 4 M3：recall / extract / dream） ----------

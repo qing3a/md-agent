@@ -156,6 +156,49 @@ def main():
         r = api("/api/memory/recall", "POST", {"q": "记忆", "k": 3})
         ok("recall 返回 hits", "hits" in r and isinstance(r["hits"], list))
 
+        print("== 语义召回链路（mock embed）==")
+        # M1：起 mock embedding（scripts/mock_embed.py，OpenAI 兼容 /v1/embeddings）→
+        # 配置 llm.embedding → /api/embed/sync 建索引 → semantic=1 检索（RRF 融合）
+        embed_port = 11436
+        mock_embed = pathlib.Path(__file__).resolve().parent / "mock_embed.py"
+        embed_proc = subprocess.Popen(
+            [sys.executable, str(mock_embed), str(embed_port)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            time.sleep(1.5)
+            cfg_emb = {"kb_root": str(kb),
+                       "llm": {"endpoint": "", "model": "", "api_key": "",
+                               "embedding": {"endpoint": f"http://127.0.0.1:{embed_port}", "model": "mock-embed", "api_key": ""}},
+                       "heartbeat": {"enabled": False, "interval_secs": 5}}
+            api("/api/config", "POST", cfg_emb)
+            # 造语义检索语料：语义近义（词袋共享关键词）但 grep 关键词不同的文档
+            wf("notes/架构/托盘应用.md", "# 托盘应用\n托盘 架构 本地服务 常驻\n")
+            wf("notes/记忆/检索方案.md", "# 检索方案\n记忆 检索 向量 语义\n")
+            wf("notes/杂项/无关.md", "# 无关\n天气 吃饭 散步\n")
+            s = api("/api/embed/sync", "POST")
+            ok("embed sync ok", s.get("ok") is True and s.get("chunks", 0) >= 3)
+            st = api("/api/embed/stats")
+            ok("embed stats 建索引", st.get("stats", {}).get("db_exists") is True
+               and st.get("stats", {}).get("chunks", 0) >= 3 and st.get("stats", {}).get("dim", 0) > 0)
+            # 语义检索：查「托盘 常驻」——grep 命中文档 A；向量通道对共享词袋的文档也应排前
+            r = api("/api/search?q=" + urllib.parse.quote("托盘 常驻") + "&layer=all&semantic=1")
+            ok("semantic 检索 200", "hits" in r)
+            top_files = [h["file"] for h in r.get("hits", [])]
+            ok("semantic 召回命中相关文档", any("托盘应用" in f for f in top_files))
+            # 未配置 embedding 时 semantic=1 应降级纯 grep（不报错）
+            api("/api/config", "POST", {"kb_root": str(kb),
+                                        "llm": {"endpoint": "", "model": "", "api_key": "", "embedding": {"endpoint": "", "model": "", "api_key": ""}},
+                                        "heartbeat": {"enabled": False, "interval_secs": 5}})
+            r2 = api("/api/search?q=" + urllib.parse.quote("托盘") + "&layer=all&semantic=1")
+            ok("semantic 降级纯 grep", "hits" in r2)
+        finally:
+            embed_proc.terminate()
+            try:
+                embed_proc.wait(timeout=5)
+            except Exception:
+                embed_proc.kill()
+
         print(f"\n结果: {passed} 通过, {failed} 失败")
         return 1 if failed else 0
     finally:

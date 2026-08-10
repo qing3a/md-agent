@@ -8,6 +8,7 @@
 //! 宿主解析后执行；解析逻辑由调用方提供（复用 Core.extractJsonObjects 同构的 Rust 解析）。
 
 use futures_util::future::BoxFuture;
+use serde::Serialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -61,6 +62,24 @@ pub struct AgentResult {
     pub tool_calls: usize,
     /// 执行过的工具名（审计/交互卡片用）
     pub tools_used: Vec<String>,
+}
+
+/// 回路流式事件（/api/agent stream=true 的 SSE 负载；前端后端回路逐事件渲染）
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum AgentEvent {
+    /// 工具调用开始（前端渲染工具行 running）
+    ToolStart { name: String, args: Value },
+    /// 工具调用结束（前端渲染工具行 done/fail）
+    ToolResult { name: String, ok: bool, result: String },
+    /// 最终回答（前端渲染气泡）
+    Answer { text: String },
+}
+
+fn emit(on_event: &mut Option<&mut (dyn FnMut(AgentEvent) + Send)>, ev: AgentEvent) {
+    if let Some(f) = on_event.as_mut() {
+        f(ev);
+    }
 }
 
 // ---------- 工具策略（子 agent 受限白名单，对齐 ZCode evaluateMemoryAgentToolPolicy） ----------
@@ -168,14 +187,41 @@ pub async fn run_loop<L: LlmPort + ?Sized, E: ToolExecutor + ?Sized>(
     llm: &L,
     exec: &E,
     policy: &ToolPolicy,
+    messages: Vec<AgentMessage>,
+    max_turns: usize,
+) -> Result<AgentResult, String> {
+    run_loop_inner(llm, exec, policy, messages, max_turns, &mut None).await
+}
+
+/// 流式版主回路：与 run_loop 同语义，额外通过 on_event 回调推送工具/回答事件
+/// （/api/agent stream=true 用；无事件需求直接用 run_loop）。
+pub async fn run_loop_streaming<L: LlmPort + ?Sized, E: ToolExecutor + ?Sized>(
+    llm: &L,
+    exec: &E,
+    policy: &ToolPolicy,
+    messages: Vec<AgentMessage>,
+    max_turns: usize,
+    on_event: &mut (dyn FnMut(AgentEvent) + Send),
+) -> Result<AgentResult, String> {
+    run_loop_inner(llm, exec, policy, messages, max_turns, &mut Some(on_event)).await
+}
+
+async fn run_loop_inner<L: LlmPort + ?Sized, E: ToolExecutor + ?Sized>(
+    llm: &L,
+    exec: &E,
+    policy: &ToolPolicy,
     mut messages: Vec<AgentMessage>,
     max_turns: usize,
+    on_event: &mut Option<&mut (dyn FnMut(AgentEvent) + Send)>,
 ) -> Result<AgentResult, String> {
     let mut tool_calls = 0usize;
     let mut tools_used: Vec<String> = Vec::new();
     for _ in 0..max_turns {
         let reply = llm.call(&messages).await?;
         let Some(tc) = reply.tool else {
+            emit(on_event, AgentEvent::Answer {
+                text: reply.answer.clone(),
+            });
             return Ok(AgentResult {
                 answer: reply.answer,
                 tool_calls,
@@ -184,13 +230,27 @@ pub async fn run_loop<L: LlmPort + ?Sized, E: ToolExecutor + ?Sized>(
         };
         match policy.evaluate(&tc.name, &tc.args) {
             Ok(()) => {
+                emit(on_event, AgentEvent::ToolStart {
+                    name: tc.name.clone(),
+                    args: tc.args.clone(),
+                });
                 let result = exec.exec(&tc.name, &tc.args).await?;
+                emit(on_event, AgentEvent::ToolResult {
+                    name: tc.name.clone(),
+                    ok: true,
+                    result: result.clone(),
+                });
                 messages.push(AgentMessage::assistant(reply.answer));
                 messages.push(tool_result_message(&tc.name, &result));
                 tool_calls += 1;
                 tools_used.push(tc.name.clone());
             }
             Err(reason) => {
+                emit(on_event, AgentEvent::ToolResult {
+                    name: tc.name.clone(),
+                    ok: false,
+                    result: reason.clone(),
+                });
                 messages.push(AgentMessage::assistant(reply.answer));
                 messages.push(tool_rejected_message(&tc.name, &reason));
             }
@@ -199,6 +259,9 @@ pub async fn run_loop<L: LlmPort + ?Sized, E: ToolExecutor + ?Sized>(
     // 达上限：强制回答轮（不调用工具）
     messages.push(forced_answer_message());
     let reply = llm.call(&messages).await?;
+    emit(on_event, AgentEvent::Answer {
+        text: reply.answer.clone(),
+    });
     Ok(AgentResult {
         answer: reply.answer,
         tool_calls,
@@ -238,10 +301,31 @@ pub async fn spawn_subagent<L: LlmPort + ?Sized, E: ToolExecutor + ?Sized>(
     root: &Path,
     spec: SubagentSpec,
 ) -> Result<AgentResult, String> {
+    spawn_subagent_inner(llm, exec, root, spec, &mut None).await
+}
+
+/// 流式版子 agent（/api/agent spawn=true stream=true 用）
+pub async fn spawn_subagent_streaming<L: LlmPort + ?Sized, E: ToolExecutor + ?Sized>(
+    llm: &L,
+    exec: &E,
+    root: &Path,
+    spec: SubagentSpec,
+    on_event: &mut (dyn FnMut(AgentEvent) + Send),
+) -> Result<AgentResult, String> {
+    spawn_subagent_inner(llm, exec, root, spec, &mut Some(on_event)).await
+}
+
+async fn spawn_subagent_inner<L: LlmPort + ?Sized, E: ToolExecutor + ?Sized>(
+    llm: &L,
+    exec: &E,
+    root: &Path,
+    spec: SubagentSpec,
+    on_event: &mut Option<&mut (dyn FnMut(AgentEvent) + Send)>,
+) -> Result<AgentResult, String> {
     let policy = ToolPolicy::new(root.to_path_buf());
     let mut messages = spec.seed;
     messages.push(AgentMessage::user(spec.prompt));
-    run_loop(llm, exec, &policy, messages, spec.max_turns).await
+    run_loop_inner(llm, exec, &policy, messages, spec.max_turns, on_event).await
 }
 
 #[cfg(test)]
