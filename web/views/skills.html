@@ -22,18 +22,13 @@
   button:hover { border-color: var(--blue); color: var(--blue); }
   button.primary { background: var(--green); color: var(--bg3); border-color: var(--green); font-weight: 600; }
   button.danger { background: var(--red); color: var(--bg3); border-color: var(--red); font-weight: 600; }
-  button:disabled { opacity: 0.4; cursor: default; }
   button.small { padding: 2px 8px; font-size: 11px; }
 
   #main { flex: 1; display: flex; min-height: 0; }
   .col { min-height: 0; }
-  #list-col { width: 260px; border-right: 1px solid var(--line); background: var(--panel);
+  #list-col { width: 280px; border-right: 1px solid var(--line); background: var(--panel);
     display: flex; flex-direction: column; }
-  #tabs { display: flex; gap: 4px; padding: 8px 10px; }
-  .tab { flex: 1; background: transparent; border: 1px solid var(--line); border-radius: 6px;
-    padding: 4px 0; font-size: 12px; cursor: pointer; color: var(--dim); }
-  .tab.sel { background: var(--panel2); border-color: var(--blue); color: var(--blue); font-weight: 600; }
-  #search-bar { padding: 0 10px 6px; }
+  #search-bar { padding: 8px 10px 6px; }
   #search { width: 100%; background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
     border-radius: 7px; padding: 6px 10px; font-size: 12px; outline: none; }
   #search:focus { border-color: var(--blue); }
@@ -56,9 +51,6 @@
   #detail { padding: 14px; display: none; }
   #detail h2 { font-size: 16px; margin-bottom: 4px; }
   .meta { color: var(--dim); font-size: 12px; margin-bottom: 10px; }
-  .perms { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
-  .perm { background: var(--panel2); border: 1px solid var(--line); color: var(--blue);
-    border-radius: 10px; padding: 1px 10px; font-size: 11px; }
   .desc { color: var(--fg); font-size: 12px; margin-bottom: 14px; }
   .actions { display: flex; gap: 10px; align-items: center; }
   .upd-hint { font-size: 11px; color: var(--dim); }
@@ -89,14 +81,10 @@
   <span id="hubcount" class="meta" title="已连接 SkillHub"></span>
   <div class="sp"></div>
   <button id="connect">连接 hub</button>
-  <button id="refresh" title="刷新目录">刷新</button>
+  <button id="refresh" title="刷新">刷新</button>
 </header>
 <div id="main">
   <div id="list-col" class="col">
-    <div id="tabs">
-      <button id="tab-catalog" class="tab">目录</button>
-      <button id="tab-installed" class="tab">已安装</button>
-    </div>
     <div id="search-bar">
       <input id="search" type="text" placeholder="🔍 检索 SkillHub 商店…" autocomplete="off">
       <div id="search-hint" class="meta"></div>
@@ -116,12 +104,23 @@
 <div id="hint">连接 SkillHub：<code>连接 hub</code> 或终端 <code>/skills connect &lt;url&gt;</code> · 支持 skillhub.cn 商店（默认，检索+榜单）/ git 仓库 / GitHub zip / 本地目录（自动分析 md 文档） · 安装走命令行（人审确认）：<code>/skills install &lt;id&gt;</code> 或 <code>/skills import &lt;路径&gt;</code></div>
 <div id="toast" class="toast"></div>
 
+<!-- 软确认弹窗（替代原生 confirm） -->
+<div id="overlay" class="hidden">
+  <div class="ov-box">
+    <h3 id="ov-title">确认卸载</h3>
+    <div id="ov-msg" class="ov-row"></div>
+    <div class="ov-actions">
+      <button id="ov-cancel">取消</button>
+      <button id="ov-ok" class="danger">确认卸载</button>
+    </div>
+  </div>
+</div>
+
 <script>
 var hubs = [], catalog = [], skills = [];
-var catalogView = []; // 渲染用目录（已安装优先排序；与 data-i 索引保持一致）
-var loadedOnce = false; // 首次加载默认 Tab = 已安装（有已装技能时）
-var tab = 'catalog'; // 'catalog' | 'installed'
-var sel = null; // { kind: 'cat' | 'inst', ...条目字段 }
+var list = [];       // 合并列表：[{id, name, title, version, desc, trigger, hub, installed, fromLocal}]
+var searching = false; // 搜索态（列表 = 商店检索结果 + 已装标记）
+var sel = null;
 
 function $(id) { return document.getElementById(id); }
 function toast(msg, ok) {
@@ -133,98 +132,96 @@ function toast(msg, ok) {
 }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
 
+// ================= 合并列表 =================
+// 商店目录条目与已装技能（kb/skills）按 id 合并：同 slug 已装 → 一条带 ✓；本地导入的补为独立条目
+function buildList() {
+  var byId = {};
+  catalog.forEach(function (a) { byId[a.id] = Object.assign({}, a, { installed: false, fromLocal: false }); });
+  skills.forEach(function (s) {
+    var id = s.name.replace(/\.md$/, '');
+    if (byId[id]) {
+      byId[id].installed = true;
+      byId[id].fname = s.name;
+    } else {
+      byId[id] = { id: id, name: s.title || id, title: s.title, version: '', desc: s.desc || '',
+        trigger: s.trigger || '', hub: '本地', installed: true, fromLocal: true, kind: 'skill', fname: s.name };
+    }
+  });
+  var out = Object.keys(byId).map(function (k) { return byId[k]; });
+  // 已装排前（内部保持原排序），其余按原顺序（商店按下载量）
+  out.sort(function (a, b) { return (b.installed ? 1 : 0) - (a.installed ? 1 : 0); });
+  return out;
+}
+
 // ================= 渲染 =================
 function render() {
   $('hubcount').textContent = hubs.length ? '⚡ ' + hubs.length + ' hub' : '';
-  $('count').textContent = (tab === 'catalog' ? catalog.length + ' 个可用' : skills.length + ' 个已安装');
-  $('tab-catalog').classList.toggle('sel', tab === 'catalog');
-  $('tab-installed').classList.toggle('sel', tab === 'installed');
-  var sbar = $('search-bar');
-  if (sbar) sbar.style.display = tab === 'catalog' ? '' : 'none';
-  var items = $('items');
-  if (tab === 'catalog') {
-    // 已安装优先：目录里已装的应用排最前并标注（打开市场最关心自己装了什么）
-    var instIds = {};
-    skills.forEach(function (s) { instIds[s.name.replace(/\.md$/, '')] = true; });
-    catalogView = catalog.slice().sort(function (a, b) {
-      return (instIds[a.id] ? 0 : 1) - (instIds[b.id] ? 0 : 1);
-    });
-    items.innerHTML = catalogView.map(function (a, i) {
-      var kindBadge = '<span class="bdg ' + (a.kind === 'skill' ? 'b-skill' : 'b-app') + '">' + (a.kind === 'skill' ? '技能' : '应用') + '</span>';
-      var instBadge = instIds[a.id] ? '<span class="bdg b-inst" title="已安装">✓</span>' : '';
-      // 搜索结果条目无 hub 字段 → 兜底 skillhub.cn（检索仅对 skillhub 商店生效）
-      return '<div class="item' + (sel && sel.kind === 'cat' && sel.id === a.id ? ' sel' : '') + '" data-i="' + i + '">' +
-        '<div class="n"><span class="nm" title="' + esc(a.name) + '">' + esc(a.name) + '</span>' + kindBadge + instBadge + '</div>' +
-        '<div class="p" title="' + esc(a.id) + '">' + esc(a.id) + (a.version ? ' · v' + esc(a.version) : '') + ' · [' + esc(a.hub || 'skillhub.cn') + ']</div></div>';
-    }).join('');
-  } else {
-    items.innerHTML = skills.map(function (s, i) {
-      var title = s.title || s.name;
-      return '<div class="item' + (sel && sel.kind === 'inst' && sel.name === s.name ? ' sel' : '') + '" data-i="' + i + '">' +
-        '<div class="n"><span class="nm" title="' + esc(title) + '">' + esc(title) + '</span>' +
-        '<span class="bdg b-skill">技能</span></div>' +
-        '<div class="p" title="' + esc(s.name) + '">' + esc(s.name) + (s.trigger ? ' · 触发: ' + esc(s.trigger) : '') + '</div></div>';
-    }).join('');
-  }
+  $('count').textContent = searching ? '「' + ($('search').value || '') + '」' + list.length + ' 条'
+    : list.length + ' 项（已装 ' + list.filter(function (x) { return x.installed; }).length + '）';
+  $('items').innerHTML = list.map(function (a, i) {
+    var kindBadge = '<span class="bdg ' + (a.kind === 'app' ? 'b-app' : 'b-skill') + '">' + (a.kind === 'app' ? '应用' : '技能') + '</span>';
+    var instBadge = a.installed ? '<span class="bdg b-inst" title="已安装">✓</span>' : '';
+    return '<div class="item' + (sel && sel.id === a.id ? ' sel' : '') + '" data-i="' + i + '">' +
+      '<div class="n"><span class="nm" title="' + esc(a.name) + '">' + esc(a.name) + '</span>' + kindBadge + instBadge + '</div>' +
+      '<div class="p" title="' + esc(a.id) + '">' + esc(a.id) +
+      (a.version ? ' · v' + esc(a.version) : '') +
+      ' · [' + esc(a.hub || 'skillhub.cn') + ']' + '</div></div>';
+  }).join('');
   var empty = $('empty');
-  var has = tab === 'catalog' ? catalog.length : skills.length;
-  if (!has) {
+  if (!list.length) {
     empty.style.display = 'block';
-    empty.innerHTML = tab === 'catalog'
-      ? '未连接 SkillHub<br><br>点右上角 <code>连接 hub</code> 或终端 <code>/skills connect &lt;url&gt;</code>'
-      : '无已安装技能<br><br>从「目录」Tab 安装，或终端 <code>/skills import &lt;路径&gt;</code>';
+    empty.innerHTML = hubs.length
+      ? '目录为空<br><br>终端 <code>/skills search &lt;关键词&gt;</code> 检索，或 <code>连接 hub</code> 换商店'
+      : '未连接 SkillHub<br><br>点右上角 <code>连接 hub</code> 或终端 <code>/skills connect &lt;url&gt;</code>';
     $('detail').style.display = 'none';
   } else {
     empty.style.display = 'none';
     if (sel) showDetail(sel); else $('detail').style.display = 'none';
   }
 }
-function showDetail(s) {
-  sel = s;
+function showDetail(a) {
+  sel = a;
   $('detail').style.display = 'block';
-  $('d-name').textContent = (s.title || s.name) + '  v' + s.version;
-  var meta = 'id: ' + s.id;
-  if (s.entry) meta += ' · entry: ' + s.entry;
-  if (s.rel) meta += ' · 文件: ' + s.rel;
-  if (s.hub) meta += ' · 来源 ' + s.hub;
-  else if (s.kind === 'inst') meta += ' · 本地';
+  $('d-name').textContent = a.name + (a.version ? '  v' + a.version : '');
+  var meta = 'id: ' + a.id + ' · 来源 ' + (a.hub || 'skillhub.cn');
+  if (a.trigger) meta += ' · 触发: ' + a.trigger;
+  if (a.fname) meta += ' · 文件: ' + a.fname;
   $('d-meta').textContent = meta;
-  $('d-desc').textContent = s.description || '(无描述)';
+  $('d-desc').textContent = a.desc || a.description || '(无描述)';
   var acts = $('d-actions');
-  if (s.kind === 'cat') {
-    // 目录条目只浏览：安装走命令行（第三方 hub 无稳定 API，安装需显式确认来源）
-    acts.innerHTML = '<span class="upd-hint">安装（人审确认）：<code>/skills install ' + esc(s.id) + '</code>（应用或技能按内容自动识别）<br>兜底：<code>/skills import &lt;路径&gt;</code> 手动导入</span>';
+  if (a.installed) {
+    acts.innerHTML = '<span class="upd-hint">已安装' + (a.trigger ? '（trigger 命中自动注入 Agent）' : '') + '</span>' +
+      '<button id="act-uninstall" class="danger">卸载</button>';
+    $('act-uninstall').addEventListener('click', function () { uninstallSkill(a); });
   } else {
-    acts.innerHTML = '<span class="upd-hint">已安装技能（trigger 命中自动注入 Agent）<br>卸载：删除 <code>kb/skills/' + esc(s.name) + '</code> 文件</span>';
+    acts.innerHTML = '<span class="upd-hint">安装（人审确认）：<code>/skills install ' + esc(a.id) + '</code></span>';
   }
   renderListSel();
 }
 function renderListSel() {
   Array.prototype.forEach.call(document.querySelectorAll('#items .item'), function (el) {
-    el.classList.toggle('sel', sel && el.dataset.i && currentList()[+el.dataset.i] && currentList()[+el.dataset.i].id === sel.id);
+    el.classList.toggle('sel', sel && el.dataset.i && list[+el.dataset.i] && list[+el.dataset.i].id === sel.id);
   });
 }
-function currentList() { return tab === 'catalog' ? catalogView : skills; }
 
 $('items').addEventListener('click', function (e) {
   var el = e.target.closest('.item');
   if (!el) return;
   var i = +el.dataset.i;
-  var list = currentList();
-  if (!list[i]) return;
-  var a = list[i];
-  if (tab === 'catalog') {
-    showDetail({ kind: 'cat', id: a.id, name: a.name, version: a.version,
-      entry: a.entry, permissions: a.permissions, description: a.description, hub: a.hub, rel: a.rel });
-  } else {
-    showDetail({ kind: 'inst', id: a.name, name: a.title || a.name, version: '0.0.0',
-      description: a.desc || '(无描述)', entry: '', permissions: [], rel: '', hub: null, sname: a.name });
-  }
+  if (list[i]) showDetail(list[i]);
 });
 
-$('tab-catalog').addEventListener('click', function () { tab = 'catalog'; sel = null; render(); });
-$('tab-installed').addEventListener('click', function () { tab = 'installed'; sel = null; render(); });
-$('refresh').addEventListener('click', load);
+// ---------- 卸载技能（/api/skills/delete + 软确认） ----------
+function uninstallSkill(a) {
+  uiConfirm('确认卸载技能「' + a.name + '」？（删除 kb/skills/' + (a.fname || a.id + '.md') + '）').then(function (ok) {
+    if (!ok) return;
+    hostApi('/api/skills/delete', { method: 'POST', body: { name: a.fname || a.id } }).then(function () {
+      toast('✓ 已卸载 ' + a.name, true);
+      sel = null;
+      return load();
+    }).catch(function (e) { toast('卸载失败: ' + e.message, false); });
+  });
+}
 
 // ---------- 连接 hub ----------
 $('connect').addEventListener('click', function () {
@@ -234,21 +231,28 @@ $('connect').addEventListener('click', function () {
     var kinds = {}; (r.hub.apps || []).forEach(function (a) { kinds[a.kind] = (kinds[a.kind] || 0) + 1; });
     var kt = Object.keys(kinds).map(function (k) { return kinds[k] + ' 个' + (k === 'app' ? '应用' : '技能'); }).join('、') || '0 个条目';
     toast('✓ 已连接 ' + r.hub.name + '（' + kt + '）', true);
-    tab = 'catalog'; sel = null;
+    sel = null;
     return load();
   }).catch(function (e) { toast('连接失败: ' + e.message, false); });
 });
 
-// ---------- 检索 SkillHub（skillhub.cn API） ----------
+// ---------- 检索（搜索框常驻：输入即商店检索，结果带已装标记） ----------
 var searchTimer = null;
 $('search').addEventListener('input', function () {
   clearTimeout(searchTimer);
   var q = this.value.trim();
-  if (!q) { sel = null; return load(); }
+  if (!q) { searching = false; sel = null; return load(); }
   searchTimer = setTimeout(function () {
     hostApi('/api/hubs/search', { method: 'POST', body: { q: q } }).then(function (r) {
-      catalog = r.apps || [];
-      $('search-hint').textContent = '「' + q + '」搜索结果 ' + catalog.length + ' 条（/skills install <id> 安装）';
+      searching = true;
+      var res = (r.apps || []).map(function (a) { return Object.assign({}, a, { installed: false }); });
+      var byId = {};
+      res.forEach(function (a) { byId[a.id] = a; });
+      skills.forEach(function (s) {
+        var id = s.name.replace(/\.md$/, '');
+        if (byId[id]) { byId[id].installed = true; byId[id].fname = s.name; }
+      });
+      list = res;
       sel = null;
       render();
     }).catch(function (e) { toast('检索失败: ' + e.message, false); });
@@ -266,16 +270,35 @@ async function load() {
     hubs = rs[0].hubs || [];
     catalog = rs[1].apps || [];
     skills = rs[2].skills || [];
-    // 优先显示已安装：首次打开且已有已装技能时，默认落在「已安装」Tab（之后跟随用户选择）
-    if (!loadedOnce) {
-      loadedOnce = true;
-      if (skills.length) { tab = 'installed'; sel = null; }
-    }
+    searching = false;
+    list = buildList();
     render();
   } catch (e) {
     $('items').innerHTML = '<div class="empty">加载失败: ' + esc(e.message) + '</div>';
   }
 }
+
+// 软确认弹窗：页内 modal（替代原生 confirm），Promise<boolean>
+var ovCb = null;
+function uiConfirm(msg) {
+  return new Promise(function (resolve) {
+    ovCb = resolve;
+    $('ov-msg').textContent = msg;
+    $('overlay').classList.remove('hidden');
+  });
+}
+function closeOv(ok) {
+  $('overlay').classList.add('hidden');
+  var cb = ovCb; ovCb = null;
+  if (cb) cb(ok);
+}
+$('ov-ok').addEventListener('click', function () { closeOv(true); });
+$('ov-cancel').addEventListener('click', function () { closeOv(false); });
+$('overlay').addEventListener('click', function (e) { if (e.target === $('overlay')) closeOv(false); });
+document.addEventListener('keydown', function (e) {
+  if (ovCb && e.key === 'Escape') closeOv(false);
+});
+$('refresh').addEventListener('click', function () { sel = null; load(); });
 
 load();
 </script>

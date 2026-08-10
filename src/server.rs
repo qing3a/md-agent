@@ -44,6 +44,7 @@ pub async fn serve(
         .route("/api/health", get(health))
         .route("/api/tools", get(tools_handler))
         .route("/api/skills", get(skills_handler))
+        .route("/api/skills/delete", post(skills_delete))
         .route("/api/consolidate", post(consolidate_handler))
         .route("/api/search", get(search_handler))
         .route("/api/l1", get(l1_handler))
@@ -306,6 +307,33 @@ async fn skills_handler(State(st): State<AppState>) -> Json<Value> {
         .map(|s| json!({ "name": s.name, "title": s.title, "trigger": s.trigger, "desc": s.desc }))
         .collect();
     Json(json!({ "skills": items }))
+}
+
+#[derive(Deserialize)]
+struct SkillDeleteBody {
+    /// 技能文件名（docx.md）或不带扩展名（docx）；非法名/INDEX.md 拒绝
+    name: String,
+}
+
+/// 卸载技能：删除 kb/skills/<name>.md 并重建技能注册表（技能页「已安装」管理用）
+async fn skills_delete(State(st): State<AppState>, Json(b): Json<SkillDeleteBody>) -> Response {
+    let name = b.name.trim();
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "非法技能名" }))).into_response();
+    }
+    let fname = if name.ends_with(".md") { name.to_string() } else { format!("{name}.md") };
+    if fname.eq_ignore_ascii_case("INDEX.md") {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "不能删除技能注册表 INDEX" }))).into_response();
+    }
+    let file = st.kb_root.join("skills").join(&fname);
+    if !file.is_file() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("技能不存在: {fname}") }))).into_response();
+    }
+    if let Err(e) = std::fs::remove_file(&file) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("删除失败: {e}") }))).into_response();
+    }
+    let _ = crate::kb::sync_skills(&st.kb_root); // 技能注册表 INDEX 重建
+    Json(json!({ "ok": true, "removed": fname })).into_response()
 }
 
 /// 巩固器：按确定性规则（MEMORY 去重 / 重复标题提示）生成巩固提案进待审
