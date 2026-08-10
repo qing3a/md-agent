@@ -196,6 +196,7 @@
     if (!parsed.length) term.writeln('（空会话，无内容可显示）');
     enhanceRefs(); // 恢复会话渲染完成后：历史回答中的 [文件:行号] 引用同样可点击
     attachRegenToLastAssistant();
+    paintTurnNav();
     setEmptyState(false); // 恢复会话 = 对话页形态：输入框回底部（勿留首页居中态，否则首页输入框"复用"到对话页）
   }
 
@@ -254,6 +255,7 @@
       if (lastU >= 0) history.length = lastU;
     }
     saveHistory();
+    paintTurnNav();
   }
   // 编辑/重生成确认后重新提交（跳过用户气泡渲染——原气泡已更新/保留）
   async function reAsk(text) {
@@ -356,6 +358,180 @@
       else if (act === 'del') delMsg(msgEl);
       else if (act === 'regen') regenMsg(msgEl);
     });
+  }
+
+  // ================= ZCode 界面借鉴：上下文用量 / 时间段问候 / 提示词增强 / 问题导航 =================
+
+  // ---- 上下文用量面板（contextUsage 借鉴）：⛽ chip 点击展开，数据源 /api/context/stats（CE 记账） ----
+  const usageChip = document.getElementById('usage-chip');
+  const usagePanel = document.getElementById('usage-panel');
+  const fmtTok = (n) => (n >= 10000 ? (n / 1000).toFixed(1) + 'k' : String(n));
+  function fmtPct(x) { return (x === null || x === undefined || isNaN(x)) ? '—' : Math.round(x * 100) + '%'; }
+  function srcBar(name, val, pct) {
+    const v = val || 0, p = pct || 0;
+    return '<div class="s">' + name + '</div><div class="sv">' + fmtTok(v) + ' · ' + Math.round(p * 100) + '%</div>';
+  }
+  async function toggleUsagePanel() {
+    if (!usageChip || !usagePanel) return;
+    if (usagePanel.hidden) {
+      const r = await api('/api/context/stats').catch(() => null);
+      if (!r) { usagePanel.innerHTML = '<h4>上下文用量</h4><div class="up-tip">暂无统计（先问一轮才会记账）</div>'; }
+      else {
+        const src = r.src || {};
+        const pct = src.pct || {};
+        const ratio = r.cache_read_ratio;
+        const total = (r.input_tokens || 0) + (r.output_tokens || 0);
+        const srcTotal = src.total || total || 1;
+        const barPct = Math.min(100, Math.round(ratio === null ? 0 : ratio * 100));
+        usagePanel.innerHTML =
+          '<h4>上下文用量 <span style="font-weight:400;color:var(--muted);font-size:11px">' + (r.total || 0) + ' 轮</span></h4>' +
+          '<div class="up-nums">' +
+          '<div class="up-num"><div class="v">' + fmtTok(r.input_tokens || 0) + '</div><div class="k">累计输入</div></div>' +
+          '<div class="up-num"><div class="v">' + fmtTok(r.output_tokens || 0) + '</div><div class="k">累计输出</div></div>' +
+          '<div class="up-num"><div class="v">' + fmtTok(total) + '</div><div class="k">总用量</div></div>' +
+          '</div>' +
+          '<div class="up-row"><span>平均缓存命中率</span><span>' + fmtPct(ratio) + '</span></div>' +
+          '<div class="up-bar"><i class="' + (ratio !== null && ratio >= 0.5 ? 'ok' : '') + '" style="width:' + barPct + '%"></i></div>' +
+          '<div class="up-row"><span>上下文来源</span><span>' + fmtTok(srcTotal) + ' tokens</span></div>' +
+          '<div class="up-src">' +
+          srcBar('系统提示词', src.system, pct.system) +
+          srcBar('技能/工具提示', src.skills, pct.skills) +
+          srcBar('中间轮（历史+工具）', src.mid, pct.mid) +
+          srcBar('用户输入', src.user, pct.user) +
+          '</div>' +
+          (r.avg_tool_count ? '<div class="up-tip">平均每轮调用 ' + (r.avg_tool_count || 0).toFixed(1) + ' 次工具</div>' : '');
+      }
+      const rc = usageChip.getBoundingClientRect();
+      usagePanel.style.top = (rc.bottom + 8) + 'px';
+      usagePanel.style.right = (window.innerWidth - rc.right) + 'px';
+      usagePanel.hidden = false;
+      usageChip.classList.add('active');
+    } else {
+      usagePanel.hidden = true;
+      usageChip.classList.remove('active');
+    }
+  }
+  if (usageChip) usageChip.addEventListener('click', toggleUsagePanel);
+  if (usagePanel) document.addEventListener('click', (e) => {
+    if (!usagePanel.hidden && !usagePanel.contains(e.target) && e.target !== usageChip && !usageChip.contains(e.target)) {
+      usagePanel.hidden = true;
+      usageChip.classList.remove('active');
+    }
+  });
+  // 回答完成后自动刷新用量（面板开着时数字不陈旧）
+  const refreshUsage = () => {
+    if (usagePanel && !usagePanel.hidden) toggleUsagePanel();
+  };
+
+  // ---- 时间段问候（ZCode 借鉴：按小时换欢迎语） ----
+  function greetingByHour() {
+    const h = new Date().getHours();
+    if (h >= 5 && h < 8) return '早上好呀，新的一天开始啦';
+    if (h >= 8 && h < 11) return '上午好呀，有什么想让我帮忙的吗';
+    if (h >= 11 && h < 13) return '中午好呀，要不要先休息一下';
+    if (h >= 13 && h < 17) return '下午好呀，接下来交给我吧';
+    if (h >= 17 && h < 22) return '晚上好呀，今天辛苦啦';
+    return '夜深啦，别忘了照顾好自己哦';
+  }
+
+  // ---- 提示词增强（promptEnhance 借鉴）：✨ 用当前模型润色草稿，再点取消恢复原文 ----
+  const enhanceBtn = document.getElementById('enhance-toggle');
+  let enhanceState = null; // { orig, enhancing }
+  async function toggleEnhance() {
+    if (!enhanceBtn || !llmConfigured) return;
+    if (enhanceState && enhanceState.enhancing) return;
+    const inputEl = term._input;
+    if (enhanceState) { // 取消增强：恢复原文
+      line = enhanceState.orig;
+      inputEl.value = line;
+      term.autogrow();
+      saveDraft();
+      enhanceState = null;
+      enhanceBtn.classList.remove('active');
+      enhanceBtn.querySelector('span:last-child').textContent = '增强';
+      return;
+    }
+    const text = line.trim();
+    if (!text || busy) return;
+    enhanceState = { orig: line, enhancing: true };
+    enhanceBtn.classList.add('active');
+    enhanceBtn.querySelector('span:last-child').textContent = '增强中…';
+    try {
+      const r = await fetch('/api/llm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [
+            { role: 'system', content: '你是提示词润色助手。把用户的提问润色得更清晰、更完整、更利于检索和回答，保持原意不变，直接输出润色后的内容，不要解释、不要加引号。' },
+            { role: 'user', content: text },
+          ],
+          stream: false,
+        }),
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      const out = ((j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '').trim();
+      if (!out) throw new Error('空输出');
+      line = out;
+      inputEl.value = out;
+      term.autogrow();
+      saveDraft();
+      enhanceState.enhancing = false;
+      enhanceBtn.querySelector('span:last-child').textContent = '取消增强';
+    } catch (e) {
+      line = enhanceState.orig;
+      inputEl.value = line;
+      term.autogrow();
+      saveDraft();
+      enhanceState = null;
+      enhanceBtn.classList.remove('active');
+      enhanceBtn.querySelector('span:last-child').textContent = '增强';
+      term.writeln('\x1b[31m增强失败: ' + ((e && e.message) || e) + '\x1b[0m');
+    }
+  }
+  if (enhanceBtn) enhanceBtn.addEventListener('click', toggleEnhance);
+
+  // ---- 问题导航（turnNavigator 借鉴）：⛰️ 悬浮列出用户问题，点击跳转 ----
+  const turnNav = document.getElementById('turn-nav');
+  const turnList = document.getElementById('turn-list');
+  function openTurnList() {
+    if (!turnList) return;
+    const qs = [...document.querySelectorAll('#stream > .msg.user')];
+    if (!qs.length) return;
+    let html = '<div class="tl-head">对话问题 · ' + qs.length + ' 条</div>';
+    qs.forEach((el, i) => {
+      const row = el.querySelector(':scope > .row');
+      const t = (row ? row.textContent : '').trim().replace(/\s+/g, ' ');
+      html += '<div class="tl-item" data-ti="' + i + '"><span class="qi">#' + (i + 1) + '</span>' + escHtml(t.slice(0, 60)) + '</div>';
+    });
+    turnList.innerHTML = html;
+    turnList.hidden = false;
+  }
+  if (turnNav && turnList) {
+    turnNav.addEventListener('click', () => {
+      if (turnList.hidden) openTurnList();
+      else turnList.hidden = true;
+    });
+    turnList.addEventListener('click', (e) => {
+      const item = e.target.closest('.tl-item');
+      if (!item) return;
+      const el = document.querySelectorAll('#stream > .msg.user')[+item.dataset.ti];
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        el.classList.add('flash-highlight');
+        setTimeout(() => el.classList.remove('flash-highlight'), 1600);
+      }
+      turnList.hidden = true;
+    });
+    document.addEventListener('click', (e) => {
+      if (!turnList.hidden && !turnList.contains(e.target) && e.target !== turnNav) turnList.hidden = true;
+    });
+  }
+  // 消息渲染后更新导航可见性（提交/恢复/截断后调用）
+  function paintTurnNav() {
+    if (!turnNav) return;
+    const qs = document.querySelectorAll('#stream > .msg.user');
+    turnNav.hidden = qs.length < 2;
   }
 
   async function resumeCmd(arg) {
@@ -580,6 +756,7 @@
     term.appendCard(escHtml(line));
     attachUserActions(term.currentMsg());
     term.endMsg();
+    paintTurnNav();
     line = '';
     term._input.value = '';
     term.autogrow();
@@ -1208,7 +1385,7 @@
   function printBanner() {
     const bannerRow = term.appendCard(
       '<div class="welcome">' +
-        '<div class="w-hello">有什么我能帮你的吗？</div>' +
+        '<div class="w-hello">' + greetingByHour() + '</div>' +
       '</div>'
     );
   }
@@ -2916,6 +3093,8 @@
       if (sessionLog.length > MAX_SESSION_LOG) sessionLog = sessionLog.slice(-MAX_SESSION_LOG);
       scheduleL0Snapshot();
       attachRegenToLastAssistant(); // 回答完成：最后一条 AI 回答挂 ↻ 重生成
+      paintTurnNav();
+      refreshUsage();
     } else if (t.exe.key) {
       // 后台完成：追加问答对到 exe 所属会话文件（缓冲已渲染过/待重放，记录必须归属正确）
       appendSessionQA(t.exe.key, question, cleanFull || '(无回答/中断)');

@@ -666,6 +666,46 @@
   .card .c-btn:hover { transform: translateY(-1px); box-shadow: 0 2px 6px var(--accent-12); }
   .card .c-btn:active { transform: translateY(0); }
 
+  #usage-chip { flex: none; background: var(--chip); color: var(--fg2); border: 1px solid var(--border);
+    border-radius: 20px; padding: 5px 12px; font-size: 12px; cursor: pointer; }
+  #usage-chip:hover { border-color: var(--accent); color: var(--fg); }
+  #usage-chip.active { border-color: var(--accent); color: var(--accent); }
+  #usage-panel { position: fixed; z-index: 300; width: 320px; background: var(--bg2, #1e1e2e);
+    border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 8px 28px rgba(0,0,0,.35);
+    padding: 12px 14px; font-size: 12px; }
+  #usage-panel[hidden] { display: none; }
+  #usage-panel h4 { margin: 0 0 8px; font-size: 13px; color: var(--fg); }
+  #usage-panel .up-nums { display: flex; gap: 10px; margin-bottom: 10px; }
+  #usage-panel .up-num { flex: 1; background: var(--chip); border-radius: 8px; padding: 6px 8px; text-align: center; }
+  #usage-panel .up-num .v { font-size: 14px; font-weight: 700; color: var(--fg); }
+  #usage-panel .up-num .k { font-size: 10px; color: var(--muted); margin-top: 2px; }
+  #usage-panel .up-row { display: flex; justify-content: space-between; margin: 5px 0; color: var(--fg2); }
+  #usage-panel .up-bar { height: 5px; border-radius: 3px; background: var(--chip3); overflow: hidden; margin: 3px 0 8px; }
+  #usage-panel .up-bar i { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+  #usage-panel .up-bar i.ok { background: var(--ok); }
+  #usage-panel .up-src { display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; margin: 6px 0 2px; }
+  #usage-panel .up-src .s { color: var(--fg2); }
+  #usage-panel .up-src .sv { color: var(--muted); font-variant-numeric: tabular-nums; }
+  #usage-panel .up-tip { color: var(--muted); font-size: 11px; margin-top: 8px; line-height: 1.5; }
+  /* 问题导航（turnNavigator 借鉴：消息流右下悬浮，列出用户问题跳转） */
+  #turn-nav { position: fixed; right: 26px; bottom: 96px; z-index: 45; width: 34px; height: 34px;
+    border-radius: 50%; border: 1px solid var(--border); background: var(--bg2); color: var(--fg2);
+    font-size: 15px; cursor: pointer; box-shadow: var(--shadow-md); transition: all .15s; }
+  #turn-nav:hover { border-color: var(--accent); color: var(--accent); }
+  #turn-nav[hidden] { display: none; }
+  #turn-list { position: fixed; right: 26px; bottom: 140px; z-index: 45; width: 280px; max-height: 300px;
+    overflow-y: auto; background: var(--bg2, #1e1e2e); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: var(--shadow-lg); padding: 6px; font-size: 12px; }
+  #turn-list[hidden] { display: none; }
+  #turn-list .tl-head { color: var(--muted2); font-size: 11px; padding: 4px 8px 6px; }
+  #turn-list .tl-item { padding: 6px 8px; border-radius: 6px; cursor: pointer; color: var(--fg2);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #turn-list .tl-item:hover { background: var(--hover); color: var(--fg); }
+  #turn-list .tl-item .qi { color: var(--muted); margin-right: 6px; font-variant-numeric: tabular-nums; }
+  /* 问题导航跳转目标高亮闪烁 */
+  .msg.flash-highlight { animation: flashMsg 0.9s ease-out 2; }
+  @keyframes flashMsg { 0%,100% { box-shadow: 0 0 0 0 transparent; } 50% { box-shadow: 0 0 0 3px var(--accent-55); } }
+
   /* ---- 消息操作（Open WebUI 式：用户消息 hover 出 ✏️🗑，AI 回答 hover 出 ↻） ---- */
   .msg { position: relative; }
   .msg-user-actions { display: flex; gap: 2px; justify-content: flex-end; margin-top: 6px;
@@ -769,6 +809,7 @@
       <div id="topbar-title">新对话</div>
       <div id="topbar-right">
         <button id="project-chip" title="切换项目（每个项目独立知识空间）">🗂️ 个人空间</button>
+        <button id="usage-chip" title="上下文用量统计">⛽</button>
         <button id="theme-btn" title="切换深色/亮色主题">☀️</button>
         <button id="model-chip" title="点击打开配置页">…</button>
       </div>
@@ -791,6 +832,7 @@
           <div class="ds-toolbar-left">
             <button class="ds-toggle" id="think-toggle" title="深度思考"><span class="ds-ico">🧠</span><span>深度思考</span></button>
             <button class="ds-toggle" id="search-toggle" title="联网搜索"><span class="ds-ico">🌐</span><span>联网搜索</span></button>
+            <button class="ds-toggle" id="enhance-toggle" title="用当前模型润色提示词"><span class="ds-ico">✨</span><span>增强</span></button>
           </div>
           <div class="ds-toolbar-right">
             <button class="ds-icon-btn" id="attach-btn" title="摄入文档（PDF/DOCX/PPT/XLS/EPUB → Markdown 进知识库）">📎</button>
@@ -818,6 +860,13 @@
 
 <!-- 补全下拉（锚定输入条上方） -->
 <div id="completion"></div>
+
+<!-- 上下文用量面板（ZCode contextUsage 借鉴：顶栏 ⛽ 点击展开） -->
+<div id="usage-panel" hidden></div>
+
+<!-- 问题导航（ZCode turnNavigator 借鉴：消息流右下悬浮，列出用户问题跳转） -->
+<button id="turn-nav" title="跳转到问题" hidden>⛰️</button>
+<div id="turn-list" hidden></div>
 
 <!-- 命令面板 + 状态中心（保留，右侧抽屉） -->
 <div id="side-drawer" class="hidden">
