@@ -1467,9 +1467,78 @@ pub fn spread_activation(root: &Path, seeds: &[(String, f64)]) -> Result<SpreadR
     Ok(SpreadResult { boosted, recalled })
 }
 
-/// 批量取文档元信息（激活扩散 related 填充）：path -> (title, summary)
-pub fn doc_meta(root: &Path, paths: &[String]) -> Result<HashMap<String, (String, String)>, String> {
+/// 派生产物落地后自动补链（2026-08-11，L1 机械修复的安全落点：只改新生成的派生物，
+/// 不动用户手写文档）。扫描正文对其他文档 stem/标题的唯一提及 → 文档末尾追加 [[链接]]。
+/// 关键词全库唯一才补（同词多文档=歧义跳过，防误链）。返回补链数。
+pub fn auto_link_doc(root: &Path, rel: &str) -> Result<usize, String> {
     let conn = connect(root)?;
+    let content = std::fs::read_to_string(root.join(rel)).map_err(|e| format!("读 {rel} 失败: {e}"))?;
+    // 其他文档关键词（同 audit 策略：中文用 stem，ASCII 用标题且长度≥3）
+    let mut docs: Vec<(String, String)> = Vec::new(); // (path, keyword)
+    {
+        let mut stmt = conn
+            .prepare("SELECT path, title FROM documents WHERE path != ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![rel], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        for row in rows.flatten() {
+            let stem = Path::new(&row.0)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&row.0)
+                .to_string();
+            let kw = if stem.chars().any(|c| !c.is_ascii()) {
+                stem
+            } else if row.1.chars().count() >= 3 {
+                row.1.clone()
+            } else {
+                continue;
+            };
+            if kw.chars().count() < 2 {
+                continue;
+            }
+            docs.push((row.0, kw));
+        }
+    }
+    let existing: HashSet<String> = parse_links(&content).into_iter().collect();
+    // 关键词唯一性（同 kw 多文档=歧义）
+    let mut kw_count: HashMap<&str, usize> = HashMap::new();
+    for (_, kw) in &docs {
+        *kw_count.entry(kw.as_str()).or_insert(0) += 1;
+    }
+    let mut links: Vec<String> = Vec::new();
+    for (path, kw) in &docs {
+        if existing.contains(path) {
+            continue;
+        }
+        if kw_count.get(kw.as_str()).copied().unwrap_or(0) != 1 {
+            continue; // 歧义：同关键词多个文档，不自动补
+        }
+        if content.contains(kw.as_str()) {
+            links.push(path.clone());
+        }
+    }
+    if links.is_empty() {
+        return Ok(0);
+    }
+    // 文档末尾追加相关链接（只改派生产物）
+    let mut new_content = content.trim_end().to_string();
+    new_content.push_str("\n\n相关：");
+    new_content.push_str(
+        &links
+            .iter()
+            .map(|p| format!("[[{p}]]"))
+            .collect::<Vec<_>>()
+            .join("、"),
+    );
+    new_content.push('\n');
+    std::fs::write(root.join(rel), new_content).map_err(|e| format!("补链写回失败: {e}"))?;
+    Ok(links.len())
+}
+
+/// 批量取文档元信息（激活扩散 related 填充）：path -> (title, summary)
+pub fn doc_meta(root: &Path, paths: &[String]) -> Result<HashMap<String, (String, String)>, String> {    let conn = connect(root)?;
     let mut stmt = conn
         .prepare("SELECT path, title, summary FROM documents WHERE path = ?1")
         .map_err(|e| e.to_string())?;
@@ -1664,6 +1733,39 @@ mod tests {
         assert_eq!(report.dangling, 0, "磁盘存在的图谱外目标不算悬空");
         assert_eq!(report.links, 1, "反引号内语法示例不解析");
         assert_eq!(report.docs, 1, "apps/ 不进图谱");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn auto_link_doc_unique_mention_appends_link() {
+        let root = test_root("autolink");
+        write(&root, "notes/目标文档.md", "# 目标文档\n\n内容\n");
+        write(&root, "notes/另一个.md", "# 另一个\n\n内容\n");
+        sync_graph(&root).unwrap();
+        // 派生产物提到「目标文档」且唯一 → 自动补链；提到「另一个」也唯一 → 两条
+        write(&root, "notes/新产物.md", "# 新产物\n\n提到 目标文档 与 另一个 的内容。\n");
+        let n = auto_link_doc(&root, "notes/新产物.md").unwrap();
+        assert_eq!(n, 2, "两个唯一提及都应补链");
+        let content = std::fs::read_to_string(root.join("notes/新产物.md")).unwrap();
+        assert!(content.contains("[[notes/目标文档.md]]"), "追加目标链接");
+        assert!(content.contains("[[notes/另一个.md]]"), "追加另一链接");
+        assert!(content.contains("\n相关："), "追加相关小节");
+        // 幂等：再次调用不重复追加（已存在链接跳过）
+        let n2 = auto_link_doc(&root, "notes/新产物.md").unwrap();
+        assert_eq!(n2, 0, "已链接不再补");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn auto_link_doc_skips_ambiguous_keywords() {
+        let root = test_root("autolink-amb");
+        // 两个文档同 stem「目标」→ 关键词歧义，不自动补（防误链）
+        write(&root, "notes/a/目标.md", "# 目标A\n\n内容\n");
+        write(&root, "notes/b/目标.md", "# 目标B\n\n内容\n");
+        sync_graph(&root).unwrap();
+        write(&root, "notes/新产物.md", "# 新产物\n\n提到 目标 的文档。\n");
+        let n = auto_link_doc(&root, "notes/新产物.md").unwrap();
+        assert_eq!(n, 0, "同词多文档歧义应跳过");
         fs::remove_dir_all(&root).unwrap();
     }
 

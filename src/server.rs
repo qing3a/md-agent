@@ -571,10 +571,7 @@ async fn file_write(State(st): State<AppState>, headers: HeaderMap, Json(body): 
             // 人审收敛（2026-08-11）：写 pending/ 即提案（applySave 的 SKILL./DECISION./盲区等）→ 自动落地
             let rel = pb.strip_prefix(&root).unwrap_or(&pb).to_string_lossy().replace('\\', "/");
             if rel.starts_with("pending/") && rel.ends_with(".md") {
-                match crate::kb::auto_land(&root, &rel) {
-                    Ok((desc, _)) => crate::activity::record(&root, "pending", &format!("自动沉淀: {desc}"), json!({})),
-                    Err(e) => crate::activity::record(&root, "sys", &format!("自动沉淀失败 {rel}: {e}"), json!({})),
-                }
+                auto_land_and_link(&root, &rel);
             }
             Json(json!({ "ok": true, "path": body.path })).into_response()
         }
@@ -590,9 +587,43 @@ async fn file_write(State(st): State<AppState>, headers: HeaderMap, Json(body): 
     }
 }
 
+/// 人审收敛统一落地（2026-08-11）：auto_land + 新笔记类自动补链（派生产物融入图谱）。
+/// 只对 note 类（pending/ 下无前缀的笔记）补链——EXPERIENCE/CONSOLIDATE/SKILL/DECISION/
+/// MEMORY 修改类或安装类不补；落地路径非 notes/ 下 .md 文件也不补（CONSOLIDATE 返回 target）。
+fn auto_land_and_link(root: &std::path::Path, rel: &str) {
+    match crate::kb::auto_land(root, rel) {
+        Ok((path, note)) => {
+            crate::activity::record(root, "pending", &format!("自动沉淀: {}", note.as_deref().unwrap_or("")), json!({}));
+            let base = rel.strip_prefix("pending/").unwrap_or(rel);
+            let is_note = !(base.starts_with("EXPERIENCE.")
+                || base.starts_with("CONSOLIDATE.")
+                || base.starts_with("SKILL.")
+                || base.starts_with("DECISION.")
+                || base.starts_with("MEMORY."));
+            if is_note && path.starts_with("notes/") && path.ends_with(".md") {
+                match crate::graph::auto_link_doc(root, &path) {
+                    Ok(n) if n > 0 => crate::activity::record(
+                        root,
+                        "pending",
+                        &format!("自动补链 {n} 条: {path}"),
+                        json!({}),
+                    ),
+                    Ok(_) => {}
+                    Err(e) => crate::activity::record(
+                        root,
+                        "sys",
+                        &format!("自动补链失败 {path}: {e}"),
+                        json!({}),
+                    ),
+                }
+            }
+        }
+        Err(e) => crate::activity::record(root, "sys", &format!("自动沉淀失败 {rel}: {e}"), json!({})),
+    }
+}
+
 // 会话文件删除（仅限 kb/sessions/ 下，防误删笔记/记忆；路径经 resolve_in_kb 防逃逸）
-async fn file_delete(State(st): State<AppState>, headers: HeaderMap, Query(p): Query<FileParams>) -> Response {
-    let root = match proj_root(&st, &headers) {
+async fn file_delete(State(st): State<AppState>, headers: HeaderMap, Query(p): Query<FileParams>) -> Response {    let root = match proj_root(&st, &headers) {
         Ok(r) => r,
         Err(r) => return r,
     };
@@ -975,11 +1006,8 @@ async fn analyze_hot_doc(root: &Path, rel: &str) {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(&dst, body_text);
-    // 人审收敛（2026-08-11）：推理建议自动落地（派生产物，git 自动提交即回滚）
-    match crate::kb::auto_land(&root, &ppath) {
-        Ok((desc, _)) => crate::activity::record(&root, "pending", &format!("自动沉淀: {desc}"), json!({})),
-        Err(e) => crate::activity::record(&root, "sys", &format!("自动沉淀失败 {ppath}: {e}"), json!({})),
-    }
+    // 人审收敛（2026-08-11）：推理建议自动落地 + 新笔记自动补链（派生产物融入图谱）
+    auto_land_and_link(&root, &ppath);
 }
 
 /// 纯同步：给 src_rel 文档追加 [[dst_stem]] 双链（已存在则跳过）。返回 Ok(Some(link_line)) 或 Ok(None)。
@@ -1178,11 +1206,8 @@ fn write_experience_proposal(root: &Path, signal: &str, context: &str, review: O
         let _ = std::fs::create_dir_all(parent);
     }
     if std::fs::write(&dst, body).is_ok() {
-        // 人审收敛（2026-08-11）：经验提案自动落地（git 自动提交即回滚）
-        match crate::kb::auto_land(root, &ppath) {
-            Ok((desc, _)) => crate::activity::record(root, "pending", &format!("自动沉淀: {desc}"), json!({})),
-            Err(e) => crate::activity::record(root, "sys", &format!("自动沉淀失败 {ppath}: {e}"), json!({})),
-        }
+        // 人审收敛（2026-08-11）：经验提案自动落地（EXPERIENCE 类不改新笔记，无需补链）
+        auto_land_and_link(root, &ppath);
         Some(ppath)
     } else {
         None
