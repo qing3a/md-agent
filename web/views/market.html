@@ -71,13 +71,17 @@
   #items { flex: 1; overflow: auto; padding: 0 10px 10px; }
   #detail-col { flex: 1; overflow: auto; padding: 10px; }
 
-  .item { padding: 8px 10px; border-radius: 7px; cursor: pointer; margin-bottom: 4px; }
+  .item { padding: 7px 10px; border-radius: 7px; cursor: pointer; margin-bottom: 4px; }
   .item:hover { background: var(--panel2); }
   .item.sel { background: var(--panel2); border: 1px solid var(--blue); }
-  .item .n { font-weight: 600; }
-  .item .v { font-size: 10px; color: var(--dim); margin-left: 6px; }
-  .item .src { font-size: 10px; color: var(--purple); margin-left: 6px; }
-  .item .p { font-size: 11px; color: var(--dim); word-break: break-all; }
+  /* 条目两行：第一行 name 弹性省略 + 徽标固定右侧；第二行 id·版本·来源 单行省略（窄列不换行不溢出） */
+  .item .n { display: flex; align-items: center; gap: 6px; }
+  .item .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  .item .p { font-size: 10.5px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
+  .bdg { flex: none; font-size: 10px; line-height: 16px; padding: 0 7px; border-radius: 8px; border: 1px solid var(--line); }
+  .b-skill { color: var(--purple); }
+  .b-app { color: var(--blue); }
+  .b-inst { color: var(--green); border-color: var(--green); padding: 0 5px; }
 
   #detail { padding: 14px; display: none; }
   #detail h2 { font-size: 16px; margin-bottom: 4px; }
@@ -281,18 +285,22 @@ function render() {
       return (instIds[a.id] ? 0 : 1) - (instIds[b.id] ? 0 : 1);
     });
     items.innerHTML = catalogView.map(function (a, i) {
-      var kindBadge = a.kind === 'skill' ? '<span class="src">[技能]</span>' : '';
-      var instBadge = instIds[a.id] ? '<span class="src" style="color:var(--green)">[已安装]</span>' : '';
+      var kindBadge = '<span class="bdg ' + (a.kind === 'skill' ? 'b-skill' : 'b-app') + '">' + (a.kind === 'skill' ? '技能' : '应用') + '</span>';
+      var instBadge = instIds[a.id] ? '<span class="bdg b-inst" title="已安装">✓</span>' : '';
+      // 搜索结果条目无 hub 字段 → 兜底 skillhub.cn（检索仅对 skillhub 商店生效）
       return '<div class="item' + (sel && sel.kind === 'cat' && sel.id === a.id ? ' sel' : '') + '" data-i="' + i + '">' +
-        '<div class="n">' + esc(a.name) + '<span class="v">v' + esc(a.version) + '</span><span class="src">[' + esc(a.hub) + ']</span>' + kindBadge + instBadge + '</div>' +
-        '<div class="p">' + esc(a.id) + ' · [' + esc((a.permissions || []).join(',')) + ']</div></div>';
+        '<div class="n"><span class="nm" title="' + esc(a.name) + '">' + esc(a.name) + '</span>' + kindBadge + instBadge + '</div>' +
+        '<div class="p" title="' + esc(a.id) + '">' + esc(a.id) + (a.version ? ' · v' + esc(a.version) : '') + ' · [' + esc(a.hub || 'skillhub.cn') + ']</div></div>';
     }).join('');
   } else {
     items.innerHTML = apps.map(function (a, i) {
+      var perms = (a.permissions || []).filter(Boolean);
       return '<div class="item' + (sel && sel.kind === 'inst' && sel.id === a.id ? ' sel' : '') + '" data-i="' + i + '">' +
-        '<div class="n">' + esc(a.name) + '<span class="v">v' + esc(a.version) + '</span>' +
-        (a.source_hub ? '<span class="src">[' + esc(a.source_hub) + ']</span>' : '') + '</div>' +
-        '<div class="p">' + esc(a.id) + ' · [' + esc((a.permissions || []).join(',')) + ']</div></div>';
+        '<div class="n"><span class="nm" title="' + esc(a.name) + '">' + esc(a.name) + '</span>' +
+        (a.version ? '<span class="bdg" style="color:var(--dim)">v' + esc(a.version) + '</span>' : '') + '</div>' +
+        '<div class="p" title="' + esc(a.id) + '">' + esc(a.id) +
+        (perms.length ? ' · [' + esc(perms.join(',')) + ']' : '') +
+        (a.source_hub ? ' · [' + esc(a.source_hub) + ']' : '') + '</div></div>';
     }).join('');
   }
   var empty = $('empty');
