@@ -134,6 +134,8 @@
         </div>
     </div>
     <div class="flex items-center gap-2">
+        <button id="improve-btn" title="让 AI 分析本应用并提出改进提案（经待审人审后应用）"
+            class="text-[10px] px-2 py-0.5 rounded border" style="border-color:#ddd6fe;color:#7c3aed">🔧 改进应用</button>
         <span class="flex items-center gap-1 text-[10px] text-gray-400">
             <span class="freshness-dot" id="freshness-dot"></span>
             <span id="freshness-text">刚刚</span>
@@ -1024,6 +1026,35 @@ document.addEventListener('click', function (ev) {
     if (btn) { APP.proposeToKB(btn.getAttribute('data-propose')); return; }
     var btn2 = ev.target.closest('[data-spacenote]');
     if (btn2) { APP.saveSpaceNote(btn2.getAttribute('data-spacenote')); }
+});
+
+// ---- Phase A：AI 升级应用代码（自组织迭代） ----
+// 「🔧 改进应用」：让 AI 读本应用代码 → 分析 → dev.patch 生成改进提案进待审（限定 apps/agent-demo/）→ 人审后 /dev apply 应用
+document.getElementById('improve-btn').addEventListener('click', function () {
+    var dot = document.getElementById('agent-status-dot');
+    var tx = document.getElementById('agent-status-text');
+    dot.className = 'status-dot busy';
+    tx.textContent = '分析中…';
+    window.__agentCb = {
+        onChunk: function () {},
+        onDone: function (msg) {
+            dot.className = 'status-dot ready';
+            tx.textContent = '就绪';
+            var txt = (msg && msg.textFull) || '';
+            var hasProposal = txt.indexOf('pending/code/') >= 0;
+            APP.showToast(hasProposal
+                ? '✓ 改进提案已进待审（自动化面板审核 → /dev apply 应用）'
+                : 'AI 未生成提案（' + (txt ? txt.slice(0, 40) : '无输出') + '），可再试或直接在对话流描述需求', hasProposal ? 'success' : 'warn');
+        },
+    };
+    window.parent.postMessage({
+        type: 'agent:ask',
+        space: true,
+        text: '你是本应用的改进顾问。请用 file 工具读本应用代码 apps/agent-demo/index.html（太长可只读头部与关键段）和 app.json，找出 1 个值得改进的点。' +
+              '注意：dev.patch 的 files.content 必须是完整新文件内容，因此**只适合小文件改动**——优先改 app.json（manifest 配置）、新增小文件（如 README 说明）；' +
+              '若改进点在 index.html 大文件里，不要生成提案，用一句话给出改进建议即可。' +
+              '如生成提案：reason 说明理由，files 的 path 必须以 apps/agent-demo/ 开头。最后用一句话说明结果（提案路径或建议）。'
+    }, '*');
 });
 window.addEventListener('message', function (ev) {
     var msg = ev.data;

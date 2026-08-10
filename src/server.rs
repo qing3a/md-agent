@@ -1092,22 +1092,36 @@ fn is_dev_allowed(rel: &str) -> bool {
     rel == "Cargo.toml" || rel == "README.md" || rel == ".gitignore"
         || rel.starts_with("src/") || rel.starts_with("web/") || rel.starts_with("scripts/")
         || rel.starts_with(".zcode/plans/")
+        // 应用空间（Phase A）：应用代码（apps/<id>/，桥语义路径）可被提案改进；
+        // 应用 agent 的提案范围由宿主 runAsApp 限定自己目录
+        || rel.starts_with("apps/") || rel.starts_with("kb/apps/")
 }
 
-async fn dev_read(Query(p): Query<FileParams>) -> Response {
+/// dev 目标解析：应用文件（apps/ 桥语义路径）落在 kb_root/apps/ 下，其余（项目源码）落在项目根
+fn dev_target(proj: &Path, kb_root: &Path, rel: &str) -> PathBuf {
+    if rel.starts_with("apps/") || rel.starts_with("kb/apps/") {
+        kb_root.join(rel.trim_start_matches("kb/"))
+    } else {
+        proj.join(rel)
+    }
+}
+
+async fn dev_read(State(s): State<AppState>, Query(p): Query<FileParams>) -> Response {
     let Some(root) = dev_project_root() else {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "无法定位项目根" }))).into_response();
     };
     let rel = p.path.trim().trim_start_matches(['/', '\\']);
     if !is_dev_allowed(rel) {
-        return (StatusCode::FORBIDDEN, Json(json!({ "error": "路径不在 dev 白名单内（src/web/scripts/Cargo.toml/README.md/.zcode/plans）" }))).into_response();
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": "路径不在 dev 白名单内（src/web/scripts/Cargo.toml/README.md/.zcode/plans/apps）" }))).into_response();
     }
-    match crate::kb::resolve_in_kb(&root, rel) {
-        Some(pb) if pb.is_file() => match tokio::fs::read_to_string(&pb).await {
+    let target = dev_target(&root, &s.kb_root, rel);
+    if target.is_file() {
+        match tokio::fs::read_to_string(&target).await {
             Ok(content) => Json(json!({ "path": rel, "content": content })).into_response(),
             Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
-        },
-        _ => (StatusCode::NOT_FOUND, Json(json!({ "error": "文件不存在或超出项目根" }))).into_response(),
+        }
+    } else {
+        (StatusCode::NOT_FOUND, Json(json!({ "error": "文件不存在或超出项目根" }))).into_response()
     }
 }
 
@@ -1254,7 +1268,7 @@ async fn dev_apply(State(st): State<AppState>, Json(b): Json<DevApplyBody>) -> R
     let mut backups: Vec<(String, PathBuf)> = Vec::new();
     for (path, _) in &files {
         let rel2 = path.trim().trim_start_matches(['/', '\\']);
-        let target = proj.join(rel2);
+        let target = dev_target(&proj, &st.kb_root, rel2);
         let bak = target.with_file_name(format!(
             "{}.dev-bak-{ts}",
             target.file_name().and_then(|x| x.to_str()).unwrap_or("file")
@@ -1268,17 +1282,30 @@ async fn dev_apply(State(st): State<AppState>, Json(b): Json<DevApplyBody>) -> R
     let mut applied: Vec<String> = Vec::new();
     for (path, new_content) in &files {
         let rel2 = path.trim().trim_start_matches(['/', '\\']);
-        let target = proj.join(rel2);
+        let target = dev_target(&proj, &st.kb_root, rel2);
         if let Some(parent) = target.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Err(e) = std::fs::write(&target, new_content) {
-            restore_backups(&proj, &backups);
+            restore_backups(&proj, &st.kb_root, &backups);
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("写入 {rel2} 失败: {e}（已回滚）") }))).into_response();
         }
         applied.push(rel2.to_string());
     }
     // 编译验证（cargo check：只编译不链接，避开运行实例 exe 锁；冷缓存首次可能 1-3 分钟，超时 300s）
+    // 应用文件（kb/apps/ 静态 HTML）无编译环节 → 跳过构建直接成功
+    let all_app_files = files
+        .iter()
+        .all(|(p, _)| {
+            let r = p.trim().trim_start_matches(['/', '\\']);
+            r.starts_with("apps/") || r.starts_with("kb/apps/")
+        });
+    if all_app_files {
+        for (_, bak) in &backups {
+            let _ = std::fs::remove_file(bak);
+        }
+        return Json(json!({ "ok": true, "applied": applied, "build": "skipped(app)" })).into_response();
+    }
     let build = tokio::time::timeout(
         std::time::Duration::from_secs(300),
         tokio::process::Command::new("cargo").arg("check").current_dir(&proj).output(),
@@ -1294,19 +1321,19 @@ async fn dev_apply(State(st): State<AppState>, Json(b): Json<DevApplyBody>) -> R
         }
         Ok(Ok(out)) => {
             let log = String::from_utf8_lossy(&out.stderr).chars().take(1500).collect::<String>();
-            restore_backups(&proj, &backups);
+            restore_backups(&proj, &st.kb_root, &backups);
             Json(json!({ "ok": false, "applied": [], "build": "failed", "rolled_back": true, "error": log })).into_response()
         }
         _ => {
-            restore_backups(&proj, &backups);
+            restore_backups(&proj, &st.kb_root, &backups);
             Json(json!({ "ok": false, "applied": [], "build": "timeout/error", "rolled_back": true })).into_response()
         }
     }
 }
 
-fn restore_backups(proj: &Path, backups: &[(String, PathBuf)]) {
+fn restore_backups(proj: &Path, kb_root: &Path, backups: &[(String, PathBuf)]) {
     for (rel2, bak) in backups {
-        let target = proj.join(rel2);
+        let target = dev_target(proj, kb_root, rel2);
         if bak.is_file() {
             let _ = std::fs::copy(bak, &target);
         }

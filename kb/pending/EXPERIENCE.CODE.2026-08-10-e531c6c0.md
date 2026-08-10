@@ -1,0 +1,13 @@
+---
+type: experience
+signal: tool_failed
+date: 2026-08-10
+---
+
+# 经验提案
+
+- 类型：code
+- 信号：tool_failed
+- 问题：dev.patch 工具失败：目标路径 apps/agent-demo/app.json 不在 dev 白名单内，导致补丁无法应用。
+- 改进：使用 dev.patch 前先核对目标路径是否在 dev 白名单内；若不在，先将该路径加入白名单（或改用允许的方式），避免盲目调用导致失败。
+- 上下文：工具 dev.patch 失败: 路径不在 dev 白名单内: apps/agent-demo/app.json

@@ -2751,7 +2751,15 @@
       toolRow.running();
       post({ type: 'agent:tool', name: tj.tool, status: 'running' });
       let result;
-      try { result = await runTool(tj.tool, tj.args); }
+      try {
+        // 应用上下文限定（Phase A）：应用 agent 的 dev.patch 只能提案修改自己的应用目录，防改主项目/其他应用
+        if (tj.tool === 'dev.patch' && tab.appId) {
+          const f2 = (tj.args && tj.args.files) || [];
+          const bad = !f2.length || f2.some((x) => !String((x && x.path) || '').startsWith('apps/' + tab.appId + '/'));
+          if (bad) throw new Error('应用只能提案修改自己的目录（apps/' + tab.appId + '/）');
+        }
+        result = await runTool(tj.tool, tj.args);
+      }
       catch (e) { result = '工具调用失败: ' + ((e && e.message) || e); toolRow.fail((e && e.message) || e); }
       if (!/调用失败/.test(result)) {
         toolRow.done(result);
