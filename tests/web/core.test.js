@@ -153,3 +153,29 @@ test('extractAppData：约定标记提取/剥离/非法 JSON 兜底', () => {
   assert.strictEqual(r3.data, null);
   assert.ok(!r3.text.includes('md-agent-app-data'));
 });
+
+test('matchRefs：[文件:行号] 与小节格式', () => {
+  const r = Core.matchRefs('据 [notes/风险预警.md:12 小节:证据清单] 分析');
+  assert.strictEqual(r.length, 1);
+  assert.strictEqual(r[0].path, 'notes/风险预警.md');
+  assert.strictEqual(r[0].line, 12);
+  assert.strictEqual(r[0].full, '[notes/风险预警.md:12 小节:证据清单]');
+});
+
+test('matchRefs：双链包裹不吞前导 [（[[x.md:14]] 匹配内层）', () => {
+  const r = Core.matchRefs('[[风险预警.md:14]]');
+  assert.strictEqual(r.length, 1);
+  assert.strictEqual(r[0].path, '风险预警.md');
+  assert.strictEqual(r[0].line, 14);
+  assert.strictEqual(r[0].full, '[风险预警.md:14]');
+  assert.strictEqual(r[0].start, 1); // 前导 [ 留在文本，不吞进路径
+});
+
+test('matchRefs：多引用 + 工具标注不误配', () => {
+  const r = Core.matchRefs('[工具:search] 返回 [a.md:1] 与 [b/c.md:2]');
+  assert.strictEqual(r.length, 2);
+  assert.strictEqual(r[0].path, 'a.md');
+  assert.strictEqual(r[1].path, 'b/c.md');
+  assert.strictEqual(Core.matchRefs('[12:34] 时间').length, 0);
+  assert.strictEqual(Core.matchRefs('无引用').length, 0);
+});

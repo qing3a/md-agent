@@ -193,6 +193,7 @@
       }
     }
     if (!parsed.length) term.writeln('（空会话，无内容可显示）');
+    enhanceRefs(); // 恢复会话渲染完成后：历史回答中的 [文件:行号] 引用同样可点击
   }
 
   async function resumeCmd(arg) {
@@ -2763,7 +2764,8 @@
         const k = h.file + ':' + h.line;
         if (seen.has(k)) continue;
         seen.add(k);
-        t.writeln('\x1b[90m' + k + '  ' + (h.section || '') + '\x1b[0m');
+        // 方括号包裹 → 与回答内引用同格式，enhanceRefs 后可点击（点击 → 图谱高亮）
+        t.writeln('\x1b[90m[' + k + ']' + (h.section ? '  ' + h.section : '') + '\x1b[0m');
       }
     }
     enhanceRefs(); // 回答渲染完成后：把 [文件:行号] 引用增强为可点击（点击 → 图谱高亮）
@@ -2860,28 +2862,34 @@
 
   // ---------- 引用增强：回答/工具结果中的 [文件:行号] → 可点击（点击打开图谱并高亮该文档局部图） ----------
   // 遍历 #stream 内所有行与工具卡展开内容（.stream-row / .tr-body）的文本节点替换，
-  // 不动 ANSI→HTML 渲染链路；命中路径在图谱中才可点击。工具轮气泡已关闭，
-  // 故不能只查 currentMsg，需全流扫描（只处理本轮新增：增强过的行有 .ref-link 会跳过）。
-  const REF_RE = /\[([^\s\]]+?\.md):(\d+)[^\]]*\]/g;
+  // 不动 ANSI→HTML 渲染链路；匹配规则见 Core.matchRefs（双链包裹兼容、路径不吞 [）。
+  // 点击路径的解析（精确路径 → basename 兜底）在图谱面板侧完成（graph.html highlight 通道）。
   function enhanceRefs() {
     const rows = document.querySelectorAll('#stream .stream-row, #stream .tr-body');
     for (const row of rows) {
       walkTextNodes(row, (node) => {
         const txt = node.nodeValue;
-        if (!txt || !REF_RE.test(txt)) return;
-        REF_RE.lastIndex = 0;
+        if (!txt) return;
+        const refs = Core.matchRefs(txt);
+        if (!refs.length) return;
         const frag = document.createDocumentFragment();
-        let last = 0, m;
-        while ((m = REF_RE.exec(txt))) {
-          if (m.index > last) frag.appendChild(document.createTextNode(txt.slice(last, m.index)));
-          const path = m[1];
+        let last = 0;
+        for (const r of refs) {
+          if (r.start > last) frag.appendChild(document.createTextNode(txt.slice(last, r.start)));
+          const path = r.path;
           const a = document.createElement('span');
           a.className = 'ref-link';
           a.dataset.path = path;
-          a.textContent = m[0];
+          a.textContent = r.full;
           a.title = '在知识图谱中查看「' + path + '」';
+          // span 级监听：stopPropagation 防误触工具卡开合（.toolrow 整卡 click toggle）
+          a.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            openViewForPath(path);
+          });
           frag.appendChild(a);
-          last = m.index + m[0].length;
+          last = r.start + r.full.length;
         }
         if (last < txt.length) frag.appendChild(document.createTextNode(txt.slice(last)));
         node.parentNode.replaceChild(frag, node);
@@ -2902,24 +2910,15 @@
     for (const t of targets) fn(t);
   }
   // 点击引用 → 打开图谱面板 + 高亮（图谱加载完成后经 postMessage 通知；BRIDGE 无 highlight 需宿主转发）
-  document.addEventListener('click', (e) => {
-    const el = e.target.closest('.ref-link');
-    if (!el || !el.dataset.path) return;
-    e.preventDefault();
-    openViewForPath(el.dataset.path);
-  });
-  let graphHighlightPending = null;
   async function openViewForPath(path) {
     try {
       await viewCmd('graph');
-      graphHighlightPending = path;
-      // 等图谱 iframe 加载 + 数据就绪后注入高亮
+      // 等图谱 iframe 加载 + 数据就绪后注入高亮（未就绪时 graph.html 侧 pendingHighlight 缓存补执行）
       setTimeout(() => {
         if (!currentView || currentView.specArg !== 'graph') return;
         try {
           currentView.iframe.contentWindow.postMessage({ type: 'highlight', path }, '*');
         } catch (err) { /* iframe 未就绪则跳过 */ }
-        graphHighlightPending = null;
       }, 400);
     } catch (err) { /* 打开失败静默 */ }
   }

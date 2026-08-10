@@ -268,6 +268,19 @@
     return (perms || []).includes(perm);
   };
 
+  // ---------- 引用匹配（回答/工具结果中的 [文件:行号] → 图谱可点击） ----------
+  // 兼容小节格式 [xx.md:14 小节:...]；路径组排除 [ ] 与空白——[[xx.md:14]] 双链包裹时
+  // 匹配内层而非把前导 [ 吞进路径（旧 regex 曾把 path 误抓成 [xx.md）。
+  Core.matchRefs = function (text) {
+    const RE = /\[([^\[\]\s]+?\.md):(\d+)[^\[\]]*\]/g;
+    const out = [];
+    let m;
+    while ((m = RE.exec(String(text || '')))) {
+      out.push({ full: m[0], path: m[1], line: Number(m[2]), start: m.index });
+    }
+    return out;
+  };
+
   // ---------- 应用结构化结果提取（Phase A：agent:ask 结果回推） ----------
   // 约定标记：回答末尾 `<!-- md-agent-app-data -->{json}<!-- / -->`（与 md-agent-save 块同模式）；
   // 应用侧提示模型输出结构化 JSON，宿主提取后随完成信号回推（app 直接渲染卡片，不必解析文本）
