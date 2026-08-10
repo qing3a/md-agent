@@ -2358,7 +2358,9 @@
         full = (msg && msg.content) || '';
         reasoning = (msg && msg.reasoning_content) || '';
         lastUsage = body.usage || null;
-        toolJson = Core.tryParseTool(full, TOOL_API);
+        // 与流式路径同款工具识别：纯 JSON 开头 → 解析；先说明后 JSON（DeepSeek 习惯）→ 全文检测。
+        // 此前只用 tryParseTool（要求 { 开头）→ 联网轮模型先说明再调工具时被当最终回答渲染 → 回答中断
+        toolJson = Core.detectToolInFull(full, TOOL_API);
         // web 模式（非流式）：模型可能只产出 web_search_call 事件而无 message 文本（content 空）→ retry 标记，上层重试一轮
         if (!toolJson && !String(full).trim() && web) {
           return { full, reasoning, reasoningStartAt, firstContentAt, lastUsage, toolJson, retry: true };
