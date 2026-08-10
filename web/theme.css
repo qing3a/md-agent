@@ -16,8 +16,8 @@
   --border2: #45475a;
   --fg: #cdd6f4;
   --fg2: #a6adc8;
-  --muted: #7f849c;
-  --muted2: #585b70;
+  --muted: #858aa6;   /* 4.8:1 辅助文本 */
+  --muted2: #666c82;  /* 3.2:1 占位/角标档（原 #585b70 仅 2.5 偏弱） */
   --accent: #89b4fa;
   --accent-strong: #9ac4ff;
   --danger: #f38ba8;
@@ -87,8 +87,8 @@
   --border2: #cfd3da;
   --fg: #1f2328;
   --fg2: #454b52;
-  --muted: #8a9199;
-  --muted2: #aeb4bb;
+  --muted: #667085;   /* 4.7:1 辅助文本（原 #8a9199 仅 3.0 不达标） */
+  --muted2: #8f969e;  /* 2.9:1 占位/角标档（原 #aeb4bb 仅 2.0 不可读） */
   --accent: #4e6ef2;
   --accent-strong: #3d5de0;
   --danger: #e5484d;
