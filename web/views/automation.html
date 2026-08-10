@@ -566,7 +566,8 @@
 
     var s1 = document.createElement('div');
     s1.className = 'a-sec';
-    s1.innerHTML = '<h2>💡 建议补链接 <span class="n">(' + r.mentions.length + ') — 正文提到但未链接</span></h2>';
+    s1.innerHTML = '<h2>💡 建议补链接 <span class="n">(' + r.mentions.length + ') — 正文提到但未链接</span>' +
+      '<button class="ok" style="margin-left:10px" onclick="applyAllLinks(this)">⚡ 全部应用</button></h2>';
     if (!r.mentions.length) {
       var e = document.createElement('div'); e.className = 'empty'; e.textContent = '无建议 ✓';
       s1.appendChild(e);
@@ -689,6 +690,21 @@
       btn.disabled = false;
       alert('应用失败: ' + e.message);
     }
+  };
+  // 批量应用全部补链建议（2026-08-11）：歧义候选自动跳过；完成后刷新
+  window.applyAllLinks = async function (btn) {
+    var old = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '应用中…';
+    try {
+      var r = await api('/api/audit/apply-all', { method: 'POST', body: '{}' });
+      alert('✅ 批量补链完成：应用 ' + r.applied + ' 条，跳过 ' + r.skipped + ' 条（歧义/已存在）');
+      await auditRefresh();
+    } catch (e) {
+      alert('批量应用失败: ' + e.message);
+    }
+    btn.disabled = false;
+    btn.textContent = old;
   };
 
   // ================= 栏目③ 运营数据 =================

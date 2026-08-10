@@ -79,6 +79,7 @@ pub async fn serve(
         .route("/api/graph/projects", get(graph_projects))
         .route("/api/audit", get(audit_report))
         .route("/api/audit/report", post(audit_report_gen))
+        .route("/api/audit/apply-all", post(audit_apply_all))
         .route("/api/heartbeat", get(heartbeat_get))
         .route("/api/heartbeat", post(heartbeat_set))
         .route("/api/risk", get(risk_check))
@@ -1751,6 +1752,48 @@ async fn audit_report_gen(State(st): State<AppState>, headers: HeaderMap) -> Res
         "llm": llm_used, "reviews": reviews,
     }))
     .into_response()
+}
+
+/// 批量应用补链建议（2026-08-11）：audit.mentions 全部执行——同关键词多候选（歧义）
+/// 跳过防误链；持 sync_lock 与心跳互斥，完成后重建图谱。
+async fn audit_apply_all(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let _guard = st.sync_lock.lock().await;
+    if let Err(e) = ensure_graph(&root) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
+    }
+    let rep = match crate::graph::audit(&root) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    };
+    // 唯一性过滤：同一关键词（m.dst）多个候选文档 → 歧义跳过（同 dst 多条 mention 去重）
+    let mut kw_dst: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
+    for m in &rep.mentions {
+        kw_dst.entry(m.dst.as_str()).or_default().insert(m.dst_path.as_str());
+    }
+    let mut applied = 0usize;
+    let mut skipped = 0usize;
+    for m in &rep.mentions {
+        if kw_dst.get(m.dst.as_str()).map(|s| s.len()).unwrap_or(0) != 1 {
+            skipped += 1;
+            continue;
+        }
+        match apply_link_to_doc(&root, &m.src, &m.dst_path) {
+            Ok(Some(_)) => applied += 1,
+            _ => skipped += 1, // 已存在/失败
+        }
+    }
+    let _ = crate::graph::sync_graph(&root); // 新链接进图
+    crate::activity::record(
+        &root,
+        "pending",
+        &format!("批量补链完成：应用 {applied} 条，跳过 {skipped} 条"),
+        json!({}),
+    );
+    Json(json!({ "ok": true, "applied": applied, "skipped": skipped })).into_response()
 }
 
 #[derive(Deserialize)]
