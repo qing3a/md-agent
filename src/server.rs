@@ -20,6 +20,8 @@ pub struct AppState {
     pub sync_lock: Arc<tokio::sync::Mutex<()>>,
     /// 心跳状态（跨线程共享）
     pub hb_status: Arc<std::sync::Mutex<crate::heartbeat::HeartbeatStatus>>,
+    /// 远程 MCP 客户端注册表（Phase 5：懒启动 + 工具缓存）
+    pub mcp: Arc<crate::mcp_client::McpRegistry>,
 }
 
 pub async fn serve(
@@ -33,6 +35,7 @@ pub async fn serve(
         web_dir,
         sync_lock: Arc::new(tokio::sync::Mutex::new(())),
         hb_status: Arc::new(std::sync::Mutex::new(Default::default())),
+        mcp: Arc::new(crate::mcp_client::McpRegistry::new()),
     };
     // 心跳自动同步任务（默认关闭；开关走 config）
     {
@@ -53,6 +56,12 @@ pub async fn serve(
         .route("/api/memory/recall", post(memory_recall))
         .route("/api/memory/extract", post(memory_extract))
         .route("/api/memory/dream", post(memory_dream))
+        .route("/api/mcp/servers", get(mcp_servers_list))
+        .route("/api/mcp/servers", post(mcp_servers_add))
+        .route("/api/mcp/servers/{id}", patch(mcp_servers_update))
+        .route("/api/mcp/servers/{id}", delete(mcp_servers_delete))
+        .route("/api/mcp/servers/{id}/test", post(mcp_servers_test))
+        .route("/api/mcp/call", post(mcp_call))
         .route("/api/l1", get(l1_handler))
         .route("/api/l1/read", get(l1_read_handler))
         .route("/api/file", get(file_read))
@@ -304,8 +313,267 @@ fn tools_json() -> Value {
     ])
 }
 
-async fn tools_handler() -> Json<Value> {
-    Json(tools_json())
+async fn tools_handler(State(st): State<AppState>) -> Json<Value> {
+    let mut tools = tools_json();
+    // 远程 MCP 工具动态合并（Phase 5）：已启用服务的工具以 mcp__<id>.<tool> 进注册表；
+    // 服务连不上/停用 → 跳过（面板可见 failure），不阻塞整体
+    let cfg = crate::config::load();
+    if let Some(arr) = tools.as_array_mut() {
+        for svc in &cfg.mcp_servers {
+            if !svc.enabled {
+                continue;
+            }
+            if let Ok(list) = st.mcp.tools_of(svc).await {
+                for t in list {
+                    arr.push(json!({
+                        "name": t.name,
+                        "desc": t.desc,
+                        "params": t.params,
+                        "example": ""
+                    }));
+                }
+            }
+        }
+    }
+    Json(tools)
+}
+
+// ---------- 远程 MCP 服务管理（Phase 5 MCP 客户端：只消费远程，不暴露自身） ----------
+
+/// GET /api/mcp/servers：服务列表 + 连接状态 + 工具数 + 最近失败
+async fn mcp_servers_list(State(st): State<AppState>) -> Json<Value> {
+    let cfg = crate::config::load();
+    let servers = st.mcp.status(&cfg.mcp_servers).await;
+    Json(json!({ "servers": servers }))
+}
+
+#[derive(Deserialize)]
+struct McpServerBody {
+    /// 缺省 = 名称本身（须通过 valid_id 校验）
+    #[serde(default)]
+    id: String,
+    name: String,
+    #[serde(default = "default_stdio_transport")]
+    transport: String,
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn default_stdio_transport() -> String {
+    "stdio".into()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// POST /api/mcp/servers：添加服务（写 config.json；不立即 spawn，懒启动）
+async fn mcp_servers_add(State(_st): State<AppState>, Json(b): Json<McpServerBody>) -> Response {
+    let mut cfg = crate::config::load();
+    let id = if b.id.trim().is_empty() {
+        b.name.trim().to_string()
+    } else {
+        b.id.trim().to_string()
+    };
+    if !crate::mcp_client::valid_id(&id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "服务 id 非法（仅字母数字/下划线/短横线；留空则用名称）" })),
+        )
+            .into_response();
+    }
+    if b.command.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "启动命令不能为空" })),
+        )
+            .into_response();
+    }
+    if cfg.mcp_servers.iter().any(|s| s.id == id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("服务 id 已存在: {id}") })),
+        )
+            .into_response();
+    }
+    cfg.mcp_servers.push(crate::mcp_client::McpServerConfig {
+        id: id.clone(),
+        name: b.name.trim().to_string(),
+        transport: b.transport,
+        command: b.command.trim().to_string(),
+        args: b.args,
+        enabled: b.enabled,
+    });
+    if let Err(e) = crate::config::save(&cfg) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("保存配置失败: {e}") })),
+        )
+            .into_response();
+    }
+    Json(json!({ "ok": true, "id": id })).into_response()
+}
+
+#[derive(Deserialize)]
+struct McpServerUpdate {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    args: Option<Vec<String>>,
+}
+
+/// PATCH /api/mcp/servers/{id}：启用/停用/更新（停用即断开连接清缓存）
+async fn mcp_servers_update(
+    State(st): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(b): Json<McpServerUpdate>,
+) -> Response {
+    let mut cfg = crate::config::load();
+    let Some(svc) = cfg.mcp_servers.iter_mut().find(|s| s.id == id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("服务不存在: {id}") })),
+        )
+            .into_response();
+    };
+    if let Some(e) = b.enabled {
+        svc.enabled = e;
+    }
+    if let Some(n) = b.name {
+        if !n.trim().is_empty() {
+            svc.name = n.trim().to_string();
+        }
+    }
+    if let Some(c) = b.command {
+        if !c.trim().is_empty() {
+            svc.command = c.trim().to_string();
+        }
+    }
+    if let Some(a) = b.args {
+        svc.args = a;
+    }
+    if !svc.enabled {
+        st.mcp.disconnect(&id).await;
+    }
+    if let Err(e) = crate::config::save(&cfg) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("保存配置失败: {e}") })),
+        )
+            .into_response();
+    }
+    Json(json!({ "ok": true })).into_response()
+}
+
+/// DELETE /api/mcp/servers/{id}：移除（断开连接 + 从配置删除）
+async fn mcp_servers_delete(
+    State(st): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let mut cfg = crate::config::load();
+    let before = cfg.mcp_servers.len();
+    cfg.mcp_servers.retain(|s| s.id != id);
+    if cfg.mcp_servers.len() == before {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("服务不存在: {id}") })),
+        )
+            .into_response();
+    }
+    st.mcp.disconnect(&id).await;
+    if let Err(e) = crate::config::save(&cfg) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("保存配置失败: {e}") })),
+        )
+            .into_response();
+    }
+    Json(json!({ "ok": true })).into_response()
+}
+
+/// POST /api/mcp/servers/{id}/test：测试连接（ensure + tools/list 全链路）→ 工具清单
+async fn mcp_servers_test(
+    State(st): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let cfg = crate::config::load();
+    let Some(svc) = cfg.mcp_servers.iter().find(|s| s.id == id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("服务不存在: {id}") })),
+        )
+            .into_response();
+    };
+    match st.mcp.test(svc).await {
+        Ok(tools) => Json(json!({
+            "ok": true,
+            "tools": tools.iter().map(|t| json!({ "name": t.name, "tool": t.tool, "desc": t.desc })).collect::<Vec<_>>()
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/mcp/call：远程工具执行（Agent 回路宿主执行入口；name = mcp__<id>.<tool>）
+#[derive(Deserialize)]
+struct McpCallBody {
+    name: String,
+    #[serde(default)]
+    args: Value,
+}
+
+async fn mcp_call(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(b): Json<McpCallBody>,
+) -> Response {
+    let root = match proj_root(&st, &headers) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let Some((id, tool)) = crate::mcp_client::split_tool_name(&b.name) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "工具名需为 mcp__<服务>.<工具> 格式" })),
+        )
+            .into_response();
+    };
+    let cfg = crate::config::load();
+    let Some(svc) = cfg.mcp_servers.iter().find(|s| s.id == id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("远程服务不存在: {id}") })),
+        )
+            .into_response();
+    };
+    match st.mcp.call(svc, tool, &b.args).await {
+        Ok(text) => {
+            // 工具调用审计（与本地工具同口径：记调用不记参数全文）
+            let _ = crate::activity::record(
+                &root,
+                "tool",
+                &format!("远程工具 {name}", name = b.name),
+                json!({}),
+            );
+            Json(json!({ "ok": true, "result": text })).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": e })),
+        )
+            .into_response(),
+    }
 }
 
 /// 技能注册表（Phase 3-C Step 2：trigger 触发注入用）

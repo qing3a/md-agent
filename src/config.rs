@@ -73,6 +73,8 @@ pub struct Config {
     pub kb_root: String,
     pub llm: LlmConfig,
     pub heartbeat: HeartbeatConfig,
+    /// 远程 MCP 服务列表（Phase 5 MCP 客户端：md-agent 作为客户端主动连接的服务）
+    pub mcp_servers: Vec<crate::mcp_client::McpServerConfig>,
 }
 
 impl Default for Config {
@@ -81,6 +83,7 @@ impl Default for Config {
             kb_root: crate::kb::kb_root().to_string_lossy().into_owned(),
             llm: LlmConfig::default(),
             heartbeat: HeartbeatConfig::default(),
+            mcp_servers: Vec::new(),
         }
     }
 }

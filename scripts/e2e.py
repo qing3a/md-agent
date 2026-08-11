@@ -52,8 +52,16 @@ def main():
     kb = tmp / "kb"
     kb.mkdir()
     cfg = tmp / "config.json"
-    cfg.write_text(json.dumps({"kb_root": str(kb), "llm": {"endpoint": "", "model": "", "api_key": ""},
-                               "heartbeat": {"enabled": False, "interval_secs": 5}}), encoding="utf-8")
+    mock_mcp_path = str(pathlib.Path(__file__).resolve().parent / "mock_mcp.py")
+    cfg.write_text(json.dumps({
+        "kb_root": str(kb),
+        "llm": {"endpoint": "", "model": "", "api_key": ""},
+        "heartbeat": {"enabled": False, "interval_secs": 5},
+        "mcp_servers": [{
+            "id": "mock", "name": "Mock MCP", "transport": "stdio",
+            "command": sys.executable, "args": [mock_mcp_path], "enabled": True,
+        }],
+    }), encoding="utf-8")
 
     proc = subprocess.Popen([BIN, "--no-tray"], env={**os.environ, "MD_AGENT_CONFIG": str(cfg), "MD_AGENT_PORT": str(PORT)},
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -155,6 +163,42 @@ def main():
         # M3：提问前记忆召回（只读）——MEMORY.md 已在巩固器段落写入内容
         r = api("/api/memory/recall", "POST", {"q": "记忆", "k": 3})
         ok("recall 返回 hits", "hits" in r and isinstance(r["hits"], list))
+
+        print("== MCP 客户端（mock stdio server）==")
+        # Phase 5：config 已含 mcp_servers（mock_mcp.py，懒启动）
+        r = api("/api/mcp/servers")
+        ok("mcp servers 列表含 mock", any(s.get("id") == "mock" for s in r.get("servers", [])), )
+        # 工具注册表动态合并（懒启动触发 spawn + initialize + tools/list）
+        r = api("/api/tools")
+        names = [t["name"] for t in r]
+        ok("tools 注册表含 mcp__mock.echo", "mcp__mock.echo" in names)
+        ok("tools 注册表含 mcp__mock.status", "mcp__mock.status" in names)
+        # 远程工具执行
+        r = api("/api/mcp/call", "POST", {"name": "mcp__mock.add", "args": {"a": 2, "b": 3}})
+        ok("mcp call 执行 add", r.get("ok") is True and r.get("result") == "5")
+        r = api("/api/mcp/call", "POST", {"name": "mcp__mock.echo", "args": {"message": "你好"}})
+        ok("mcp call 执行 echo", r.get("ok") is True and r.get("result") == "echo: 你好")
+        # 未知工具 → 502
+        try:
+            api("/api/mcp/call", "POST", {"name": "mcp__mock.nope"})
+            ok("未知工具应报错", False)
+        except urllib.error.HTTPError as e:
+            ok("未知工具应报错", e.code == 502)
+        # 测试连接端点
+        r = api("/api/mcp/servers/mock/test", "POST")
+        ok("test 连接返回工具清单", r.get("ok") is True and len(r.get("tools", [])) == 3)
+        # 停用 → 注册表移除 + 断连
+        api("/api/mcp/servers/mock", "PATCH", {"enabled": False})
+        r = api("/api/tools")
+        ok("停用后注册表移除 mcp__", not any(t["name"].startswith("mcp__mock") for t in r))
+        r = api("/api/mcp/servers")
+        s = next((s for s in r.get("servers", []) if s.get("id") == "mock"), None)
+        ok("停用后状态已停用", s is not None and s.get("enabled") is False)
+        # 删除
+        r = api("/api/mcp/servers/mock", "DELETE")
+        ok("删除服务", r.get("ok") is True)
+        r = api("/api/mcp/servers")
+        ok("删除后列表清空", not any(s.get("id") == "mock" for s in r.get("servers", [])))
 
         print("== 语义召回链路（mock embed）==")
         # M1：起 mock embedding（scripts/mock_embed.py，OpenAI 兼容 /v1/embeddings）→

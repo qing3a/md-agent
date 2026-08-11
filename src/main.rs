@@ -16,6 +16,7 @@ mod kb;
 mod llm;
 mod market;
 mod mcp;
+mod mcp_client;
 mod memory;
 mod search;
 mod server;

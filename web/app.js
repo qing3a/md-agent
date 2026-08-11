@@ -4189,11 +4189,11 @@
     }
     // 收敛面板兼容：/view ops、/view pending、/view audit 统一映射到「自动化」面板（旧引用不失效）
     if (arg === 'ops' || arg === 'pending' || arg === 'audit') arg = 'automation';
-    if (arg === 'graph' || arg === 'board' || arg === 'automation' || arg === 'market' || arg === 'skills' || arg === 'home' || arg === 'sessions' || arg === 'config' || arg === 'onboarding') {
+    if (arg === 'graph' || arg === 'board' || arg === 'automation' || arg === 'market' || arg === 'skills' || arg === 'home' || arg === 'sessions' || arg === 'config' || arg === 'onboarding' || arg === 'mcp') {
       const path = arg === 'config' ? '/config.html' : arg === 'onboarding' ? '/onboarding.html' : '/views/' + arg + '.html';
       const r = await fetch(path);
       if (!r.ok) throw new Error('内置视图加载失败: HTTP ' + r.status);
-      const titles = { graph: '知识图谱', board: '任务看板', automation: '自动化（控制 / 审核 / 运营数据）', market: '工作台', skills: '技能（SkillHub 商店）', home: '功能首页', sessions: '历史会话', config: '设置', onboarding: '开始使用' };
+      const titles = { graph: '知识图谱', board: '任务看板', automation: '自动化（控制 / 审核 / 运营数据）', market: '工作台', skills: '技能（SkillHub 商店）', home: '功能首页', sessions: '历史会话', config: '设置', onboarding: '开始使用', mcp: '远程 MCP' };
       openView(titles[arg], await r.text(), null, { kind: 'builtin', arg });
       return;
     }

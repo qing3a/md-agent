@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>远程 MCP</title>
+<style>
+  :root { --bg:var(--bg); --panel:var(--chip); --panel2:var(--chip3); --line:var(--chip4);
+          --fg:var(--fg); --fg2:var(--fg2, #a6adc8); --dim:var(--muted); --muted2:var(--muted2, #585b70);
+          --green:var(--ok); --red:var(--danger); --yellow:var(--warn); --blue:var(--accent);
+          --cyan:var(--info); --purple:var(--purple); }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg);
+    font: 13px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 12px; padding: 8px 14px;
+    border-bottom: 1px solid var(--line); }
+  h1 { font-size: 15px; color: var(--cyan); }
+  header .hint { font-size: 11px; color: var(--dim); }
+  .sp { flex: 1; }
+  button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 7px; padding: 5px 14px; font-size: 12px; cursor: pointer; font-family: inherit; }
+  button:hover { border-color: var(--blue); color: var(--blue); }
+  button.primary { background: var(--green); color: var(--bg3); border-color: var(--green); font-weight: 600; }
+  button.danger { background: var(--red); color: var(--bg3); border-color: var(--red); font-weight: 600; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  #main { flex: 1; overflow: auto; padding: 12px 14px; }
+  .card { margin-bottom: 12px; border: 1px solid var(--line); border-radius: 10px;
+    background: var(--panel); padding: 12px 14px; }
+  .card h2 { font-size: 13px; color: var(--fg2); margin-bottom: 10px; }
+  input { background: var(--bg3); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 7px; padding: 6px 10px; font-size: 12.5px; outline: none; font-family: inherit; }
+  input:focus { border-color: var(--blue); }
+  .form-row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  .form-row input { flex: 1; min-width: 160px; }
+  .tip { font-size: 11.5px; color: var(--dim); }
+  .empty { color: var(--dim); font-size: 12.5px; padding: 8px 0; }
+  .svc { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px;
+    background: var(--panel2, #1e1e30); }
+  .svc-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .svc-head b { font-size: 13px; }
+  .svc-head code { font-size: 11px; color: var(--dim); background: var(--bg3); border-radius: 5px; padding: 1px 6px; }
+  .svc-head .st { font-size: 11px; color: var(--dim); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .dot.on { background: var(--green); }
+  .dot.off { background: var(--yellow); }
+  .dot.dis { background: var(--muted2); }
+  .svc-meta { font-size: 11.5px; color: var(--dim); margin-top: 4px; word-break: break-all; }
+  .svc .tools { font-size: 11.5px; color: var(--cyan); margin-top: 4px; }
+  .fail { font-size: 11.5px; color: var(--red); margin-top: 4px; word-break: break-all; }
+  .test-out { margin-top: 8px; padding: 8px 10px; background: var(--bg3); border-radius: 8px;
+    font-size: 11.5px; color: var(--fg2); max-height: 220px; overflow: auto; white-space: pre-wrap; }
+  .test-out .ok { color: var(--green); }
+  .test-out .err { color: var(--red); }
+  #toast { position: fixed; top: 10px; right: 14px; max-width: 70%; padding: 8px 14px; border-radius: 8px;
+    font-size: 12px; background: var(--bg3); border: 1px solid var(--line); color: var(--fg2);
+    opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 9; }
+  #toast.show { opacity: 1; }
+  #toast.err { border-color: var(--red); color: var(--red); }
+  button[data-act="del"].confirming { background: var(--red); color: var(--bg3); border-color: var(--red); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔌 远程 MCP</h1>
+  <span class="hint">md-agent 作为客户端连接的外部服务（只消费远程，不对外暴露）</span>
+  <span class="sp"></span>
+  <button id="btn-refresh">刷新</button>
+</header>
+<div id="main">
+  <div id="toast"></div>
+  <section class="card">
+    <h2>添加服务</h2>
+    <div class="form-row">
+      <input id="in-name" placeholder="名称（如 猎头 ERP）">
+      <input id="in-command" placeholder="启动命令（如 node / python / 完整路径）">
+      <input id="in-args" placeholder="参数（空格分隔，如 bff/mcp-server.js）">
+    </div>
+    <div class="form-row">
+      <input id="in-id" placeholder="服务 id（可选，默认用名称；仅字母数字/下划线/短横线）">
+      <button id="btn-add" class="primary">添加</button>
+    </div>
+    <div class="tip">工具以 mcp__&lt;id&gt;.&lt;工具&gt; 进入 Agent 工具生态（/api/tools 注册表）；子 Agent 不继承远程工具（防递归）。添加后点「测试」验证连接。</div>
+  </section>
+  <section class="card">
+    <h2>服务列表</h2>
+    <div id="svc-list"><div class="empty">加载中…</div></div>
+  </section>
+</div>
+<script>
+  const $ = (s) => document.querySelector(s);
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const api = (path, opts) => fetch(path, opts || {}).then(async (r) => {
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    return j;
+  });
+  let toastTimer = null;
+  const toast = (msg, isErr) => {
+    const t = $('#toast');
+    t.textContent = msg;
+    t.className = 'show' + (isErr ? ' err' : '');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { t.className = ''; }, 2600);
+  };
+
+  async function load() {
+    const btn = $('#btn-refresh');
+    btn.disabled = true;
+    try {
+      const r = await api('/api/mcp/servers');
+      const svcs = r.servers || [];
+      const list = $('#svc-list');
+      if (!svcs.length) {
+        list.innerHTML = '<div class="empty">未配置远程服务——在上方添加本地 stdio 服务（如自研 ERP 的 MCP 壳）。</div>';
+        return;
+      }
+      list.innerHTML = svcs.map((s) => `
+        <div class="svc" data-id="${esc(s.id)}">
+          <div class="svc-head">
+            <span class="dot ${s.enabled ? (s.connected ? 'on' : 'off') : 'dis'}"></span>
+            <b>${esc(s.name)}</b>
+            <code>${esc(s.id)}</code>
+            <span class="st">${s.enabled ? (s.connected ? '已连接' : '未连接') : '已停用'}</span>
+            <span class="sp"></span>
+            <button data-act="test">测试</button>
+            <button data-act="toggle">${s.enabled ? '停用' : '启用'}</button>
+            <button data-act="del" class="danger">删除</button>
+          </div>
+          <div class="svc-meta">命令：${esc(s.command)} ${esc((s.args || []).join(' '))}</div>
+          ${s.failure ? '<div class="fail">⚠ ' + esc(s.failure) + '</div>' : ''}
+          ${s.connected ? '<div class="tools">' + s.tools + ' 个工具</div>' : ''}
+        </div>`).join('');
+    } catch (e) {
+      $('#svc-list').innerHTML = '<div class="fail">加载失败：' + esc(e.message) + '</div>';
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  $('#btn-add').addEventListener('click', async () => {
+    const name = $('#in-name').value.trim();
+    const command = $('#in-command').value.trim();
+    if (!name || !command) { toast('名称与命令必填', true); return; }
+    const args = $('#in-args').value.trim().split(/\s+/).filter(Boolean);
+    const id = $('#in-id').value.trim();
+    try {
+      await api('/api/mcp/servers', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, name, command, args, transport: 'stdio', enabled: true }) });
+      $('#in-name').value = ''; $('#in-command').value = ''; $('#in-args').value = ''; $('#in-id').value = '';
+      toast('已添加：' + name);
+      await load();
+    } catch (e) { toast('添加失败：' + e.message, true); }
+  });
+
+  let confirmTimer = null;
+  $('#svc-list').addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('button[data-act]');
+    if (!btn) return;
+    const svc = btn.closest('.svc');
+    const id = svc.dataset.id;
+    const act = btn.dataset.act;
+    try {
+      if (act === 'test') {
+        btn.disabled = true;
+        const old = btn.textContent;
+        btn.textContent = '测试中…';
+        try {
+          const r = await api('/api/mcp/servers/' + encodeURIComponent(id) + '/test', { method: 'POST' });
+          const tools = (r.tools || []).map((t) => '· ' + t.name + ' — ' + t.desc).join('\n');
+          const out = document.createElement('div');
+          out.className = 'test-out';
+          out.innerHTML = '<div class="ok">✓ 连接成功，' + (r.tools || []).length + ' 个工具：</div>\n' + esc(tools || '(无工具)');
+          const oldOut = svc.querySelector('.test-out');
+          if (oldOut) oldOut.remove();
+          svc.appendChild(out);
+        } finally {
+          btn.textContent = old;
+          btn.disabled = false;
+        }
+        await load();
+        return;
+      }
+      if (act === 'toggle') {
+        const cur = svc.querySelector('.st').textContent;
+        await api('/api/mcp/servers/' + encodeURIComponent(id), { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: !(cur === '已停用') }) });
+        toast(cur === '已停用' ? '已启用：' + id : '已停用：' + id);
+      } else if (act === 'del') {
+        // 沙箱无 confirm → 二次点击确认
+        if (!btn.classList.contains('confirming')) {
+          btn.classList.add('confirming');
+          const old = btn.textContent;
+          btn.textContent = '确认删除';
+          clearTimeout(confirmTimer);
+          confirmTimer = setTimeout(() => { btn.classList.remove('confirming'); btn.textContent = old; }, 3000);
+          return;
+        }
+        await api('/api/mcp/servers/' + encodeURIComponent(id), { method: 'DELETE' });
+        toast('已删除：' + id);
+      }
+      await load();
+    } catch (e) { toast('操作失败：' + e.message, true); }
+  });
+
+  $('#btn-refresh').addEventListener('click', load);
+  load();
+</script>
+</body>
+</html>
