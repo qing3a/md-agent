@@ -4,7 +4,7 @@
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/qing3a/md-agent)
 
-> 全本机数据存储、明文可审计双层Markdown知识库，原生兼容标准MCP协议，可无缝对接DeepSeek及各类主流推理服务，内置技能市场、任务编排、可视化网页终端，附带完整猎头行业私有化工作台落地方案
+> md-agent 是一个为本地 Agent 应用提供 Provider、MCP、Skill、明文可审计记忆等多种支持的开源桌面版应用，希望获得内测机会来为 DSH 提供第一时间支持
 
 本地优先的通用Agent运行底座，三大重点：
 
