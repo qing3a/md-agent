@@ -536,6 +536,24 @@ async fn embed_stats(State(st): State<AppState>, headers: HeaderMap) -> Response
 
 // ---------- Agent 回路（Phase 4 M2：Rust 侧 run_loop + 子 agent，LLM 端口 / 工具执行端口） ----------
 
+/// Agent 协议系统提示词（messages 无 system 时注入，2026-08-11 修复）：
+/// 直调 /api/agent（curl / mcp agent.spawn / 无 system 的调用方）时 LLM 不知道软工具协议，
+/// 不会主动调工具——与前端 buildGuidePrefix 注入同构；工具清单与 AgentExec 实现一一对应。
+/// 前端 M4 模式自带 system（含工具清单/检索片段）时不重复注入（前缀缓存不炸）。
+const AGENT_SYSTEM_PROMPT: &str = "\
+你是知识库 Agent。需要查证知识库时，只输出一行 JSON（不要其他文字、不要代码块）：{\"tool\":\"<工具名>\",\"args\":{...}}\n\
+可用工具：\n\
+- search：关键词检索知识库（args: q=检索词, layer=notes|all）\n\
+- memory_search：全库检索，含 L1 记忆与会话归档（args: q）\n\
+- read_l1：读取 L1 规范/记忆文件（args: file=KB.md|FRAMEWORK.md|RULES.md|MEMORY.md|INDEX.md|memory_summary.md, q=定位词）\n\
+- read_file：读取 KB 内 .md 文件（args: path=相对 KB 根路径）\n\
+- graph.linked / graph.backlinks：文档 [[双链]] 出链/入链（args: path）\n\
+- graph.paths：两文档关联路径（args: from, to）\n\
+- risk.check：风控预警扫描（无参数）\n\
+- tasks：任务列表（无参数）\n\
+- pending.list：待审提案列表（无参数）\n\
+工具返回后基于返回内容直接回答（引用标注 [工具:名称]）；不需要工具时直接回答。每次只调用一个工具，执行完继续，直到能回答。";
+
 /// LlmPort 实现：接 crate::llm::chat（OpenAI 兼容非流式），解析软工具调用 JSON。
 struct AgentLlm {
     endpoint: String,
@@ -549,10 +567,13 @@ impl crate::agent::LlmPort for AgentLlm {
         messages: &'a [crate::agent::AgentMessage],
     ) -> futures_util::future::BoxFuture<'a, Result<crate::agent::LlmReply, String>> {
         Box::pin(async move {
-            let msgs: Vec<Value> = messages
+            let mut msgs: Vec<Value> = messages
                 .iter()
                 .map(|m| json!({ "role": m.role, "content": m.content }))
                 .collect();
+            if !messages.iter().any(|m| m.role == "system") {
+                msgs.insert(0, json!({ "role": "system", "content": AGENT_SYSTEM_PROMPT }));
+            }
             let body = json!({ "messages": msgs, "stream": false });
             let v = crate::llm::chat(&self.endpoint, &self.model, &self.api_key, body).await?;
             let full = v
@@ -776,7 +797,7 @@ async fn agent_handler(State(st): State<AppState>, headers: HeaderMap, Json(body
 
     // stream=true → SSE 流式：后台任务跑回路，AgentEvent 经 mpsc 推送；结束时发 done 事件
     if body.stream {
-        return agent_stream(&root, &llm, &exec, &body, max_turns).await;
+        return agent_stream(&root, &llm, &body, max_turns).await;
     }
 
     let result = if body.spawn {
@@ -836,7 +857,6 @@ fn to_msgs(arr: &[Value]) -> Vec<crate::agent::AgentMessage> {
 async fn agent_stream(
     root: &Path,
     llm: &AgentLlm,
-    exec: &AgentExec,
     body: &AgentBody,
     max_turns: usize,
 ) -> Response {
@@ -845,7 +865,11 @@ async fn agent_stream(
     use std::convert::Infallible;
     use std::pin::Pin;
 
-    let (tx, rx) = tokio::sync::mpsc::channel::<crate::agent::AgentEvent>(16);
+    // 事件回调持有 tx 的克隆；原始 tx 保留给收尾 done/error 事件。
+    // 用 unbounded_channel：send 是同步非阻塞的（不 panic、不丢事件），适配同步 on_event 回调；
+    // 之前 blocking_send 在 tokio 运行时内会 panic（Cannot block within runtime）——回归测试发现。
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<crate::agent::AgentEvent>();
+    let tx_events = tx.clone();
     let llm2 = AgentLlm {
         endpoint: llm.endpoint.clone(),
         model: llm.model.clone(),
@@ -857,12 +881,10 @@ async fn agent_stream(
     let seed = to_msgs(&body.seed);
     let spawn = body.spawn;
     let root2 = root.to_path_buf();
-    // 事件回调持有 tx 的克隆；原始 tx 保留给收尾 done/error 事件（blocking_send 是 &self）
-    let tx_events = tx.clone();
 
     tokio::spawn(async move {
         let mut on_event = move |ev: crate::agent::AgentEvent| {
-            let _ = tx_events.blocking_send(ev);
+            let _ = tx_events.send(ev);
         };
         let res = if spawn {
             crate::agent::spawn_subagent_streaming(
@@ -886,7 +908,7 @@ async fn agent_stream(
             crate::agent::run_loop_streaming(&llm2, &exec2, &policy, msgs, max_turns, &mut on_event).await
         };
         let _ = match res {
-            Ok(r) => tx.blocking_send(crate::agent::AgentEvent::ToolResult {
+            Ok(r) => tx.send(crate::agent::AgentEvent::ToolResult {
                 name: "__done".to_string(),
                 ok: true,
                 result: serde_json::json!({
@@ -895,7 +917,7 @@ async fn agent_stream(
                 })
                 .to_string(),
             }),
-            Err(e) => tx.blocking_send(crate::agent::AgentEvent::ToolResult {
+            Err(e) => tx.send(crate::agent::AgentEvent::ToolResult {
                 name: "__error".to_string(),
                 ok: false,
                 result: e,
@@ -916,7 +938,7 @@ async fn agent_stream(
 
 /// mpsc Receiver → Stream（axum Sse 消费，持有所有权）；Receiver 关闭时流结束
 fn async_stream_fn(
-    mut rx: tokio::sync::mpsc::Receiver<crate::agent::AgentEvent>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<crate::agent::AgentEvent>,
 ) -> impl futures_util::Stream<Item = crate::agent::AgentEvent> + Send {
     futures_util::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|ev| (ev, rx))

@@ -84,7 +84,7 @@ fn emit(on_event: &mut Option<&mut (dyn FnMut(AgentEvent) + Send)>, ev: AgentEve
 
 // ---------- 工具策略（子 agent 受限白名单，对齐 ZCode evaluateMemoryAgentToolPolicy） ----------
 
-/// 子 agent 只读工具白名单（全部映射到 KB 内只读端点）
+/// 子 agent 只读工具白名单（全部映射到 KB 内只读端点；与 server.rs AgentExec 实现一一对应）
 pub const READ_ONLY_TOOLS: &[&str] = &[
     "search",
     "memory_search",
@@ -98,11 +98,10 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "pending.list",
 ];
 
-/// 受限写工具（仅 .md 且 resolve 后仍在 KB 根内）
-pub const WRITE_MD_TOOLS: &[&str] = &["write_file", "edit_file"];
-
 /// 工具策略：硬白名单校验（防越权/防递归/防路径穿越）。
 /// 拒绝一律返回理由（回填给 LLM 让它调整），不静默。
+/// 注意：白名单 = 执行器（server.rs AgentExec）实际实现的工具；写工具（write_file/edit_file）
+/// 本轮执行器未实现，不在白名单——策略放行但执行器报错会中断整个回路（2026-08-11 修复）。
 #[derive(Debug, Clone)]
 pub struct ToolPolicy {
     /// KB 根（路径校验基准；子 agent 只允许操作本库内）
@@ -133,17 +132,8 @@ impl ToolPolicy {
             }
             return Ok(());
         }
-        if WRITE_MD_TOOLS.contains(&name) {
-            let p = args.get("file_path").and_then(Value::as_str).unwrap_or("");
-            if self.resolve_md(p).is_none() {
-                return Err(format!(
-                    "工具 {name} 被策略拒绝：仅允许 KB 根内 .md 文件（路径越界：{p}）"
-                ));
-            }
-            return Ok(());
-        }
         Err(format!(
-            "工具 {name} 被策略拒绝：不在子 agent 白名单（仅只读工具 + 受限 .md 写）"
+            "工具 {name} 被策略拒绝：不在子 agent 白名单（仅只读工具）"
         ))
     }
 
@@ -169,7 +159,7 @@ fn tool_result_message(name: &str, result: &str) -> AgentMessage {
 /// 工具被策略拒绝时的回填消息（LLM 据此调整策略）
 fn tool_rejected_message(name: &str, reason: &str) -> AgentMessage {
     AgentMessage::user(format!(
-        "工具 {name} 被策略拒绝：{reason}\n请基于已获取信息回答，或改用白名单内工具（只读：search/memory_search/read_l1/read_file/graph.*/risk.check/tasks/pending.list；受限写：write_file/edit_file 仅 .md）。"
+        "工具 {name} 被策略拒绝：{reason}\n请基于已获取信息回答，或改用白名单内工具（只读：search/memory_search/read_l1/read_file/graph.*/risk.check/tasks/pending.list）。"
     ))
 }
 
@@ -234,16 +224,33 @@ async fn run_loop_inner<L: LlmPort + ?Sized, E: ToolExecutor + ?Sized>(
                     name: tc.name.clone(),
                     args: tc.args.clone(),
                 });
-                let result = exec.exec(&tc.name, &tc.args).await?;
-                emit(on_event, AgentEvent::ToolResult {
-                    name: tc.name.clone(),
-                    ok: true,
-                    result: result.clone(),
-                });
-                messages.push(AgentMessage::assistant(reply.answer));
-                messages.push(tool_result_message(&tc.name, &result));
-                tool_calls += 1;
-                tools_used.push(tc.name.clone());
+                // 执行失败不回填 `?` 中断整个回路（2026-08-11：如文件 IO 错误），
+                // 与策略拒绝同构：错误回填给 LLM，让它调整或基于已有信息收敛
+                match exec.exec(&tc.name, &tc.args).await {
+                    Ok(result) => {
+                        emit(on_event, AgentEvent::ToolResult {
+                            name: tc.name.clone(),
+                            ok: true,
+                            result: result.clone(),
+                        });
+                        messages.push(AgentMessage::assistant(reply.answer));
+                        messages.push(tool_result_message(&tc.name, &result));
+                        tool_calls += 1;
+                        tools_used.push(tc.name.clone());
+                    }
+                    Err(e) => {
+                        emit(on_event, AgentEvent::ToolResult {
+                            name: tc.name.clone(),
+                            ok: false,
+                            result: e.clone(),
+                        });
+                        messages.push(AgentMessage::assistant(reply.answer));
+                        messages.push(AgentMessage::user(format!(
+                            "工具 {name} 执行失败：{e}\n请基于已获取信息回答，或换用白名单内其他工具。",
+                            name = tc.name
+                        )));
+                    }
+                }
             }
             Err(reason) => {
                 emit(on_event, AgentEvent::ToolResult {
@@ -489,18 +496,20 @@ mod tests {
     }
 
     #[test]
-    fn policy_rejects_path_traversal_write() {
-        // write_file 穿越根外 → 拒绝（resolve_in_kb 防穿越）
-        let d = tmp_kb("traversal");
+    fn policy_rejects_all_write_tools() {
+        // 2026-08-11：写工具（write_file/edit_file）执行器未实现 → 白名单不放行，
+        // 防「策略放行但执行器报未知工具」导致整个回路中断（502）
+        let d = tmp_kb("write");
         let policy = ToolPolicy::new(d.clone());
-        let ok = policy.evaluate("write_file", &json!({"file_path": "notes/好.md"}));
-        assert!(ok.is_ok());
-        let bad = policy.evaluate("write_file", &json!({"file_path": "../outside.md"}));
-        assert!(bad.is_err(), "穿越路径必须拒绝: {bad:?}");
-        let not_md = policy.evaluate("write_file", &json!({"file_path": "notes/坏.txt"}));
-        assert!(not_md.is_err(), "非 .md 必须拒绝");
-        let no_arg = policy.evaluate("write_file", &json!({}));
-        assert!(no_arg.is_err());
+        for name in ["write_file", "edit_file"] {
+            assert!(
+                policy.evaluate(name, &json!({"file_path": "notes/好.md"})).is_err(),
+                "{name} 应被拒绝（执行器未实现）"
+            );
+            assert!(policy.evaluate(name, &json!({})).is_err());
+        }
+        // 合法只读工具仍放行
+        assert!(policy.evaluate("search", &json!({"q": "x"})).is_ok());
     }
 
     #[test]
@@ -549,6 +558,37 @@ mod tests {
             8,
         )).unwrap_err();
         assert!(err.contains("上游挂了"));
+    }
+
+    #[test]
+    fn tool_error_feeds_back_and_continues() {
+        // 2026-08-11：执行器失败（如文件 IO 错误/未知工具）→ 错误回填 LLM 继续循环，
+        // 不中断整个回路（此前 exec 错误 `?` 直接中止 → 502）
+        struct FailExec;
+        impl ToolExecutor for FailExec {
+            fn exec<'a>(&'a self, name: &'a str, _args: &'a Value) -> BoxFuture<'a, Result<String, String>> {
+                Box::pin(async move { Err(format!("{name} 执行失败（磁盘故障）")) })
+            }
+        }
+        let llm = MockLlm::new(vec![
+            Ok(tool("read_file", json!({"path": "notes/坏.md"}))),
+            Ok(LlmReply { answer: "失败后收敛回答".into(), tool: None }),
+        ]);
+        let exec = FailExec;
+        let policy = ToolPolicy::new(tmp_kb("toole"));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let r = rt.block_on(run_loop(
+            &llm,
+            &exec,
+            &policy,
+            vec![AgentMessage::user("读文件")],
+            8,
+        )).unwrap();
+        assert_eq!(r.answer, "失败后收敛回答", "执行失败后循环继续并正常回答");
+        assert_eq!(r.tool_calls, 0, "失败的调用不计入成功数");
+        // 回填消息里带失败原因（LLM 可见，可据此调整）
+        let calls = llm.calls.lock().unwrap();
+        assert!(calls.len() >= 2);
     }
 
     // ---------- spawn_subagent（独立上下文 + 防递归） ----------

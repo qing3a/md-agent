@@ -635,7 +635,8 @@ pub fn approve_pending(root: &Path, rel: &str, edited: Option<&str>) -> Result<(
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        fs::write(&dst, body).map_err(|e| format!("写入目标失败: {e}"))?;
+        // 剥离前导提示行（2026-08-11：dream 提案正文带「> 后台巩固」说明行，替换目标时不得混入）
+        fs::write(&dst, strip_leading_hints(body)).map_err(|e| format!("写入目标失败: {e}"))?;
         fs::remove_file(&src_canon).map_err(|e| e.to_string())?;
         Ok((target.to_string(), Some("巩固提案已替换目标文件".to_string())))
     } else if stripped.starts_with("DECISION.") {
@@ -771,36 +772,57 @@ pub fn reject_pending(root: &Path, rel: &str) -> Result<usize, String> {
     Ok(1)
 }
 
+/// 前导提示行判断：空行或 "> " 引用块（LLM 提案的说明行，不进目标文件）
+fn hint_line(l: &str) -> bool {
+    let t = l.trim();
+    t.is_empty() || t.starts_with('>')
+}
+
+/// 剥离正文前导提示行（"> " 引用块与空行）——auto_land 替换目标文件前使用，
+/// 防「> 人工核对」类说明混入 MEMORY.md 等落盘内容
+fn strip_leading_hints(content: &str) -> String {
+    content
+        .lines()
+        .skip_while(|l| hint_line(l))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// 计算记忆条目将追加的文本（行级 diff 预览与落盘共用）
 fn memory_added_text(old: &str, content: &str) -> String {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    // 剥离前导提示行（2026-08-11：LLM 提案的 "> 说明" 引用块与空行不进记忆）
-    let mut started = false;
-    let body: String = content
-        .lines()
-        .filter(|l| {
-            let t = l.trim_start();
-            if !started && (t.starts_with('>') || t.is_empty()) {
-                return false; // 跳过提示行与前导空行
-            }
-            started = true;
-            true
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let entry = body.trim();
+    // 剥离前导提示行与提案 frontmatter（2026-08-11：auto_land 直读提案文件，
+    // LLM 提案的 "> 说明" 引用块、frontmatter 块（--- 到 ---）与空行一律不进记忆，只沉淀正文）
+    let lines: Vec<&str> = content.lines().collect();
+    let skip_hints = |mut i: usize| {
+        while i < lines.len() && hint_line(lines[i]) {
+            i += 1;
+        }
+        i
+    };
+    let mut start = skip_hints(0);
+    if start < lines.len() && lines[start].trim() == "---" {
+        start += 1; // 越过开头 ---
+        while start < lines.len() && lines[start].trim() != "---" {
+            start += 1;
+        }
+        // start 指向闭合 ---（无闭合则停在末尾，正文为空）
+        start = start.min(lines.len());
+        start = skip_hints(start + 1).min(lines.len()); // 越过闭合 --- 并再跳提示行/空行
+    }
+    let entry = lines[start..].join("\n").trim().to_string();
     if entry.is_empty() {
-        return String::new(); // 只有提示行无可沉淀
+        return String::new(); // 只有提示行/空 frontmatter 无可沉淀
     }
     let strip = |s: &str| -> String { s.trim_start_matches(['-', '#', ' ']).trim().to_string() };
     if entry.starts_with("## ") {
         format!("\n\n{entry}\n")
     } else if old.contains(&format!("## {today}")) {
-        format!("\n- {}\n", strip(entry))
+        format!("\n- {}\n", strip(&entry))
     } else if old.trim().is_empty() {
-        format!("# 记忆\n\n## {today}\n- {}\n", strip(entry))
+        format!("# 记忆\n\n## {today}\n- {}\n", strip(&entry))
     } else {
-        format!("\n\n## {today}\n- {}\n", strip(entry))
+        format!("\n\n## {today}\n- {}\n", strip(&entry))
     }
 }
 
@@ -1121,6 +1143,21 @@ mod tests {
     }
 
     #[test]
+    fn approve_consolidate_strips_hint_lines() {
+        // 2026-08-11：dream 提案正文带「> 后台巩固」说明行 → 替换目标时剥离，不混入 MEMORY.md
+        let root = test_root("consolhint");
+        ensure_layout(&root).unwrap();
+        fs::write(root.join("MEMORY.md"), "# M\n- 旧内容\n").unwrap();
+        write(&root, "pending/CONSOLIDATE.DREAM-h.md",
+            "---\ntype: consolidate\ntarget: MEMORY.md\n---\n\n> 后台巩固（LLM 生成，批准前请人工核对）。批准后替换 MEMORY.md。\n\n# 记忆\n- 新内容\n");
+        approve_pending(&root, "pending/CONSOLIDATE.DREAM-h.md", None).unwrap();
+        let mem = fs::read_to_string(root.join("MEMORY.md")).unwrap();
+        assert!(!mem.contains("后台巩固"), "提示行不得混入目标: {mem}");
+        assert!(mem.contains("新内容") && !mem.contains("旧内容"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn approve_note_memory_regression() {
         let root = test_root("regr");
         ensure_layout(&root).unwrap();
@@ -1390,6 +1427,25 @@ mod tests {
         assert!(a.contains("双骨架方案"), "正文内容保留");
         // 只有提示行 → 无可沉淀
         assert_eq!(memory_added_text("# 记忆\n", "> 仅提示行\n"), "");
+        fs::remove_dir_all(&std::env::temp_dir().join("md-agent-ut-rej")).ok();
+    }
+
+    #[test]
+    fn memory_added_strips_proposal_frontmatter() {
+        // 2026-08-11：auto_land 直读提案文件（write_extract_proposal 落盘带 frontmatter），
+        // frontmatter 块（--- 到 ---）与提示行不得混入 MEMORY.md
+        let prop = "---\ntype: memory\ntitle: 会话记忆提炼\nupdated: 2026-08-11\nsource: sessions/test.md\ntarget: MEMORY.md\n---\n\n\
+                    > 会话收尾提炼（LLM 生成，批准前请人工核对）。\n\n\
+                    ## 决策\n- 双骨架方案\n\n## 经验\n- 及时沉淀\n";
+        let a = memory_added_text("", prop);
+        assert!(!a.contains("type: memory"), "frontmatter 不进记忆: {a}");
+        assert!(!a.contains("target: MEMORY.md"), "frontmatter 不进记忆: {a}");
+        assert!(!a.contains("人工核对"), "提示行剥离");
+        assert!(!a.contains("> 会话"), "引用块不进记忆");
+        assert!(a.contains("## 决策") && a.contains("双骨架方案"), "正文小节保留: {a}");
+        assert!(a.contains("## 经验") && a.contains("及时沉淀"), "正文小节保留: {a}");
+        // 只有 frontmatter + 提示行 → 无可沉淀
+        assert_eq!(memory_added_text("# 记忆\n", "---\ntype: memory\ntarget: MEMORY.md\n---\n\n> 仅提示行\n"), "");
         fs::remove_dir_all(&std::env::temp_dir().join("md-agent-ut-rej")).ok();
     }
 
