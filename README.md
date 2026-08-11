@@ -4,7 +4,7 @@
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/qing3a/md-agent)
 
-> 本地MCP应用基座，已原生开发猎头协作软件；知识明文可审计，AI写入必经人审
+> 全本机数据存储、明文可审计双层Markdown知识库，原生兼容标准MCP协议，可无缝对接DeepSeek及各类主流推理服务，内置技能市场、任务编排、可视化网页终端，附带完整猎头行业私有化工作台落地方案
 
 本地优先的通用Agent运行底座，三大重点：
 
